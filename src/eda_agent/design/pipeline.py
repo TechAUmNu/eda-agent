@@ -54,7 +54,9 @@ from eda_agent.design._wiring import (
     _label_justification,
     _net_representation,
     _part_parameters,
+    _point_on_segment,
     _power_port_orientation,
+    _wire_arms_at,
 )
 from eda_agent.design.composer import compose_layout
 from eda_agent.design.force_directed import _hard_shove_pass
@@ -64,6 +66,7 @@ from eda_agent.design.layout import (
     order_rail_columns,
 )
 from eda_agent.design.plan import DesignPlan, Net, PartStatus
+from eda_agent.design.port_glyphs import resolve_port_glyph_collisions
 from eda_agent.design.priors import (
     align_to_neighbour_axes,
     apply_placement_priors,
@@ -1747,18 +1750,10 @@ def build_best_canvas_from_plan(
     # wire drawn before this point would enter the scored objective and
     # steer placement. Run here and the selection above is bit-identical
     # to what it was without the feature.
+    moved = resolved = 0
     try:
         moved = upgrade_repair_ports_to_stubs(best_result.canvas, plan)
         if moved:
-            # Designator/value text was placed against the OLD glyph
-            # positions, inside the per-candidate build. Moving a glyph
-            # afterwards can drop it on text that was routed around where
-            # it used to be, so re-run the placer over the finished
-            # canvas. It only moves text (never symbols or wires) and is
-            # documented as invisible to the scorer, so this is safe
-            # after selection.
-            from eda_agent.design.text_placement import place_instance_text
-            place_instance_text(best_result.canvas)
             best_result.notes.append(PipelineNote(
                 severity="info",
                 text=(
@@ -1773,6 +1768,36 @@ def build_best_canvas_from_plan(
                 "repair-port stub upgrade failed and was skipped: "
                 f"{type(stub_exc).__name__}: {stub_exc}"),
         ))
+    # AFTER the stub upgrade, on the winner only, for the same reason: it
+    # moves wire, so running it per candidate would steer selection. It
+    # repairs what the upgrade produced too (the PWR_IN_USB repair glyph
+    # whose bar the 200-mil stub parked 20 mil under the EN wire).
+    try:
+        resolved = resolve_port_glyph_collisions(
+            best_result.canvas, plan, port_hints=port_hints)
+        if resolved:
+            best_result.notes.append(PipelineNote(
+                severity="info",
+                text=(
+                    f"{resolved} power port glyph(s) moved, re-aimed or "
+                    f"shared because their bar or name sat on other copper"),
+            ))
+    except Exception as gl_exc:
+        best_result.notes.append(PipelineNote(
+            severity="warning",
+            text=(
+                "glyph collision pass failed and was skipped: "
+                f"{type(gl_exc).__name__}: {gl_exc}"),
+        ))
+    if moved or resolved:
+        # Designator/value text was placed against the OLD glyph
+        # positions, inside the per-candidate build. Moving a glyph
+        # afterwards can drop it on text that was routed around where it
+        # used to be, so re-run the placer over the finished canvas. It
+        # only moves text (never symbols or wires) and is documented as
+        # invisible to the scorer, so this is safe after selection.
+        from eda_agent.design.text_placement import place_instance_text
+        place_instance_text(best_result.canvas)
     # LAST-MILE PIN CHECK on the finished winner, after the trim and the
     # stub upgrade: every pin of a net that leaves its sheet (or is
     # force_label) must end in that net's name. A warning, not a failure:
@@ -2252,29 +2277,6 @@ def _detect_routing_shorts(
                 f"{what}; Altium would merge the nets; emit blocked."
             ),
         ))
-
-
-def _point_on_segment(
-    px: int, py: int, x1: int, y1: int, x2: int, y2: int,
-) -> bool:
-    """True iff (px, py) lies on the axis-aligned segment (x1,y1)-(x2,y2).
-
-    Only axis-aligned segments are emitted by the router, so we only
-    handle horizontal / vertical. Endpoints count as 'on' the segment
-    (the wire physically terminates there); coincident endpoint is the
-    most common shorting mode.
-    """
-    if x1 == x2:
-        if px != x1:
-            return False
-        lo, hi = (y1, y2) if y1 <= y2 else (y2, y1)
-        return lo <= py <= hi
-    if y1 == y2:
-        if py != y1:
-            return False
-        lo, hi = (x1, x2) if x1 <= x2 else (x2, x1)
-        return lo <= px <= hi
-    return False  # diagonal segments not used by the router
 
 
 def _name_anchor(net_actions, segs, stubs):
@@ -3402,20 +3404,12 @@ def _wire_sheet(
     # A branch is counted in ARMS: a wire ending at the point is one arm,
     # a wire passing through it is two. Three arms is a real T or cross;
     # two is a corner or a join and needs no dot.
+    # The rule itself is _wiring._wire_arms_at, shared with the post-
+    # selection glyph pass so both decide dots the same way.
+    wire_tuples = [(w.x1, w.y1, w.x2, w.y2, w.net) for w in wire_objects]
+
     def _arms_at(px: int, py: int, net: str) -> int:
-        arms = 0
-        for w in wire_objects:
-            if w.net != net:
-                continue
-            if (px, py) in ((w.x1, w.y1), (w.x2, w.y2)):
-                arms += 1
-            elif w.x1 == w.x2 and px == w.x1 and (
-                    min(w.y1, w.y2) < py < max(w.y1, w.y2)):
-                arms += 2
-            elif w.y1 == w.y2 and py == w.y1 and (
-                    min(w.x1, w.x2) < px < max(w.x1, w.x2)):
-                arms += 2
-        return arms
+        return _wire_arms_at(wire_tuples, px, py, net)
 
     for jx, jy in _detect_junctions(sheet_wire_segments):
         nets_here = {w.net for w in wire_objects

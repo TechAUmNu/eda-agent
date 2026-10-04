@@ -107,6 +107,14 @@ def _place_sheet(canvas: SchematicCanvas, sheet_name: str) -> int:
         # than the glyph itself -- measured on the buck output corner,
         # where VOUT/GND port names overlapped J2's and R2's values
         # because only the glyph rectangle was an obstacle.
+        if getattr(p, "orientation", None) is not None:
+            # A re-aimed glyph (post-selection pass): its drawn extent.
+            # The symmetric box below covers up and down glyphs but not a
+            # sideways name, which runs 120 + its width to one side.
+            from eda_agent.design.port_glyphs import glyph_extent
+            gx1, gy1, gx2, gy2 = glyph_extent(p)
+            ports.append((gx1 - 25, gy1 - 25, gx2 + 25, gy2 + 25))
+            continue
         half_w = max(150, (CHAR_W * len(p.text)) // 2 + 25)
         ports.append((p.x - half_w, p.y - 350, p.x + half_w, p.y + 350))
     texts = []

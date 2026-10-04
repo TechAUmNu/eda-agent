@@ -37,6 +37,11 @@ from eda_agent.design.canvas import (
     WireSegment,
     pin_direction_world,
 )
+from eda_agent.design.port_glyphs import (
+    DESCENT,
+    glyph_geometry,
+    natural_orientation,
+)
 
 
 @dataclass
@@ -353,7 +358,15 @@ def _svg_power_port_body(
     GND-style ports point downward; VCC-style ports point upward. This
     is the visual convention every EDA tool uses and matches Altium's
     default symbol set well enough for an iteration preview.
+
+    A glyph the post-selection pass re-aimed (``orientation`` set and not
+    the style's natural direction) is drawn from ``port_glyphs`` geometry
+    instead; every other glyph takes the unchanged path below, so the SVG
+    of an untouched sheet is byte-identical.
     """
+    o = getattr(port, "orientation", None)
+    if o is not None and o % 4 != natural_orientation(port.style):
+        return _svg_oriented_power_port(port, sheet, options)
     cx, cy = _mils_to_svg(port.x, port.y, sheet, options)
     color = options.power_port_stroke
     style = port.style.lower()
@@ -409,3 +422,36 @@ def _svg_power_port_body(
         f'fill="{color}" text-anchor="{label_anchor}">'
         f"{html_escape(port.text)}</text>"
     )
+
+
+def _svg_oriented_power_port(
+    port: PowerPort, sheet: Sheet, options: RenderOptions,
+) -> str:
+    """A re-aimed glyph: the ink and name box ``port_glyphs`` checks.
+
+    Drawing from the same geometry the collision test uses is what keeps
+    the preview and the check from drifting apart. The text stays upright;
+    a sideways glyph's name starts (or, pointing left, ends) beyond it.
+    """
+    color = options.power_port_stroke
+    ink, tb = glyph_geometry(port.x, port.y, port.text, port.style,
+                             port.orientation)
+    out = []
+    for (x1, y1, x2, y2) in ink:
+        ax, ay = _mils_to_svg(x1, y1, sheet, options)
+        bx, by = _mils_to_svg(x2, y2, sheet, options)
+        out.append(
+            f'<line x1="{ax:.1f}" y1="{ay:.1f}" x2="{bx:.1f}" y2="{by:.1f}" '
+            f'stroke="{color}" stroke-width="2"/>')
+    o = port.orientation % 4
+    if o == 0:
+        tx_mils, anchor = tb[0], "start"
+    elif o == 2:
+        tx_mils, anchor = tb[2], "end"
+    else:
+        tx_mils, anchor = (tb[0] + tb[2]) // 2, "middle"
+    tx, ty = _mils_to_svg(tx_mils, tb[1] + DESCENT, sheet, options)
+    out.append(
+        f'<text x="{tx:.1f}" y="{ty:.1f}" font-size="10" fill="{color}" '
+        f'text-anchor="{anchor}">{html_escape(port.text)}</text>')
+    return "".join(out)

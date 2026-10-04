@@ -1,0 +1,2386 @@
+{
+ "source": "multiviewer carrier PWR_IN_USB preview canvas (layout engine at 0266d07, tuned hints), cut to the window around the defect",
+ "sheet": {
+  "name": "PWR_IN_USB",
+  "size": "A2"
+ },
+ "window": [
+  15600,
+  7400,
+  21000,
+  12000
+ ],
+ "symbols": {
+  "carrier.SchLib|C_0805": {
+   "lib_path": "carrier.SchLib",
+   "lib_ref": "C_0805",
+   "pins": [
+    {
+     "designator": "1",
+     "name": "1",
+     "x": 100,
+     "y": 0,
+     "orientation": 2,
+     "length": 100,
+     "electrical_type": "passive",
+     "hidden": false
+    },
+    {
+     "designator": "2",
+     "name": "2",
+     "x": 300,
+     "y": 0,
+     "orientation": 0,
+     "length": 100,
+     "electrical_type": "passive",
+     "hidden": false
+    }
+   ],
+   "body_bbox": {
+    "x_min": 50,
+    "y_min": -50,
+    "x_max": 350,
+    "y_max": 50
+   },
+   "designator_prefix": "U",
+   "description": "Capacitor, 0805 (2012 metric); value/voltage/dielectric set per instance"
+  },
+  "carrier.SchLib|R_0402": {
+   "lib_path": "carrier.SchLib",
+   "lib_ref": "R_0402",
+   "pins": [
+    {
+     "designator": "1",
+     "name": "1",
+     "x": 100,
+     "y": 0,
+     "orientation": 2,
+     "length": 100,
+     "electrical_type": "passive",
+     "hidden": false
+    },
+    {
+     "designator": "2",
+     "name": "2",
+     "x": 300,
+     "y": 0,
+     "orientation": 0,
+     "length": 100,
+     "electrical_type": "passive",
+     "hidden": false
+    }
+   ],
+   "body_bbox": {
+    "x_min": 50,
+    "y_min": -50,
+    "x_max": 350,
+    "y_max": 50
+   },
+   "designator_prefix": "U",
+   "description": "Resistor, 0402 (1005 metric); value set per instance"
+  },
+  "carrier.SchLib|D_Zener_SOT-23": {
+   "lib_path": "carrier.SchLib",
+   "lib_ref": "D_Zener_SOT-23",
+   "pins": [
+    {
+     "designator": "1",
+     "name": "A",
+     "x": 100,
+     "y": 0,
+     "orientation": 2,
+     "length": 100,
+     "electrical_type": "passive",
+     "hidden": false
+    },
+    {
+     "designator": "3",
+     "name": "K",
+     "x": 300,
+     "y": 0,
+     "orientation": 0,
+     "length": 100,
+     "electrical_type": "passive",
+     "hidden": false
+    },
+    {
+     "designator": "2",
+     "name": "NC",
+     "x": 300,
+     "y": -200,
+     "orientation": 0,
+     "length": 100,
+     "electrical_type": "passive",
+     "hidden": false
+    }
+   ],
+   "body_bbox": {
+    "x_min": 50,
+    "y_min": -250,
+    "x_max": 350,
+    "y_max": 50
+   },
+   "designator_prefix": "U",
+   "description": "Diode, Zener, SOT-23 (pin 1 A, pin 2 NC, pin 3 K)"
+  },
+  "carrier.SchLib|LED_0603": {
+   "lib_path": "carrier.SchLib",
+   "lib_ref": "LED_0603",
+   "pins": [
+    {
+     "designator": "2",
+     "name": "A",
+     "x": 100,
+     "y": 0,
+     "orientation": 2,
+     "length": 100,
+     "electrical_type": "passive",
+     "hidden": false
+    },
+    {
+     "designator": "1",
+     "name": "K",
+     "x": 300,
+     "y": 0,
+     "orientation": 0,
+     "length": 100,
+     "electrical_type": "passive",
+     "hidden": false
+    }
+   ],
+   "body_bbox": {
+    "x_min": 50,
+    "y_min": -50,
+    "x_max": 350,
+    "y_max": 50
+   },
+   "designator_prefix": "U",
+   "description": "LED, 0603; pin 1 = K (cathode, pad 1), pin 2 = A; colour/MPN set per instance"
+  },
+  "carrier.SchLib|LM74800QDRRRQ1": {
+   "lib_path": "carrier.SchLib",
+   "lib_ref": "LM74800QDRRRQ1",
+   "pins": [
+    {
+     "designator": "10",
+     "name": "VS",
+     "x": 200,
+     "y": 0,
+     "orientation": 2,
+     "length": 200,
+     "electrical_type": "power",
+     "hidden": false
+    },
+    {
+     "designator": "2",
+     "name": "A",
+     "x": 200,
+     "y": -100,
+     "orientation": 2,
+     "length": 200,
+     "electrical_type": "input",
+     "hidden": false
+    },
+    {
+     "designator": "12",
+     "name": "C",
+     "x": 200,
+     "y": -200,
+     "orientation": 2,
+     "length": 200,
+     "electrical_type": "input",
+     "hidden": false
+    },
+    {
+     "designator": "3",
+     "name": "VSNS",
+     "x": 200,
+     "y": -300,
+     "orientation": 2,
+     "length": 200,
+     "electrical_type": "input",
+     "hidden": false
+    },
+    {
+     "designator": "4",
+     "name": "SW",
+     "x": 200,
+     "y": -400,
+     "orientation": 2,
+     "length": 200,
+     "electrical_type": "input",
+     "hidden": false
+    },
+    {
+     "designator": "5",
+     "name": "OV",
+     "x": 200,
+     "y": -500,
+     "orientation": 2,
+     "length": 200,
+     "electrical_type": "input",
+     "hidden": false
+    },
+    {
+     "designator": "6",
+     "name": "EN/UVLO",
+     "x": 200,
+     "y": -600,
+     "orientation": 2,
+     "length": 200,
+     "electrical_type": "input",
+     "hidden": false
+    },
+    {
+     "designator": "9",
+     "name": "OUT",
+     "x": 200,
+     "y": -700,
+     "orientation": 2,
+     "length": 200,
+     "electrical_type": "input",
+     "hidden": false
+    },
+    {
+     "designator": "7",
+     "name": "GND",
+     "x": 200,
+     "y": -800,
+     "orientation": 2,
+     "length": 200,
+     "electrical_type": "power",
+     "hidden": false
+    },
+    {
+     "designator": "13",
+     "name": "RTN",
+     "x": 200,
+     "y": -900,
+     "orientation": 2,
+     "length": 200,
+     "electrical_type": "passive",
+     "hidden": false
+    },
+    {
+     "designator": "1",
+     "name": "DGATE",
+     "x": 1300,
+     "y": 0,
+     "orientation": 0,
+     "length": 200,
+     "electrical_type": "output",
+     "hidden": false
+    },
+    {
+     "designator": "8",
+     "name": "HGATE",
+     "x": 1300,
+     "y": -100,
+     "orientation": 0,
+     "length": 200,
+     "electrical_type": "output",
+     "hidden": false
+    },
+    {
+     "designator": "11",
+     "name": "CAP",
+     "x": 1300,
+     "y": -200,
+     "orientation": 0,
+     "length": 200,
+     "electrical_type": "output",
+     "hidden": false
+    }
+   ],
+   "body_bbox": {
+    "x_min": 150,
+    "y_min": -950,
+    "x_max": 1350,
+    "y_max": 50
+   },
+   "designator_prefix": "U",
+   "description": "TI LM74800-Q1 ideal-diode / load-switch controller for back-to-back N-FETs, WSON-12 DRR with floating RTN pad (13)"
+  }
+ },
+ "instances": [
+  {
+   "refdes": "C195",
+   "lib": "carrier.SchLib|C_0805",
+   "x": 20400,
+   "y": 11900,
+   "rotation": 270
+  },
+  {
+   "refdes": "R170",
+   "lib": "carrier.SchLib|R_0402",
+   "x": 19800,
+   "y": 8700,
+   "rotation": 0
+  },
+  {
+   "refdes": "D111",
+   "lib": "carrier.SchLib|D_Zener_SOT-23",
+   "x": 19700,
+   "y": 8000,
+   "rotation": 270
+  },
+  {
+   "refdes": "D108",
+   "lib": "carrier.SchLib|LED_0603",
+   "x": 16900,
+   "y": 11700,
+   "rotation": 180
+  },
+  {
+   "refdes": "U115",
+   "lib": "carrier.SchLib|LM74800QDRRRQ1",
+   "x": 18800,
+   "y": 10200,
+   "rotation": 0
+  },
+  {
+   "refdes": "R168",
+   "lib": "carrier.SchLib|R_0402",
+   "x": 16900,
+   "y": 9800,
+   "rotation": 180
+  },
+  {
+   "refdes": "R169",
+   "lib": "carrier.SchLib|R_0402",
+   "x": 16200,
+   "y": 9100,
+   "rotation": 270
+  }
+ ],
+ "wires": [
+  {
+   "x1": 18500,
+   "y1": 9400,
+   "x2": 18800,
+   "y2": 9400,
+   "sheet": "PWR_IN_USB",
+   "net": "GND"
+  },
+  {
+   "x1": 20400,
+   "y1": 10800,
+   "x2": 20400,
+   "y2": 11200,
+   "sheet": "PWR_IN_USB",
+   "net": "GND"
+  },
+  {
+   "x1": 20400,
+   "y1": 11200,
+   "x2": 20400,
+   "y2": 11500,
+   "sheet": "PWR_IN_USB",
+   "net": "GND"
+  },
+  {
+   "x1": 16200,
+   "y1": 8000,
+   "x2": 16200,
+   "y2": 8400,
+   "sheet": "PWR_IN_USB",
+   "net": "GND"
+  },
+  {
+   "x1": 16200,
+   "y1": 8400,
+   "x2": 16200,
+   "y2": 8700,
+   "sheet": "PWR_IN_USB",
+   "net": "GND"
+  },
+  {
+   "x1": 16200,
+   "y1": 11700,
+   "x2": 16500,
+   "y2": 11700,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_PD_CAPMIS"
+  },
+  {
+   "x1": 18200,
+   "y1": 10100,
+   "x2": 18300,
+   "y2": 10100,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_PPHV"
+  },
+  {
+   "x1": 18300,
+   "y1": 10100,
+   "x2": 18800,
+   "y2": 10100,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_PPHV"
+  },
+  {
+   "x1": 18200,
+   "y1": 9900,
+   "x2": 18800,
+   "y2": 9900,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_PPHV"
+  },
+  {
+   "x1": 15900,
+   "y1": 11900,
+   "x2": 15900,
+   "y2": 12200,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_PD_LED_A"
+  },
+  {
+   "x1": 16900,
+   "y1": 11700,
+   "x2": 17200,
+   "y2": 11700,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_PD_LED_A"
+  },
+  {
+   "x1": 20300,
+   "y1": 10200,
+   "x2": 20600,
+   "y2": 10200,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_DGATE"
+  },
+  {
+   "x1": 16900,
+   "y1": 9800,
+   "x2": 17200,
+   "y2": 9800,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_SW"
+  },
+  {
+   "x1": 17200,
+   "y1": 9800,
+   "x2": 18100,
+   "y2": 9800,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_SW"
+  },
+  {
+   "x1": 18100,
+   "y1": 9800,
+   "x2": 18800,
+   "y2": 9800,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_SW"
+  },
+  {
+   "x1": 16200,
+   "y1": 9700,
+   "x2": 18000,
+   "y2": 9700,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_OV"
+  },
+  {
+   "x1": 18000,
+   "y1": 9700,
+   "x2": 18800,
+   "y2": 9700,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_OV"
+  },
+  {
+   "x1": 16200,
+   "y1": 9800,
+   "x2": 16500,
+   "y2": 9800,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_OV"
+  },
+  {
+   "x1": 16200,
+   "y1": 9100,
+   "x2": 16200,
+   "y2": 9400,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_OV"
+  },
+  {
+   "x1": 16200,
+   "y1": 9400,
+   "x2": 16200,
+   "y2": 9800,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_OV"
+  },
+  {
+   "x1": 14600,
+   "y1": 9600,
+   "x2": 17900,
+   "y2": 9600,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_EN"
+  },
+  {
+   "x1": 17900,
+   "y1": 9600,
+   "x2": 18800,
+   "y2": 9600,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_EN"
+  },
+  {
+   "x1": 20300,
+   "y1": 10100,
+   "x2": 20700,
+   "y2": 10100,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_HGATE"
+  },
+  {
+   "x1": 19500,
+   "y1": 8700,
+   "x2": 19800,
+   "y2": 8700,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_HGATE"
+  },
+  {
+   "x1": 19700,
+   "y1": 7300,
+   "x2": 19700,
+   "y2": 7600,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_HGATE"
+  },
+  {
+   "x1": 17700,
+   "y1": 10200,
+   "x2": 17800,
+   "y2": 10200,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_VS"
+  },
+  {
+   "x1": 17800,
+   "y1": 10200,
+   "x2": 18800,
+   "y2": 10200,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_VS"
+  },
+  {
+   "x1": 17700,
+   "y1": 10000,
+   "x2": 18800,
+   "y2": 10000,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_VS"
+  },
+  {
+   "x1": 20400,
+   "y1": 11900,
+   "x2": 20400,
+   "y2": 12200,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_VS"
+  },
+  {
+   "x1": 20300,
+   "y1": 10000,
+   "x2": 20800,
+   "y2": 10000,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_CAP"
+  },
+  {
+   "x1": 20800,
+   "y1": 10000,
+   "x2": 21700,
+   "y2": 10000,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_CAP"
+  },
+  {
+   "x1": 20200,
+   "y1": 8700,
+   "x2": 20500,
+   "y2": 8700,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_DVDT"
+  },
+  {
+   "x1": 20500,
+   "y1": 8700,
+   "x2": 21300,
+   "y2": 8700,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_DVDT"
+  },
+  {
+   "x1": 18500,
+   "y1": 9000,
+   "x2": 18500,
+   "y2": 9400,
+   "sheet": "PWR_IN_USB",
+   "net": "GND"
+  },
+  {
+   "x1": 18200,
+   "y1": 9900,
+   "x2": 18200,
+   "y2": 10500,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_PPHV"
+  },
+  {
+   "x1": 15900,
+   "y1": 11900,
+   "x2": 17200,
+   "y2": 11900,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_PD_LED_A"
+  },
+  {
+   "x1": 17200,
+   "y1": 11700,
+   "x2": 17200,
+   "y2": 11900,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_PD_LED_A"
+  },
+  {
+   "x1": 17700,
+   "y1": 10000,
+   "x2": 17700,
+   "y2": 10600,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_USB_VS"
+  },
+  {
+   "x1": 18800,
+   "y1": 9500,
+   "x2": 18600,
+   "y2": 9500,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_VIN_PROT"
+  },
+  {
+   "x1": 19700,
+   "y1": 8000,
+   "x2": 19700,
+   "y2": 8200,
+   "sheet": "PWR_IN_USB",
+   "net": "PWR_VIN_PROT"
+  }
+ ],
+ "labels": [
+  {
+   "text": "PWR_PD_CAPMIS",
+   "x": 16200,
+   "y": 11700,
+   "orientation": 0,
+   "sheet": "PWR_IN_USB"
+  },
+  {
+   "text": "PWR_USB_DGATE",
+   "x": 20600,
+   "y": 10200,
+   "orientation": 0,
+   "sheet": "PWR_IN_USB"
+  },
+  {
+   "text": "PWR_USB_HGATE",
+   "x": 20700,
+   "y": 10100,
+   "orientation": 0,
+   "sheet": "PWR_IN_USB"
+  },
+  {
+   "text": "PWR_USB_HGATE",
+   "x": 19500,
+   "y": 8700,
+   "orientation": 0,
+   "sheet": "PWR_IN_USB"
+  }
+ ],
+ "power_ports": [
+  {
+   "text": "GND",
+   "x": 18500,
+   "y": 9000,
+   "style": "gnd_power",
+   "sheet": "PWR_IN_USB"
+  },
+  {
+   "text": "GND",
+   "x": 20400,
+   "y": 10800,
+   "style": "gnd_power",
+   "sheet": "PWR_IN_USB"
+  },
+  {
+   "text": "GND",
+   "x": 16200,
+   "y": 8000,
+   "style": "gnd_power",
+   "sheet": "PWR_IN_USB"
+  },
+  {
+   "text": "PWR_USB_PPHV",
+   "x": 18200,
+   "y": 10500,
+   "style": "bar",
+   "sheet": "PWR_IN_USB"
+  },
+  {
+   "text": "PWR_USB_VS",
+   "x": 17700,
+   "y": 10600,
+   "style": "bar",
+   "sheet": "PWR_IN_USB"
+  },
+  {
+   "text": "PWR_VIN_PROT",
+   "x": 18600,
+   "y": 9500,
+   "style": "bar",
+   "sheet": "PWR_IN_USB"
+  },
+  {
+   "text": "PWR_VIN_PROT",
+   "x": 19700,
+   "y": 8200,
+   "style": "bar",
+   "sheet": "PWR_IN_USB"
+  }
+ ],
+ "junctions": [
+  {
+   "x": 16200,
+   "y": 9700,
+   "sheet": "PWR_IN_USB"
+  },
+  {
+   "x": 17700,
+   "y": 10200,
+   "sheet": "PWR_IN_USB"
+  },
+  {
+   "x": 18200,
+   "y": 10100,
+   "sheet": "PWR_IN_USB"
+  }
+ ],
+ "plan": {
+  "spec": "Carrier block power from hardware/schematic_plan/power.json (round-2 verified plan).",
+  "summary": "ROUND 3c (2026-10-04): FAN2 - the SoM heatsink fan (owner: Puzhi 12 V 0.15 A 2-wire fan on an XH 2.54 plug, red = pin 2 = +12 V, as KFB J24) gets its own always-on regulated channel: U109 LMR54406FDBVR buck from PWR_V12 (11.99 V; 11.62-12.36 V regulated at >= about 12.8 V in, dropout below), enabled by PWR_EFUSE_PG through R146 1 MOhm with R147 4.7 MOhm hold-up, L107 33 uH, J105 JST B2B-XH-A (pin 2 = FAN2_12V). No FPGA, MCU, V3V3 or pin state can stop or slow it in the default build. Monitoring: R148 1.5 Ohm 2 W return shunt (D116 S1M bypass) and U116 TLV1821 synthetic-tach slicer -> FAN2_SENSE (J2.C60 / A9); optional DNP trim (C1109/D114/C1110 pump, D115 blocking diode, R1101-R1104) driven only by a TOGGLING FAN2_TRIM (J2.C57 / F9, 25 kHz-1 MHz). RTL R10 (ROTATING / UNDERSPEED / OVERSPEED / PULSING / NO_COMMUTATION / NO_CURRENT against a per-board learned full-speed reference) and R11 (",
+  "sheets": [
+   {
+    "name": "PWR_IN_USB",
+    "title": "POWER - USB-C PD 20 V input, USB ideal diode, MCU-gated takeover",
+    "size": "A2"
+   },
+   {
+    "name": "STUBS",
+    "title": "TEMPORARY cross-sheet stubs (delete after execute)",
+    "size": "A3"
+   }
+  ],
+  "parts": [
+   {
+    "refdes": "C195",
+    "lib_ref": "C_0805",
+    "lib_path": "carrier.SchLib",
+    "value": "0.22u 100V X7R 10%",
+    "mpn": "CL21B224KCFSFNE",
+    "manufacturer": "Samsung Electro-Mechanics",
+    "sheet": "PWR_IN_USB",
+    "footprint": "C_0805_2012Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/02336ea48ea44ca18c72517dd3cb7b47.pdf?productCode=C307542"
+   },
+   {
+    "refdes": "C198",
+    "lib_ref": "C_0603",
+    "lib_path": "carrier.SchLib",
+    "value": "10n 50V C0G 5%",
+    "mpn": "GRM1885C1H103JA01D",
+    "manufacturer": "Murata Electronics",
+    "sheet": "PWR_IN_USB",
+    "footprint": "C_0603_1608Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/a4d1e2744bd5d44ba57842651a3fd598.pdf?productCode=C85973"
+   },
+   {
+    "refdes": "R170",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "1.00k 1%",
+    "mpn": "UNI-ROYAL 0402WGF1001TCE",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C11702"
+   },
+   {
+    "refdes": "D111",
+    "lib_ref": "D_Zener_SOT-23",
+    "lib_path": "carrier.SchLib",
+    "value": "BZX84-C13,235",
+    "mpn": "BZX84-C13,235",
+    "manufacturer": "Nexperia",
+    "sheet": "PWR_IN_USB",
+    "footprint": "SOT-23-3_P0.95",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/6cd8164ad20709883ab8293a7d9bf7de.pdf?productCode=C550936"
+   },
+   {
+    "refdes": "D112",
+    "lib_ref": "D_SOT-23",
+    "lib_path": "carrier.SchLib",
+    "value": "BAS116,215",
+    "mpn": "BAS116,215",
+    "manufacturer": "Nexperia",
+    "sheet": "PWR_IN_USB",
+    "footprint": "SOT-23-3_P0.95",
+    "datasheet_url": "https://assets.nexperia.com/documents/data-sheet/BAS116.pdf"
+   },
+   {
+    "refdes": "J104",
+    "lib_ref": "USB4085-GF-A",
+    "lib_path": "carrier.SchLib",
+    "value": "USB4085-GF-A",
+    "mpn": "USB4085-GF-A",
+    "manufacturer": "GCT (Global Connector Technology)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "USB-C_16P_THT_GCT-USB4085",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/4a21f579cbd8ed3a7bfff8b4bbd49e52.pdf?productCode=C7095263"
+   },
+   {
+    "refdes": "F102",
+    "lib_ref": "F_2410",
+    "lib_path": "carrier.SchLib",
+    "value": "5A",
+    "mpn": "0453005.MR",
+    "manufacturer": "Littelfuse",
+    "sheet": "PWR_IN_USB",
+    "footprint": "F_NANO2_2410_6.1x2.7",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/ecd74ee295e2e3d7ddb74e9193c5d222.pdf?productCode=C178993"
+   },
+   {
+    "refdes": "D104",
+    "lib_ref": "TVS2200DRVR",
+    "lib_path": "carrier.SchLib",
+    "value": "TVS2200DRVR",
+    "mpn": "TVS2200DRVR",
+    "manufacturer": "Texas Instruments",
+    "sheet": "PWR_IN_USB",
+    "footprint": "WSON-6_2x2_P0.65_EP1x1.6_DRV",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/9174fd877f4f49d2aca3f6655a65851a.pdf?productCode=C523793"
+   },
+   {
+    "refdes": "D105",
+    "lib_ref": "D_Schottky_SMC",
+    "lib_path": "carrier.SchLib",
+    "value": "B540C-13-F",
+    "mpn": "B540C-13-F",
+    "manufacturer": "Diodes Incorporated",
+    "sheet": "PWR_IN_USB",
+    "footprint": "D_SMC_DO-214AB",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0b35057a5705662aaaaf16ec2990df33.pdf?productCode=C72264"
+   },
+   {
+    "refdes": "D106",
+    "lib_ref": "ESD2CAN24DBZRQ1",
+    "lib_path": "carrier.SchLib",
+    "value": "ESD2CAN24DBZRQ1",
+    "mpn": "ESD2CAN24DBZRQ1",
+    "manufacturer": "Texas Instruments",
+    "sheet": "PWR_IN_USB",
+    "footprint": "SOT-23-3_P0.95",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/7cad2bd154ceb3a34358b473401e82c8.pdf?productCode=C5736151"
+   },
+   {
+    "refdes": "C191",
+    "lib_ref": "C_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "330p 50V C0G 5%",
+    "mpn": "0402CG331J500NT",
+    "manufacturer": "FH (Guangdong Fenghua)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "C_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/09fe2daf22580a99fa7fea93ccb20fb7.pdf?productCode=C190579"
+   },
+   {
+    "refdes": "C192",
+    "lib_ref": "C_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "330p 50V C0G 5%",
+    "mpn": "0402CG331J500NT",
+    "manufacturer": "FH (Guangdong Fenghua)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "C_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/09fe2daf22580a99fa7fea93ccb20fb7.pdf?productCode=C190579"
+   },
+   {
+    "refdes": "C189",
+    "lib_ref": "C_1206",
+    "lib_path": "carrier.SchLib",
+    "value": "4.7u 50V X7R 10%",
+    "mpn": "CL31B475KBHNNNE",
+    "manufacturer": "Samsung Electro-Mechanics",
+    "sheet": "PWR_IN_USB",
+    "footprint": "C_1206_3216Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/02336ea48ea44ca18c72517dd3cb7b47.pdf?productCode=C51205"
+   },
+   {
+    "refdes": "C190",
+    "lib_ref": "C_1206",
+    "lib_path": "carrier.SchLib",
+    "value": "10u 50V X7R 10%",
+    "mpn": "CL31B106KBHNNNE",
+    "manufacturer": "Samsung Electro-Mechanics",
+    "sheet": "PWR_IN_USB",
+    "footprint": "C_1206_3216Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/a1390a51092e4f3c84866ab492516a00.pdf?productCode=C89632"
+   },
+   {
+    "refdes": "C193",
+    "lib_ref": "C_0805",
+    "lib_path": "carrier.SchLib",
+    "value": "22u 10V X5R 20%",
+    "mpn": "CL21A226MPQNNNE",
+    "manufacturer": "Samsung Electro-Mechanics",
+    "sheet": "PWR_IN_USB",
+    "footprint": "C_0805_2012Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/02336ea48ea44ca18c72517dd3cb7b47.pdf?productCode=C29277"
+   },
+   {
+    "refdes": "C194",
+    "lib_ref": "C_0603",
+    "lib_path": "carrier.SchLib",
+    "value": "10u 10V X5R 10%",
+    "mpn": "CL10A106KP8NNNC",
+    "manufacturer": "Samsung Electro-Mechanics",
+    "sheet": "PWR_IN_USB",
+    "footprint": "C_0603_1608Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/02336ea48ea44ca18c72517dd3cb7b47.pdf?productCode=C19702"
+   },
+   {
+    "refdes": "R173",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "56.0k / 24.0k / 24.0k / 100k / 100k / 24.0k / 200k / 10.0k",
+    "mpn": "UNI-ROYAL 0402WGF5602TCE (R173) / 0402WGF2402TCE (R174, R175, R178) / 0402WGF1003TCE (R176, R177) / 0402WGF2003TCE (R179) / 0402WGF1002TCE (R180)",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25796"
+   },
+   {
+    "refdes": "R174",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "56.0k / 24.0k / 24.0k / 100k / 100k / 24.0k / 200k / 10.0k",
+    "mpn": "UNI-ROYAL 0402WGF5602TCE (R173) / 0402WGF2402TCE (R174, R175, R178) / 0402WGF1003TCE (R176, R177) / 0402WGF2003TCE (R179) / 0402WGF1002TCE (R180)",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25796"
+   },
+   {
+    "refdes": "R175",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "56.0k / 24.0k / 24.0k / 100k / 100k / 24.0k / 200k / 10.0k",
+    "mpn": "UNI-ROYAL 0402WGF5602TCE (R173) / 0402WGF2402TCE (R174, R175, R178) / 0402WGF1003TCE (R176, R177) / 0402WGF2003TCE (R179) / 0402WGF1002TCE (R180)",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25796"
+   },
+   {
+    "refdes": "R176",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "56.0k / 24.0k / 24.0k / 100k / 100k / 24.0k / 200k / 10.0k",
+    "mpn": "UNI-ROYAL 0402WGF5602TCE (R173) / 0402WGF2402TCE (R174, R175, R178) / 0402WGF1003TCE (R176, R177) / 0402WGF2003TCE (R179) / 0402WGF1002TCE (R180)",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25796"
+   },
+   {
+    "refdes": "R177",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "56.0k / 24.0k / 24.0k / 100k / 100k / 24.0k / 200k / 10.0k",
+    "mpn": "UNI-ROYAL 0402WGF5602TCE (R173) / 0402WGF2402TCE (R174, R175, R178) / 0402WGF1003TCE (R176, R177) / 0402WGF2003TCE (R179) / 0402WGF1002TCE (R180)",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25796"
+   },
+   {
+    "refdes": "R178",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "56.0k / 24.0k / 24.0k / 100k / 100k / 24.0k / 200k / 10.0k",
+    "mpn": "UNI-ROYAL 0402WGF5602TCE (R173) / 0402WGF2402TCE (R174, R175, R178) / 0402WGF1003TCE (R176, R177) / 0402WGF2003TCE (R179) / 0402WGF1002TCE (R180)",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25796"
+   },
+   {
+    "refdes": "R179",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "56.0k / 24.0k / 24.0k / 100k / 100k / 24.0k / 200k / 10.0k",
+    "mpn": "UNI-ROYAL 0402WGF5602TCE (R173) / 0402WGF2402TCE (R174, R175, R178) / 0402WGF1003TCE (R176, R177) / 0402WGF2003TCE (R179) / 0402WGF1002TCE (R180)",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25796"
+   },
+   {
+    "refdes": "R180",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "56.0k / 24.0k / 24.0k / 100k / 100k / 24.0k / 200k / 10.0k",
+    "mpn": "UNI-ROYAL 0402WGF5602TCE (R173) / 0402WGF2402TCE (R174, R175, R178) / 0402WGF1003TCE (R176, R177) / 0402WGF2003TCE (R179) / 0402WGF1002TCE (R180)",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25796"
+   },
+   {
+    "refdes": "R181",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "10.0k 1%",
+    "mpn": "UNI-ROYAL 0402WGF1002TCE",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25744"
+   },
+   {
+    "refdes": "R182",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "47.0k 1%",
+    "mpn": "UNI-ROYAL 0402WGF4702TCE",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25792"
+   },
+   {
+    "refdes": "R183",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "47.0k 1%",
+    "mpn": "UNI-ROYAL 0402WGF4702TCE",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25792"
+   },
+   {
+    "refdes": "R184",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "2.2k 1%",
+    "mpn": "UNI-ROYAL 0402WGF2201TCE",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25879"
+   },
+   {
+    "refdes": "D108",
+    "lib_ref": "LED_0603",
+    "lib_path": "carrier.SchLib",
+    "value": "LTST-C191KRKT",
+    "mpn": "LTST-C191KRKT",
+    "manufacturer": "Lite-On",
+    "sheet": "PWR_IN_USB",
+    "footprint": "LED_0603_1608Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/d51ae7f7d38f4d17a71913c8d2030d23.pdf?productCode=C125099"
+   },
+   {
+    "refdes": "Q105",
+    "lib_ref": "BSS138PS,115",
+    "lib_path": "carrier.SchLib",
+    "value": "BSS138PS,115",
+    "mpn": "BSS138PS,115",
+    "manufacturer": "Nexperia",
+    "sheet": "PWR_IN_USB",
+    "footprint": "SOT-363_P0.65",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/e58a3e7fc5a9b5939561d8cb5906b64e.pdf?productCode=C193381"
+   },
+   {
+    "refdes": "U115",
+    "lib_ref": "LM74800QDRRRQ1",
+    "lib_path": "carrier.SchLib",
+    "value": "LM74800QDRRRQ1",
+    "mpn": "LM74800QDRRRQ1",
+    "manufacturer": "Texas Instruments",
+    "sheet": "PWR_IN_USB",
+    "footprint": "WSON-12_3x3_P0.5_EP1.3x2.5_DRR",
+    "datasheet_url": "https://www.ti.com/lit/ds/symlink/lm7480-q1.pdf"
+   },
+   {
+    "refdes": "C196",
+    "lib_ref": "C_0805",
+    "lib_path": "carrier.SchLib",
+    "value": "0.22u 100V X7R 10%",
+    "mpn": "CL21B224KCFSFNE",
+    "manufacturer": "Samsung Electro-Mechanics",
+    "sheet": "PWR_IN_USB",
+    "footprint": "C_0805_2012Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/02336ea48ea44ca18c72517dd3cb7b47.pdf?productCode=C307542"
+   },
+   {
+    "refdes": "C197",
+    "lib_ref": "C_0603",
+    "lib_path": "carrier.SchLib",
+    "value": "0.22u 50V X7R",
+    "mpn": "CL10B224KB8NNNC",
+    "manufacturer": "Samsung Electro-Mechanics",
+    "sheet": "PWR_IN_USB",
+    "footprint": "C_0603_1608Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/02336ea48ea44ca18c72517dd3cb7b47.pdf?productCode=C64705"
+   },
+   {
+    "refdes": "R168",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "180k 1% / 10.0k 1%",
+    "mpn": "UNI-ROYAL 0402WGF1803TCE (R168) / 0402WGF1002TCE (R169)",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25760"
+   },
+   {
+    "refdes": "R169",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "180k 1% / 10.0k 1%",
+    "mpn": "UNI-ROYAL 0402WGF1803TCE (R168) / 0402WGF1002TCE (R169)",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25760"
+   },
+   {
+    "refdes": "R171",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "100k 1% / 10.7k 1%",
+    "mpn": "UNI-ROYAL 0402WGF1003TCE (R171) / 0402WGF1072TCE (R172)",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C270654"
+   },
+   {
+    "refdes": "R172",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "100k 1% / 10.7k 1%",
+    "mpn": "UNI-ROYAL 0402WGF1003TCE (R171) / 0402WGF1072TCE (R172)",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C270654"
+   },
+   {
+    "refdes": "Q106",
+    "lib_ref": "BSS138PS,115",
+    "lib_path": "carrier.SchLib",
+    "value": "BSS138PS,115",
+    "mpn": "BSS138PS,115",
+    "manufacturer": "Nexperia",
+    "sheet": "PWR_IN_USB",
+    "footprint": "SOT-363_P0.65",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/e58a3e7fc5a9b5939561d8cb5906b64e.pdf?productCode=C193381"
+   },
+   {
+    "refdes": "Q107",
+    "lib_ref": "BSS138PS,115",
+    "lib_path": "carrier.SchLib",
+    "value": "BSS138PS,115",
+    "mpn": "BSS138PS,115",
+    "manufacturer": "Nexperia",
+    "sheet": "PWR_IN_USB",
+    "footprint": "SOT-363_P0.65",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/e58a3e7fc5a9b5939561d8cb5906b64e.pdf?productCode=C193381"
+   },
+   {
+    "refdes": "Q108",
+    "lib_ref": "BSS138PS,115",
+    "lib_path": "carrier.SchLib",
+    "value": "BSS138PS,115",
+    "mpn": "BSS138PS,115",
+    "manufacturer": "Nexperia",
+    "sheet": "PWR_IN_USB",
+    "footprint": "SOT-363_P0.65",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/e58a3e7fc5a9b5939561d8cb5906b64e.pdf?productCode=C193381"
+   },
+   {
+    "refdes": "R187",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "20.0k 1% / 10.0k 1%",
+    "mpn": "UNI-ROYAL 0402WGF2002TCE (R187) / 0402WGF1002TCE (R188)",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25765"
+   },
+   {
+    "refdes": "R188",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "20.0k 1% / 10.0k 1%",
+    "mpn": "UNI-ROYAL 0402WGF2002TCE (R187) / 0402WGF1002TCE (R188)",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25765"
+   },
+   {
+    "refdes": "R189",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "1.00M 1%",
+    "mpn": "UNI-ROYAL 0402WGF1004TCE",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C26083"
+   },
+   {
+    "refdes": "R190",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "4.70k 1%",
+    "mpn": "UNI-ROYAL 0402WGF4701TCE",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25900"
+   },
+   {
+    "refdes": "R191",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "100k 1%",
+    "mpn": "UNI-ROYAL 0402WGF1003TCE",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_USB",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C25741"
+   },
+   {
+    "refdes": "TP9601",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9602",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9603",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9017",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9018",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9019",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9022",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9023",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9024",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9025",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9026",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9027",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9028",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9029",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9030",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9031",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9032",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9033",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9604",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9034",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9035",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9036",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9037",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9038",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   }
+  ],
+  "nets": [
+   {
+    "name": "GND",
+    "pins": [
+     {
+      "refdes": "R188",
+      "pin": "2"
+     },
+     {
+      "refdes": "J104",
+      "pin": "A1"
+     },
+     {
+      "refdes": "J104",
+      "pin": "A12"
+     },
+     {
+      "refdes": "J104",
+      "pin": "B1"
+     },
+     {
+      "refdes": "J104",
+      "pin": "B12"
+     },
+     {
+      "refdes": "D104",
+      "pin": "1"
+     },
+     {
+      "refdes": "D104",
+      "pin": "2"
+     },
+     {
+      "refdes": "D104",
+      "pin": "3"
+     },
+     {
+      "refdes": "D104",
+      "pin": "7"
+     },
+     {
+      "refdes": "D105",
+      "pin": "2"
+     },
+     {
+      "refdes": "C189",
+      "pin": "2"
+     },
+     {
+      "refdes": "D106",
+      "pin": "3"
+     },
+     {
+      "refdes": "C191",
+      "pin": "2"
+     },
+     {
+      "refdes": "C192",
+      "pin": "2"
+     },
+     {
+      "refdes": "C190",
+      "pin": "2"
+     },
+     {
+      "refdes": "C193",
+      "pin": "2"
+     },
+     {
+      "refdes": "C194",
+      "pin": "2"
+     },
+     {
+      "refdes": "R174",
+      "pin": "2"
+     },
+     {
+      "refdes": "R176",
+      "pin": "2"
+     },
+     {
+      "refdes": "R178",
+      "pin": "2"
+     },
+     {
+      "refdes": "R180",
+      "pin": "2"
+     },
+     {
+      "refdes": "U115",
+      "pin": "7"
+     },
+     {
+      "refdes": "C195",
+      "pin": "2"
+     },
+     {
+      "refdes": "R169",
+      "pin": "2"
+     },
+     {
+      "refdes": "C198",
+      "pin": "2"
+     },
+     {
+      "refdes": "R172",
+      "pin": "2"
+     },
+     {
+      "refdes": "Q106",
+      "pin": "4"
+     },
+     {
+      "refdes": "C197",
+      "pin": "2"
+     },
+     {
+      "refdes": "R190",
+      "pin": "2"
+     },
+     {
+      "refdes": "Q107",
+      "pin": "1"
+     },
+     {
+      "refdes": "Q107",
+      "pin": "4"
+     },
+     {
+      "refdes": "TP9601",
+      "pin": "1"
+     }
+    ],
+    "is_ground": true
+   },
+   {
+    "name": "PWR_VIN_FUSED",
+    "pins": [
+     {
+      "refdes": "R187",
+      "pin": "1"
+     },
+     {
+      "refdes": "TP9602",
+      "pin": "1"
+     }
+    ],
+    "is_power": true
+   },
+   {
+    "name": "PWR_VIN_PROT",
+    "pins": [
+     {
+      "refdes": "U115",
+      "pin": "9"
+     },
+     {
+      "refdes": "D111",
+      "pin": "1"
+     },
+     {
+      "refdes": "TP9603",
+      "pin": "1"
+     }
+    ],
+    "is_power": true
+   },
+   {
+    "name": "MCU_I2C_SDA",
+    "pins": [
+     {
+      "refdes": "Q108",
+      "pin": "1"
+     },
+     {
+      "refdes": "TP9017",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "MCU_I2C_SCL",
+    "pins": [
+     {
+      "refdes": "Q108",
+      "pin": "4"
+     },
+     {
+      "refdes": "TP9018",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "CHASSIS",
+    "pins": [
+     {
+      "refdes": "J104",
+      "pin": "S1"
+     },
+     {
+      "refdes": "J104",
+      "pin": "S2"
+     },
+     {
+      "refdes": "J104",
+      "pin": "S3"
+     },
+     {
+      "refdes": "J104",
+      "pin": "S4"
+     },
+     {
+      "refdes": "TP9019",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "PWR_BARREL_SENSE",
+    "pins": [
+     {
+      "refdes": "R187",
+      "pin": "2"
+     },
+     {
+      "refdes": "R188",
+      "pin": "1"
+     },
+     {
+      "refdes": "R189",
+      "pin": "1"
+     },
+     {
+      "refdes": "Q107",
+      "pin": "2"
+     },
+     {
+      "refdes": "R191",
+      "pin": "1"
+     },
+     {
+      "refdes": "D112",
+      "pin": "3"
+     }
+    ]
+   },
+   {
+    "name": "PWR_USB_VBUS_RAW",
+    "pins": [
+     {
+      "refdes": "J104",
+      "pin": "A4"
+     },
+     {
+      "refdes": "J104",
+      "pin": "A9"
+     },
+     {
+      "refdes": "J104",
+      "pin": "B4"
+     },
+     {
+      "refdes": "J104",
+      "pin": "B9"
+     },
+     {
+      "refdes": "F102",
+      "pin": "1"
+     }
+    ],
+    "is_power": true
+   },
+   {
+    "name": "PWR_USB_CC1",
+    "pins": [
+     {
+      "refdes": "J104",
+      "pin": "A5"
+     },
+     {
+      "refdes": "D106",
+      "pin": "1"
+     },
+     {
+      "refdes": "C191",
+      "pin": "1"
+     },
+     {
+      "refdes": "TP9022",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "PWR_USB_CC2",
+    "pins": [
+     {
+      "refdes": "J104",
+      "pin": "B5"
+     },
+     {
+      "refdes": "D106",
+      "pin": "2"
+     },
+     {
+      "refdes": "C192",
+      "pin": "1"
+     },
+     {
+      "refdes": "TP9023",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "PWR_USB_VBUS",
+    "pins": [
+     {
+      "refdes": "F102",
+      "pin": "2"
+     },
+     {
+      "refdes": "D104",
+      "pin": "4"
+     },
+     {
+      "refdes": "D104",
+      "pin": "5"
+     },
+     {
+      "refdes": "D104",
+      "pin": "6"
+     },
+     {
+      "refdes": "D105",
+      "pin": "1"
+     },
+     {
+      "refdes": "C189",
+      "pin": "1"
+     }
+    ],
+    "is_power": true
+   },
+   {
+    "name": "PWR_PD_LDO3V3",
+    "pins": [
+     {
+      "refdes": "C193",
+      "pin": "1"
+     },
+     {
+      "refdes": "R173",
+      "pin": "1"
+     },
+     {
+      "refdes": "R175",
+      "pin": "1"
+     },
+     {
+      "refdes": "R177",
+      "pin": "1"
+     },
+     {
+      "refdes": "R179",
+      "pin": "1"
+     },
+     {
+      "refdes": "R181",
+      "pin": "1"
+     },
+     {
+      "refdes": "R182",
+      "pin": "1"
+     },
+     {
+      "refdes": "R183",
+      "pin": "1"
+     },
+     {
+      "refdes": "R184",
+      "pin": "1"
+     },
+     {
+      "refdes": "Q105",
+      "pin": "2"
+     },
+     {
+      "refdes": "Q105",
+      "pin": "5"
+     }
+    ],
+    "is_power": true
+   },
+   {
+    "name": "PWR_PD_ADCIN1",
+    "pins": [
+     {
+      "refdes": "R173",
+      "pin": "2"
+     },
+     {
+      "refdes": "R174",
+      "pin": "1"
+     },
+     {
+      "refdes": "TP9024",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "PWR_PD_ADCIN2",
+    "pins": [
+     {
+      "refdes": "R175",
+      "pin": "2"
+     },
+     {
+      "refdes": "R176",
+      "pin": "1"
+     },
+     {
+      "refdes": "TP9025",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "PWR_PD_LDO1V5",
+    "pins": [
+     {
+      "refdes": "C194",
+      "pin": "1"
+     },
+     {
+      "refdes": "TP9026",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "PWR_PD_ADCIN3",
+    "pins": [
+     {
+      "refdes": "R177",
+      "pin": "2"
+     },
+     {
+      "refdes": "R178",
+      "pin": "1"
+     },
+     {
+      "refdes": "TP9027",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "PWR_PD_CAPMIS",
+    "pins": [
+     {
+      "refdes": "D108",
+      "pin": "1"
+     },
+     {
+      "refdes": "TP9028",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "PWR_PD_ADCIN4",
+    "pins": [
+     {
+      "refdes": "R179",
+      "pin": "2"
+     },
+     {
+      "refdes": "R180",
+      "pin": "1"
+     },
+     {
+      "refdes": "TP9029",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "PWR_PD_SDA",
+    "pins": [
+     {
+      "refdes": "R182",
+      "pin": "2"
+     },
+     {
+      "refdes": "Q105",
+      "pin": "1"
+     },
+     {
+      "refdes": "TP9030",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "PWR_PD_SCL",
+    "pins": [
+     {
+      "refdes": "R183",
+      "pin": "2"
+     },
+     {
+      "refdes": "Q105",
+      "pin": "4"
+     },
+     {
+      "refdes": "TP9031",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "PWR_PD_SDA_ISO",
+    "pins": [
+     {
+      "refdes": "Q105",
+      "pin": "6"
+     },
+     {
+      "refdes": "Q108",
+      "pin": "6"
+     }
+    ]
+   },
+   {
+    "name": "PWR_PD_SCL_ISO",
+    "pins": [
+     {
+      "refdes": "Q105",
+      "pin": "3"
+     },
+     {
+      "refdes": "Q108",
+      "pin": "3"
+     }
+    ]
+   },
+   {
+    "name": "MCU_V3V3",
+    "pins": [
+     {
+      "refdes": "Q108",
+      "pin": "2"
+     },
+     {
+      "refdes": "Q108",
+      "pin": "5"
+     },
+     {
+      "refdes": "TP9032",
+      "pin": "1"
+     }
+    ],
+    "is_power": true
+   },
+   {
+    "name": "PWR_PD_FAULT_IN",
+    "pins": [
+     {
+      "refdes": "R181",
+      "pin": "2"
+     },
+     {
+      "refdes": "TP9033",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "PWR_USB_PPHV",
+    "pins": [
+     {
+      "refdes": "C190",
+      "pin": "1"
+     },
+     {
+      "refdes": "U115",
+      "pin": "2"
+     },
+     {
+      "refdes": "U115",
+      "pin": "3"
+     },
+     {
+      "refdes": "R171",
+      "pin": "1"
+     },
+     {
+      "refdes": "TP9604",
+      "pin": "1"
+     }
+    ],
+    "is_power": true
+   },
+   {
+    "name": "PWR_PD_LED_A",
+    "pins": [
+     {
+      "refdes": "R184",
+      "pin": "2"
+     },
+     {
+      "refdes": "D108",
+      "pin": "2"
+     }
+    ]
+   },
+   {
+    "name": "PWR_USB_DGATE",
+    "pins": [
+     {
+      "refdes": "U115",
+      "pin": "1"
+     },
+     {
+      "refdes": "TP9034",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "PWR_USB_SW",
+    "pins": [
+     {
+      "refdes": "U115",
+      "pin": "4"
+     },
+     {
+      "refdes": "R168",
+      "pin": "1"
+     }
+    ]
+   },
+   {
+    "name": "PWR_USB_OV",
+    "pins": [
+     {
+      "refdes": "U115",
+      "pin": "5"
+     },
+     {
+      "refdes": "R168",
+      "pin": "2"
+     },
+     {
+      "refdes": "R169",
+      "pin": "1"
+     }
+    ]
+   },
+   {
+    "name": "PWR_USB_EN",
+    "pins": [
+     {
+      "refdes": "U115",
+      "pin": "6"
+     },
+     {
+      "refdes": "R171",
+      "pin": "2"
+     },
+     {
+      "refdes": "R172",
+      "pin": "1"
+     },
+     {
+      "refdes": "Q106",
+      "pin": "6"
+     }
+    ]
+   },
+   {
+    "name": "PWR_USB_HGATE",
+    "pins": [
+     {
+      "refdes": "U115",
+      "pin": "8"
+     },
+     {
+      "refdes": "R170",
+      "pin": "1"
+     },
+     {
+      "refdes": "D111",
+      "pin": "3"
+     },
+     {
+      "refdes": "TP9035",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "PWR_USB_VS",
+    "pins": [
+     {
+      "refdes": "U115",
+      "pin": "10"
+     },
+     {
+      "refdes": "U115",
+      "pin": "12"
+     },
+     {
+      "refdes": "C195",
+      "pin": "1"
+     },
+     {
+      "refdes": "C196",
+      "pin": "2"
+     }
+    ],
+    "is_power": true
+   },
+   {
+    "name": "PWR_USB_CAP",
+    "pins": [
+     {
+      "refdes": "U115",
+      "pin": "11"
+     },
+     {
+      "refdes": "C196",
+      "pin": "1"
+     }
+    ]
+   },
+   {
+    "name": "PWR_USB_DVDT",
+    "pins": [
+     {
+      "refdes": "R170",
+      "pin": "2"
+     },
+     {
+      "refdes": "C198",
+      "pin": "1"
+     }
+    ]
+   },
+   {
+    "name": "PWR_USB_INH_G",
+    "pins": [
+     {
+      "refdes": "Q106",
+      "pin": "5"
+     },
+     {
+      "refdes": "R189",
+      "pin": "2"
+     },
+     {
+      "refdes": "C197",
+      "pin": "1"
+     },
+     {
+      "refdes": "D112",
+      "pin": "1"
+     }
+    ]
+   },
+   {
+    "name": "PWR_USB_INH_MID",
+    "pins": [
+     {
+      "refdes": "Q106",
+      "pin": "1"
+     },
+     {
+      "refdes": "Q106",
+      "pin": "3"
+     },
+     {
+      "refdes": "TP9036",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "PWR_USB_ARM_G",
+    "pins": [
+     {
+      "refdes": "Q106",
+      "pin": "2"
+     },
+     {
+      "refdes": "R191",
+      "pin": "2"
+     },
+     {
+      "refdes": "Q107",
+      "pin": "3"
+     }
+    ]
+   },
+   {
+    "name": "PWR_USB_TAKEOVER",
+    "pins": [
+     {
+      "refdes": "Q107",
+      "pin": "5"
+     },
+     {
+      "refdes": "R190",
+      "pin": "1"
+     },
+     {
+      "refdes": "TP9037",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "PWR_BARREL_PRESENT_N",
+    "pins": [
+     {
+      "refdes": "Q107",
+      "pin": "6"
+     },
+     {
+      "refdes": "TP9038",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   }
+  ]
+ }
+}

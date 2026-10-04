@@ -129,6 +129,53 @@ def _detect_junctions(
     return sorted(junctions)
 
 
+def _point_on_segment(
+    px: int, py: int, x1: int, y1: int, x2: int, y2: int,
+) -> bool:
+    """True iff (px, py) lies on the axis-aligned segment (x1,y1)-(x2,y2).
+
+    Only axis-aligned segments are emitted by the router, so we only
+    handle horizontal / vertical. Endpoints count as 'on' the segment
+    (the wire physically terminates there); coincident endpoint is the
+    most common shorting mode.
+    """
+    if x1 == x2:
+        if px != x1:
+            return False
+        lo, hi = (y1, y2) if y1 <= y2 else (y2, y1)
+        return lo <= py <= hi
+    if y1 == y2:
+        if py != y1:
+            return False
+        lo, hi = (x1, x2) if x1 <= x2 else (x2, x1)
+        return lo <= px <= hi
+    return False  # diagonal segments not used by the router
+
+def _wire_arms_at(
+    wires: "list[tuple[int, int, int, int, str]]",
+    px: int, py: int, net: str,
+) -> int:
+    """How many arms of ``net``'s wire meet at (px, py).
+
+    A wire ENDING at the point is one arm, a wire passing THROUGH it is
+    two. Three or more arms is a real T or cross and gets a junction dot;
+    two is a corner or a straight join and needs none. ``wires`` is a list
+    of ``(x1, y1, x2, y2, net)``. One rule for every pass that places
+    dots: _wire_sheet's junction filter and the post-selection glyph pass.
+    """
+    arms = 0
+    for (x1, y1, x2, y2, wnet) in wires:
+        if wnet != net:
+            continue
+        if (px, py) in ((x1, y1), (x2, y2)):
+            arms += 1
+        elif x1 == x2 and px == x1 and min(y1, y2) < py < max(y1, y2):
+            arms += 2
+        elif y1 == y2 and py == y1 and min(x1, x2) < px < max(x1, x2):
+            arms += 2
+    return arms
+
+
 def _cross_net_meeting_counts(
     wires: list[tuple[int, int, int, int, str]],
 ) -> dict[str, int]:

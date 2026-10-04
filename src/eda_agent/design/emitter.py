@@ -730,12 +730,24 @@ def _emit_labels(
         result.notes.append(f"place_net_labels for {sheet_name} failed: {exc}")
 
 
+def _power_port_altium_orientation(p: Any) -> int:
+    """Altium PowerObject.Orientation (0 right, 1 up, 2 left, 3 down).
+
+    A glyph the post-selection pass re-aimed carries its own orientation;
+    every other glyph keeps the natural rule, VCC up (1) and GND down (3),
+    so the payload of an untouched sheet is unchanged.
+    """
+    if getattr(p, "orientation", None) is not None:
+        return p.orientation % 4
+    return 3 if "gnd" in p.style.lower() else 1
+
+
 def _emit_power_ports(
     ports: list, bridge: Any, result: EmitResult, sheet_name: str
 ) -> None:
-    # Power-port orientation: VCC up (1), GND down (3), determined per-glyph.
     payload = "~~".join(
-        f"text={p.text};x={p.x};y={p.y};style={p.style};orientation={3 if 'gnd' in p.style.lower() else 1}"
+        f"text={p.text};x={p.x};y={p.y};style={p.style};"
+        f"orientation={_power_port_altium_orientation(p)}"
         for p in ports
     )
     try:

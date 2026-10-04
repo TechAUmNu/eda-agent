@@ -217,6 +217,13 @@ class PowerPort:
     y: int
     style: str  # "circle", "arrow", "bar", "wave", "gnd_power", "gnd_signal", "gnd_earth"
     sheet: str = "main"
+    #: Altium ISch_PowerObject.Orientation: 0 right, 1 up, 2 left, 3 down.
+    #: None = the style's natural direction (ground down, everything else
+    #: up), which is what every glyph meant before this field existed. Only
+    #: the post-selection glyph pass (port_glyphs) sets it, and only when the
+    #: chosen direction is NOT the natural one, so untouched glyphs keep
+    #: serialising and emitting exactly as before.
+    orientation: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -455,7 +462,11 @@ class SchematicCanvas:
             ],
             "power_ports": [
                 {"text": p.text, "x": p.x, "y": p.y,
-                 "style": p.style, "sheet": p.sheet}
+                 "style": p.style, "sheet": p.sheet,
+                 # Only a re-aimed glyph carries the key, so snapshots of
+                 # every untouched sheet stay byte-identical.
+                 **({"orientation": p.orientation}
+                    if p.orientation is not None else {})}
                 for p in self.power_ports
             ],
             "junctions": [
