@@ -331,12 +331,16 @@ def hints_from_sheet(
         if symbol is None:
             out["unmatched"].append(refdes)
             continue
-        off_x, off_y = _center_offset(
-            symbol, int(pos["rotation"]), bool(inst.get("flipped", False)))
+        # The LIVE mirror, not the snapshot's: a part mirrored by hand
+        # after the emit has a centre offset of the opposite sign in x.
+        flipped = bool(pos.get("mirror", False))
+        rotation = int(pos["rotation"])     # canvas frame already
+        off_x, off_y = _center_offset(symbol, rotation, flipped)
         out["hints"][refdes] = {
             "x": int(pos["x"] + off_x),
             "y": int(pos["y"] + off_y),
-            "rotation": int(pos["rotation"]),
+            "rotation": rotation,
+            **({"mirror": True} if flipped else {}),
         }
     if out["unmatched"]:
         out["notes"].append(
@@ -862,7 +866,7 @@ def _layout_payload(
     canvas = result.canvas
     placements = [
         {"designator": p.refdes, "x": p.x_mils, "y": p.y_mils,
-         "rotation": p.rotation}
+         "rotation": p.rotation, **({"mirror": True} if p.flipped else {})}
         for p in (_canvas_instance_to_placement(i)
                   for i in canvas.instances_on(sheet))
     ]

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 
-from eda_agent.design.canvas import SymbolInstance
+from eda_agent.design.canvas import SymbolInstance, altium_orientation
 from eda_agent.design.orchestrator import hints_from_sheet
 from eda_agent.design.pipeline import _center_offset
 from eda_agent.design.symbols import SymbolCache
@@ -142,3 +142,69 @@ def test_no_snapshot_says_what_to_run(tmp_path):
     out = hints_from_sheet(str(project), bridge=_Bridge([]))
     assert out["ok"] is False
     assert any("design_execute_plan" in n for n in out["notes"])
+
+
+# ------------------------------------------------------------- mirror ---
+
+def _dual_fet(lib_path: str = "/fake/lib.SchLib") -> SymbolModel:
+    """The BSS138PS geometry from the multiviewer carrier library: a box
+    whose origin is NOT the body centre, four pins left, two right."""
+    def p(d, n, x, y, o):
+        return SymbolPin(designator=d, name=n, x=x, y=y, orientation=o,
+                         length=200, electrical_type="passive")
+    return SymbolModel(
+        lib_path=lib_path, lib_ref="BSS138PS",
+        pins=(p("1", "S1", 200, 0, 2), p("4", "S2", 200, -100, 2),
+              p("2", "G1", 200, -200, 2), p("5", "G2", 200, -300, 2),
+              p("6", "D1", 800, 0, 0), p("3", "D2", 800, -100, 0)),
+        body_bbox=SymbolBBox(x_min=150, y_min=-350, x_max=850, y_max=50),
+    )
+
+
+def test_hints_from_sheet_reads_the_live_mirror(tmp_path):
+    """The LIVE IsMirrored, not the snapshot: a part mirrored by hand after
+    the emit has a centre offset of the opposite sign in x."""
+    lib = tmp_path / "LIB.SchLib"
+    lib.write_text("", encoding="utf-8")
+    model = _dual_fet(str(lib))
+    cache = SymbolCache(tmp_path / "c")
+    cache.put(model)
+    project = tmp_path / "b.PrjPcb"
+    project.write_text("", encoding="utf-8")
+    project.with_suffix(".canvas.json").write_text(json.dumps({"plan": {}, "canvas": {
+        "instances": [{"refdes": "Q1", "lib_path": str(lib),
+                       "lib_ref": "BSS138PS", "x": 0, "y": 0, "rotation": 0}]}}),
+        encoding="utf-8")
+
+    for r in (0, 90, 180, 270):
+        class B:
+            def send_command(self, command, params=None, **kw):
+                assert "IsMirrored" in params["properties"]
+                return {"objects": [{"Designator.Text": "Q1",
+                                     "Location.X": 5000, "Location.Y": 3000,
+                                     "Orientation": altium_orientation(r, True) // 90,
+                                     "IsMirrored": "true"}]}
+        out = hints_from_sheet(str(project), bridge=B(), cache_dir=tmp_path / "c")
+        h = out["hints"]["Q1"]
+        assert h["mirror"] is True and h["rotation"] == r
+        ox, oy = _center_offset(model, r, True)
+        assert (h["x"] - ox, h["y"] - oy) == (5000, 3000)
+
+
+def test_learner_reads_a_mirrored_part_at_rest_as_unrotated():
+    """learn_from_layout diffs live rotation against the snapshot's canvas
+    rotation; a mirrored 90 part is stored at Orientation 270 and must not
+    read as a 180-degree edit."""
+    from eda_agent.design.learner import _query_post_edit_positions
+
+    class B:
+        def send_command(self, command, params=None, **kw):
+            return {"objects": [{"Designator.Text": "Q1", "Location.X": 0,
+                                 "Location.Y": 0, "Orientation": 3,
+                                 "IsMirrored": "true"},
+                                {"Designator.Text": "Q2", "Location.X": 0,
+                                 "Location.Y": 0, "Orientation": 1,
+                                 "IsMirrored": "false"}]}
+    pos = _query_post_edit_positions("p.PrjPcb", B(), {"ok": True, "notes": []})
+    assert pos["Q1"] == {"x": 0, "y": 0, "rotation": 90, "mirror": True}
+    assert pos["Q2"] == {"x": 0, "y": 0, "rotation": 90}

@@ -1775,8 +1775,9 @@ def register_design_tools(mcp) -> None:
                 snaps to its own 100-mil grid.
             fr_iterations: Accepted for compatibility; the pipeline sweeps
                 its own force-directed budget and scores the results.
-            placement_hints: Optional ``{refdes: {"x", "y", "rotation"}}``
-                pinned positions, same as ``design_execute_plan``.
+            placement_hints: Optional ``{refdes: {"x", "y", "rotation",
+                "mirror"}}`` pinned positions, same as
+                ``design_execute_plan``.
             render_png: Optional path for a preview image of the layout.
 
         Returns:
@@ -1922,9 +1923,12 @@ def register_design_tools(mcp) -> None:
                 the new canvas pipeline; pass ``False`` to fall back to
                 the legacy executor.
             placement_hints: Optional ``{refdes: {"x": int, "y": int,
-                "rotation": int}}`` partial anchors. Hinted refdes pin
-                to the supplied position; others run through the
-                algorithmic placement (Sugiyama + multi-try scoring).
+                "rotation": int, "mirror": bool}}`` partial anchors.
+                Hinted refdes pin to the supplied position; others run
+                through the algorithmic placement (Sugiyama + multi-try
+                scoring). ``mirror`` is a horizontal mirror in the
+                symbol's own frame, applied before the rotation; an
+                unknown key is reported in the notes, not ignored.
                 Used by the agent-in-loop refinement workflow:
                   1. Run ``design_preview_plan`` -> see SVG + score.
                   2. If layout is bad, identify specific refdes that
@@ -2092,7 +2096,8 @@ def register_design_tools(mcp) -> None:
             project_path: Absolute path to the .PrjPcb whose sheet to read.
 
         Returns:
-            ``ok`` / ``hints`` ({refdes: {x, y, rotation}}) / ``unmatched``
+            ``ok`` / ``hints`` ({refdes: {x, y, rotation}}, plus
+            ``mirror: true`` for a part mirrored on the sheet) / ``unmatched``
             (refdes present in the snapshot but not readable now) /
             ``notes``.
         """
@@ -2116,8 +2121,9 @@ def register_design_tools(mcp) -> None:
             plan_json: DesignPlan as JSON string or dict.
             output_svg_path: Where to write the SVG. Default:
                 ``<repo>/.symbol_cache/preview.svg``.
-            placement_hints: Optional ``{refdes: {"x", "y", "rotation"}}``
-                partial anchors, same as ``design_execute_plan``: hinted
+            placement_hints: Optional ``{refdes: {"x", "y", "rotation",
+                "mirror"}}`` partial anchors, same as
+                ``design_execute_plan``: hinted
                 refdes pin to the supplied position, the rest run through
                 algorithmic placement. Iterate preview→hints→preview to
                 refine a layout before a full emit.

@@ -1207,6 +1207,36 @@ def _recenter_within_sheet(
     return [shifted_by_refdes[p.refdes] for p in placements]
 
 
+_HINT_KEYS = frozenset({"x", "y", "rotation", "mirror", "flipped"})
+
+
+def _hint_mirror(refdes: str, hint: dict, current: bool,
+                 result: "PipelineResult") -> bool:
+    """The hint's horizontal mirror. ``mirror`` is the documented key (Altium
+    calls the property Mirrored); ``flipped`` is the canvas field's own name,
+    which the drag editor already sends, so it stays accepted. Absent keeps
+    ``current``. A string is refused rather than truth-tested: bool("false")
+    is True, which would mirror the part the caller asked NOT to mirror."""
+    vals = {k: hint[k] for k in ("mirror", "flipped") if k in hint}
+    for k, v in vals.items():
+        if not isinstance(v, (bool, int)):
+            result.notes.append(PipelineNote(
+                severity="warning",
+                text=(f"placement_hint {refdes}.{k}={v!r} is not a boolean; "
+                      f"ignored (use true/false)")))
+            return current
+    if len(vals) == 2 and bool(vals["mirror"]) != bool(vals["flipped"]):
+        result.notes.append(PipelineNote(
+            severity="warning",
+            text=(f"placement_hint {refdes} gives mirror={vals['mirror']!r} "
+                  f"and flipped={vals['flipped']!r}; mirror wins")))
+    if "mirror" in vals:
+        return bool(vals["mirror"])
+    if "flipped" in vals:
+        return bool(vals["flipped"])
+    return current
+
+
 def _apply_placement_hints(
     placements: list,
     hints: dict[str, dict[str, int]],
@@ -1231,27 +1261,27 @@ def _apply_placement_hints(
         new_x = int(hint.get("x", placement.x_mils))
         new_y = int(hint.get("y", placement.y_mils))
         new_rot = int(hint.get("rotation", placement.rotation)) % 360
-        # Flip is carried separately as `flipped: bool`. PlacedPart
-        # doesn't have a field yet; we encode it by extending PlacedPart
-        # below if the hint asks for a flip. Default unchanged.
-        flipped = bool(hint.get("flipped", getattr(placement, "flipped", False)))
+        flipped = _hint_mirror(placement.refdes, hint,
+                               bool(getattr(placement, "flipped", False)),
+                               result)
         # Snap to 100-mil grid so anchored positions don't accidentally
         # land off-grid (which Altium would auto-snap anyway, but worse:
         # the wires routed by the pipeline expect grid alignment).
         new_x = (new_x // 100) * 100
         new_y = (new_y // 100) * 100
-        kwargs = dict(
+        out.append(PlacedPart(
             refdes=placement.refdes, sheet=placement.sheet,
-            x_mils=new_x, y_mils=new_y, rotation=new_rot,
-        )
-        # PlacedPart may or may not yet have a `flipped` field. Pass it
-        # only when supported so we don't break older PlacedPart shape.
-        try:
-            new_placement = PlacedPart(**kwargs, flipped=flipped)
-        except TypeError:
-            new_placement = PlacedPart(**kwargs)
-            new_placement.__dict__["flipped"] = flipped
-        out.append(new_placement)
+            x_mils=new_x, y_mils=new_y, rotation=new_rot, flipped=flipped,
+        ))
+    # A key nobody reads must be reported: "mirror" was dropped in silence
+    # for exactly this reason (the engine only knew "flipped").
+    for refdes, hint in hints.items():
+        unknown = sorted(set(hint) - _HINT_KEYS) if isinstance(hint, dict) else []
+        if unknown:
+            result.notes.append(PipelineNote(
+                severity="warning",
+                text=(f"placement_hint {refdes} has unknown key(s) {unknown}; "
+                      f"ignored (valid: {sorted(_HINT_KEYS)})")))
     # Flag unknown refdes hints so the agent sees them.
     for refdes in hints.keys():
         if refdes not in known_refdes:
@@ -1905,6 +1935,7 @@ def _canvas_instance_to_placement(inst):  # type: ignore[no-untyped-def]
     return PlacedPart(
         refdes=inst.refdes, sheet=inst.sheet,
         x_mils=inst.x + offx, y_mils=inst.y + offy, rotation=inst.rotation,
+        flipped=inst.flipped,
     )
 
 

@@ -62,6 +62,22 @@ def _rotate_point(x: int, y: int, rotation: int) -> tuple[int, int]:
     return (x * cos_r - y * sin_r, x * sin_r + y * cos_r)
 
 
+def altium_orientation(rotation: int, flipped: bool) -> int:
+    """Degrees to write as Altium Orientation for a canvas (rotation, flipped).
+
+    The canvas mirrors in the SYMBOL frame and then rotates:
+    world = Rot(r) . Mx (canvas.SymbolInstance._pin_to_world).
+    ``generic.mirror_component`` (Gen_MirrorSchComponent) reflects the
+    placed primitives about the component's Location.X in the WORLD frame
+    and leaves Orientation alone: world = Mx . Rot(p) = Rot(-p) . Mx.
+    So a mirrored instance is placed at p = -r. Identity at 0 and 180;
+    90 and 270 swap. Its own inverse, so the read-back direction
+    (hints_from_sheet) uses the same function.
+    """
+    r = rotation % 360
+    return (360 - r) % 360 if flipped else r
+
+
 @dataclass
 class PinEndpoint:
     """One pin's world-frame endpoint + outward direction.
@@ -447,6 +463,9 @@ class SchematicCanvas:
                     "y": i.y,
                     "rotation": i.rotation,
                     "sheet": i.sheet,
+                    # Absent means not mirrored, which keeps every snapshot
+                    # written before mirror support byte-identical.
+                    **({"flipped": True} if i.flipped else {}),
                 }
                 for i in self.instances
             ],

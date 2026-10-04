@@ -241,7 +241,7 @@ def _query_post_edit_positions(
             "generic.query_objects",
             {
                 "object_type": "eSchComponent",
-                "properties": "Designator.Text,Location.X,Location.Y,Orientation",
+                "properties": "Designator.Text,Location.X,Location.Y,Orientation,IsMirrored",
                 "scope": "project",
             },
         )
@@ -261,7 +261,15 @@ def _query_post_edit_positions(
             orient = int(row.get("Orientation", 0)) % 4
         except (TypeError, ValueError):
             continue
-        by_refdes[refdes] = {"x": x, "y": y, "rotation": orient * 90}
+        # Canvas frame for both callers (learn_from_layout diffs against
+        # snapshot rotations, hints_from_sheet feeds placement_hints): a
+        # mirrored 90/270 part is stored at the opposite Orientation.
+        from eda_agent.design.canvas import altium_orientation
+        mirror = str(row.get("IsMirrored", "")).strip().lower() in ("true", "1")
+        by_refdes[refdes] = {"x": x, "y": y,
+                             "rotation": altium_orientation(orient * 90, mirror)}
+        if mirror:
+            by_refdes[refdes]["mirror"] = True
     return by_refdes
 
 

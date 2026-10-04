@@ -19,6 +19,7 @@ from eda_agent.design.canvas import (
     Sheet,
     SymbolInstance,
     WireSegment,
+    altium_orientation,
 )
 from eda_agent.design.symbols import SymbolBBox, SymbolModel, SymbolPin
 
@@ -195,3 +196,72 @@ def test_sheet_explicit_dimensions_preserved():
 def test_sheet_unknown_size_falls_back_to_a4():
     s = Sheet(name="s", size="weird")
     assert s.width_mils == 11500 and s.height_mils == 7600
+
+
+# ------------------------------------------------------------- mirror ---
+
+def _dual_fet(lib_path: str = "/fake/lib.SchLib") -> SymbolModel:
+    """The BSS138PS geometry from the multiviewer carrier library: a box
+    whose origin is NOT the body centre, four pins left, two right."""
+    def p(d, n, x, y, o):
+        return SymbolPin(designator=d, name=n, x=x, y=y, orientation=o,
+                         length=200, electrical_type="passive")
+    return SymbolModel(
+        lib_path=lib_path, lib_ref="BSS138PS",
+        pins=(p("1", "S1", 200, 0, 2), p("4", "S2", 200, -100, 2),
+              p("2", "G1", 200, -200, 2), p("5", "G2", 200, -300, 2),
+              p("6", "D1", 800, 0, 0), p("3", "D2", 800, -100, 0)),
+        body_bbox=SymbolBBox(x_min=150, y_min=-350, x_max=850, y_max=50),
+    )
+
+
+def _rot(x, y, r):
+    return {0: (x, y), 90: (-y, x), 180: (-x, -y), 270: (y, -x)}[r % 360]
+
+
+@pytest.mark.parametrize("r", [0, 90, 180, 270])
+def test_flipped_pin_is_mirrored_in_symbol_frame_then_rotated(r):
+    """``flipped`` mirrors in the symbol's own frame, THEN rotates:
+    world = Rot(r) . Mx."""
+    sym = _dual_fet()
+    inst = SymbolInstance(refdes="Q1", symbol=sym, x=1000, y=2000,
+                          rotation=r, flipped=True)
+    for pin in sym.pins:
+        dx, dy = {0: (1, 0), 1: (0, 1), 2: (-1, 0), 3: (0, -1)}[pin.orientation]
+        lx, ly = pin.x + pin.length * dx, pin.y + pin.length * dy
+        wx, wy = _rot(-lx, ly, r)
+        ep = inst.pin_world(pin.designator)
+        assert (ep.x, ep.y) == (1000 + wx, 2000 + wy)
+        o = {0: 2, 2: 0}.get(pin.orientation, pin.orientation)
+        assert ep.orientation == (o + r // 90) % 4
+
+
+def test_flipped_bbox_contains_the_body_side_of_every_pin():
+    for r in (0, 90, 180, 270):
+        inst = SymbolInstance(refdes="Q1", symbol=_dual_fet(), x=0, y=0,
+                              rotation=r, flipped=True)
+        bb = inst.world_bbox()
+        for ep in inst.all_pin_endpoints():
+            # the electrical end is OUTSIDE the body on the pin's own side
+            assert not (bb.x_min < ep.x < bb.x_max and bb.y_min < ep.y < bb.y_max)
+
+
+def test_to_dict_writes_flipped_only_when_set():
+    cv = SchematicCanvas()
+    cv.add_sheet(Sheet(name="main"))
+    cv.add_instance(SymbolInstance(refdes="Q1", symbol=_dual_fet(), x=0, y=0,
+                                   rotation=0))
+    cv.add_instance(SymbolInstance(refdes="Q2", symbol=_dual_fet(), x=0, y=900,
+                                   rotation=0, flipped=True))
+    inst = {i["refdes"]: i for i in cv.to_dict()["instances"]}
+    assert "flipped" not in inst["Q1"], (
+        "an unmirrored instance must serialise exactly as before mirror "
+        "support, or every existing snapshot changes")
+    assert inst["Q2"]["flipped"] is True
+
+
+def test_altium_orientation_table_and_involution():
+    assert [altium_orientation(r, False) for r in (0, 90, 180, 270)] == [0, 90, 180, 270]
+    assert [altium_orientation(r, True) for r in (0, 90, 180, 270)] == [0, 270, 180, 90]
+    for r in (0, 90, 180, 270):
+        assert altium_orientation(altium_orientation(r, True), True) == r

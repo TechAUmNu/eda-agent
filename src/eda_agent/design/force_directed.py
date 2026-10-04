@@ -213,6 +213,9 @@ class PlacedPart:
     x_mils: int
     y_mils: int
     rotation: int = 0
+    # Horizontal mirror in the symbol's own frame, applied BEFORE the
+    # rotation (SymbolInstance.flipped). Only placement hints set it.
+    flipped: bool = False
 
 
 def _pin_count_per_part(plan: DesignPlan) -> dict[str, int]:
