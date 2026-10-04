@@ -598,6 +598,23 @@ def build_canvas_from_plan(
     # costs nothing where nothing moved.
     for _sheet in plan.sheets:
         _move_labels_off_foreign_copper(canvas, _sheet.name)
+        # ONE LABEL PER CONNECTED WIRE GROUP, AND NEVER TWO ON ONE POINT.
+        # Per-pin labelling puts a label at every stub end, and two
+        # same-net pins facing each other inside two stub lengths get
+        # stubs that meet or overlap -- so one wire carries two labels
+        # (PWR_1V8 PWR_SEQ_DLY stacked on one point, PWR_EFUSE UVLO /
+        # IMON_RAW 200 mil apart). The cross-net cull also relabels a net
+        # the label-per-pin branch had already labelled, repeating every
+        # label of it (mcu BTN2 x5). Here, after the bus drawer and the
+        # final label slide, the copper is final for this build. Labels
+        # carry no weight in the scorer, so best-of selection cannot move.
+        _deduped = _dedupe_net_labels(canvas, _sheet.name)
+        if _deduped:
+            result.notes.append(PipelineNote(
+                severity="info",
+                text=(f"sheet {_sheet.name!r}: {_deduped} redundant net "
+                      f"label(s) removed -- one label per connected wire "
+                      f"is enough")))
 
     # 4c. Collision-free designator/value text. Libraries stamp text at a
     # fixed offset from the symbol origin, so defaults collide with wires
@@ -2620,6 +2637,155 @@ def _move_labels_off_foreign_copper(canvas, sheet_name: str) -> int:
 # is the old behaviour (always the worst). Each extra candidate costs a
 # full trial cull, and the loop repeats until the sheet is clean.
 _CULL_CANDIDATES = 4
+
+
+def _label_text_box(lab) -> tuple[int, int, int, int]:
+    """A net label's text extent in the text placer's own metrics.
+
+    The text sits on the anchor's line and grows right (justification 0) or
+    ends at the anchor (2) -- the same box ``_glyph_would_hit_text`` and
+    ``text_placement`` use, so all three agree on what overlaps.
+    """
+    from eda_agent.design.text_placement import CHAR_W, LINE_H
+
+    w = CHAR_W * max(1, len(lab.text))
+    x1 = lab.x - w if getattr(lab, "justification", 0) == 2 else lab.x
+    return (x1, lab.y, x1 + w, lab.y + LINE_H)
+
+
+def _same_net_wire_groups(wires: list[WireSegment]) -> list[int]:
+    """Union-find root per wire of ONE net: connected copper groups.
+
+    Two wires are one group when an end of either lies on the other --
+    coincident ends, a T, or a collinear overlap, which are exactly the
+    joins Altium makes. A plain mid-span crossing is NOT joined, because
+    Altium does not join it either.
+    """
+    parent = list(range(len(wires)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i, a in enumerate(wires):
+        for j in range(i + 1, len(wires)):
+            b = wires[j]
+            if (_point_on_segment(a.x1, a.y1, b.x1, b.y1, b.x2, b.y2)
+                    or _point_on_segment(a.x2, a.y2, b.x1, b.y1, b.x2, b.y2)
+                    or _point_on_segment(b.x1, b.y1, a.x1, a.y1, a.x2, a.y2)
+                    or _point_on_segment(b.x2, b.y2, a.x1, a.y1, a.x2, a.y2)):
+                parent[find(i)] = find(j)
+    return [find(i) for i in range(len(wires))]
+
+
+def _dedupe_net_labels(canvas: SchematicCanvas, sheet_name: str) -> int:
+    """One net label per connected same-net wire group; never two on a point.
+
+    A label names everything wired to it, so a second same-text label on
+    the same connected copper says nothing and, 200 mils from the first,
+    reads like a break in the wire. Two generators make them (see the call
+    site). Of each group's labels the BEST-PLACED stays: fewest text
+    collisions with bodies, power-port glyphs, other labels and other
+    nets' wires, then the first emitted.
+
+    Conservative by construction:
+      - only labels sitting on their OWN net's wire are grouped; a label on
+        no such wire (a bus name on its bus line, a stray) is left alone;
+      - if any label of a net touches two of that net's groups, it is what
+        joins them in Altium, and that net's groups are left as drawn;
+      - then, whatever survived, two labels with the same text on the same
+        point collapse to the first emitted.
+
+    Returns the number of labels removed. Never touches copper, ports,
+    junctions or symbols, and is idempotent.
+    """
+    on_sheet = [i for i, lab in enumerate(canvas.labels)
+                if lab.sheet == sheet_name]
+    if len(on_sheet) < 2:
+        return 0
+    sheet_wires = canvas.wires_on(sheet_name)
+    wires_by_net: dict[str, list[WireSegment]] = {}
+    for w in sheet_wires:
+        if w.net:
+            wires_by_net.setdefault(w.net, []).append(w)
+    by_text: dict[str, list[int]] = {}
+    for i in on_sheet:
+        by_text.setdefault(canvas.labels[i].text, []).append(i)
+
+    drop: set[int] = set()
+    obstacles: Optional[list[tuple[int, int, int, int]]] = None
+
+    def _hits(a, b) -> bool:
+        return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
+
+    def _collisions(i: int, group: set[int]) -> int:
+        lab = canvas.labels[i]
+        box = _label_text_box(lab)
+        n = sum(_hits(box, ob) for ob in obstacles)
+        n += sum(_hits(box, _label_text_box(canvas.labels[j]))
+                 for j in on_sheet if j not in drop and j not in group)
+        for w in sheet_wires:
+            if w.net == lab.text:
+                continue
+            xs, ys = sorted((w.x1, w.x2)), sorted((w.y1, w.y2))
+            n += not (xs[1] < box[0] or box[2] < xs[0]
+                      or ys[1] < box[1] or box[3] < ys[0])
+        return n
+
+    # 1. One label per connected group of the label's OWN net's wires.
+    for text in sorted(by_text):
+        idxs = by_text[text]
+        own = wires_by_net.get(text)
+        if len(idxs) < 2 or not own:
+            continue
+        root = _same_net_wire_groups(own)
+        members: dict[int, list[int]] = {}
+        bridged = False
+        for i in idxs:
+            lab = canvas.labels[i]
+            groups = {root[k] for k, w in enumerate(own)
+                      if _point_on_segment(lab.x, lab.y, w.x1, w.y1, w.x2, w.y2)}
+            if len(groups) > 1:
+                bridged = True       # this label is what joins those groups
+                break
+            if groups:
+                members.setdefault(groups.pop(), []).append(i)
+        if bridged:
+            continue                 # leave this net's groups as drawn
+        for cand in members.values():
+            if len(cand) < 2:
+                continue
+            if obstacles is None:
+                obstacles = [
+                    (bb.x_min, bb.y_min, bb.x_max, bb.y_max)
+                    for bb in (inst.world_bbox()
+                               for inst in canvas.instances_on(sheet_name))
+                ] + [_glyph_box(p.x, p.y, p.text)
+                     for p in canvas.power_ports_on(sheet_name)]
+            group = set(cand)
+            keep = min(cand, key=lambda i: (_collisions(i, group), i))
+            drop.update(i for i in cand if i != keep)
+
+    # 2. Never two identical labels on one point, whatever drew them and
+    # whether or not they sit on copper: the first-emitted one stays.
+    seen: set[tuple[str, int, int]] = set()
+    for i in on_sheet:
+        if i in drop:
+            continue
+        lab = canvas.labels[i]
+        key = (lab.text, lab.x, lab.y)
+        if key in seen:
+            drop.add(i)
+        else:
+            seen.add(key)
+
+    if not drop:
+        return 0
+    canvas.labels[:] = [lab for i, lab in enumerate(canvas.labels)
+                        if i not in drop]
+    return len(drop)
 
 
 def _pick_cull_candidate(offenders: dict, try_cull):
