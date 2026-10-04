@@ -5742,7 +5742,24 @@ Begin
                 'Footprint not found in library: ' + ComponentName);
             Exit;
         End;
-        Try PcbLib.SetState_CurrentComponent(Footprint); Except End;
+        { MADE CURRENT AND READ BACK, as ResolveLibFootprint does. The body is }
+        { registered with PcbLib.Board as well as the footprint, and the board }
+        { attaches it to the CURRENT component, so a switch that silently did }
+        { not take would put the model on two footprints. The unchecked       }
+        { SetState_CurrentComponent this used is what the text tool dropped   }
+        { for the same reason.                                                }
+        If PcbLib.CurrentComponent <> Footprint Then
+        Begin
+            Try PcbLib.CurrentComponent := Footprint; Except End;
+            If PcbLib.CurrentComponent <> Footprint Then
+            Begin
+                Result := BuildErrorResponse(RequestId, 'SELECT_FAILED',
+                    'Could not make footprint "' + ComponentName + '" current, '
+                    + 'so nothing was added: the library board attaches a new '
+                    + 'body to its CURRENT footprint.');
+                Exit;
+            End;
+        End;
     End
     Else
         Footprint := PcbLib.CurrentComponent;
@@ -6014,7 +6031,7 @@ Function Lib_GetFootprintBodies(Params : String; RequestId : String) : String;
 Var
     LibPath, FocusedPath, FpWanted, FpName, Addr : String;
     ItemsJson, BodyJson, ModelJson, StateJson, PadsJson, FpsJson, CountsJson : String;
-    WantModel, StateOk : Boolean;
+    WantModel, StateOk, MadeCurrent : Boolean;
     Workspace : IWorkspace;
     Doc : IDocument;
     PcbLib : IPCB_Library;
@@ -6193,7 +6210,12 @@ Begin
     { The frame lib_link_3d_model measures in: current first, origin after. }
     SavedCurrent := Nil;
     Try SavedCurrent := PcbLib.CurrentComponent; Except SavedCurrent := Nil; End;
-    Try PcbLib.SetState_CurrentComponent(Target); Except End;
+    { Made current with the property write and READ BACK, as every footprint }
+    { handler here now is; the reply says whether the frame below is the one }
+    { a current footprint has.                                               }
+    Try PcbLib.CurrentComponent := Target; Except End;
+    MadeCurrent := False;
+    Try MadeCurrent := (PcbLib.CurrentComponent = Target); Except MadeCurrent := False; End;
     OrgX := FootprintOriginX(Target);
     OrgY := FootprintOriginY(Target);
     FpName := '';
@@ -6260,6 +6282,7 @@ Begin
         + JsonRaw('frame', JsonObj(
             JsonFloat('origin_x_mils', CoordToMilsF(OrgX)) + ','
             + JsonFloat('origin_y_mils', CoordToMilsF(OrgY)) + ','
+            + JsonBool('made_current', MadeCurrent) + ','
             + JsonRaw('pads_bbox', PadsJson))) + ','
         + JsonInt('body_count', BodyN) + ','
         + JsonBool('model_state', WantModel) + ','

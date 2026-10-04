@@ -1,4 +1,4 @@
-# Release verification: 2026.10.04.5
+# Release verification: 2026.10.04.6
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -232,7 +232,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.04.5`, `version_match` =
+Expect `altium_script_version` = `2026.10.04.6`, `version_match` =
 `true`, and `mcp_server_version` = `0.6.1`.
 
 Those are two different versions and they fail differently.

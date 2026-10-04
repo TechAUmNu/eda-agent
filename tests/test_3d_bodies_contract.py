@@ -241,6 +241,25 @@ def test_the_body_list_is_read_only(library):
     assert "PcbLib.CurrentComponent := SavedCurrent" in body
 
 
+@pytest.mark.parametrize("name,target", [("Lib_Link3DModel", "Footprint"),
+                                         ("Lib_GetFootprintBodies", "Target")])
+def test_the_footprint_switch_is_read_back(handlers, name, target):
+    """Mutation: put back Try PcbLib.SetState_CurrentComponent(...) Except End.
+
+    The link registers the body with the library board too, and the board
+    attaches it to the CURRENT footprint, so a switch that silently failed
+    would put one model on two footprints (the hazard ResolveLibFootprint
+    closes for the other footprint writes). The list reports the switch as
+    frame.made_current.
+    """
+    body = handlers[name]
+    assert "SetState_CurrentComponent(" not in body, (
+        f"{name} switches footprints without reading the switch back")
+    write = body.index(f"PcbLib.CurrentComponent := {target}")
+    assert "PcbLib.CurrentComponent" in body[write + 10:], (
+        f"{name} does not read CurrentComponent back after the switch")
+
+
 # --------------------------------------------------------- Python side
 
 class _CapturingBridge:

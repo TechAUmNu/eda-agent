@@ -3007,7 +3007,11 @@ def register_library_tools(mcp):
         loaded, so an unreadable file never leaves the footprint bare.
 
         Args:
-            component_name: Name of the footprint in the PcbLib.
+            component_name: Name of the footprint in the PcbLib. It is
+                made the library's current footprint and the switch is
+                read back (``SELECT_FAILED`` otherwise), because the body
+                is also registered with the library board, which attaches
+                it to the CURRENT footprint.
             model_path: Path to the 3D model file (.step, .stp); must exist.
             offset_x: X offset in mils. What it is measured from depends
                 on ``align``.
@@ -3190,7 +3194,8 @@ def register_library_tools(mcp):
 
         Returns:
             One footprint: ``{library_path, footprint, units, frame:
-            {origin_x_mils, origin_y_mils, pads_bbox}, body_count,
+            {origin_x_mils, origin_y_mils, made_current, pads_bbox},
+            body_count,
             model_state, bodies: [{index, layer, standoff_height_mils,
             overall_height_mils, bbox, model?}]}``.
             Sweep: ``{library_path, total, offset, count, model_state,
