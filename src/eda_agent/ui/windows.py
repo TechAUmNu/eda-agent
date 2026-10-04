@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+from ctypes import byref, wintypes
 import re
 import time
 from dataclasses import dataclass, field

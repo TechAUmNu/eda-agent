@@ -231,6 +231,82 @@ async def _reload_library(bridge, library_path) -> bool:
         return False
 
 
+async def _save_library_verified(bridge, library_path: str) -> dict:
+    """Save ONE library, and say whether the file actually changed on disk.
+
+    Two independent witnesses, because a save Altium declines does not
+    raise: the handler's own FileAge before and after (two-second
+    resolution, so a second save within the same two seconds can read as
+    unchanged) and this process's nanosecond mtime of the same file.
+    Either one moving is a write. Neither moving is a refusal, and the
+    caller must not go on to reload, because closing a dirty library raises
+    Altium's Unsaved Changes prompt and blocks the bridge.
+    """
+    def mtime():
+        try:
+            return Path(library_path).stat().st_mtime_ns
+        except OSError:
+            return None
+
+    before = mtime()
+    try:
+        reply = await bridge.send_command_async(
+            "library.save_library", {"library_path": library_path},
+            timeout=_GEOMETRY_TIMEOUT)
+    except Exception as exc:                     # noqa: BLE001
+        return {"ok": False, "library_path": library_path,
+                "written_to_disk": False, "error": str(exc),
+                "details": getattr(exc, "details", None)}
+    after = mtime()
+    out = dict(reply) if isinstance(reply, dict) else {"reply": reply}
+    out["mtime_changed"] = (None if before is None and after is None
+                            else before != after)
+    out["written_to_disk"] = (bool(out["mtime_changed"])
+                              or bool(out.get("file_age_changed")))
+    out["ok"] = out["written_to_disk"] and not out.get("still_modified")
+    return out
+
+
+def _rename_ops(renames) -> tuple[list[str], list[dict]]:
+    """Wire ops for ``library.rename_footprints``, and the renames refused.
+
+    A name is REFUSED, never sanitised. ``payload_safe`` turns ';' into ','
+    and sends the result, which is right for free text and wrong for a
+    name: the footprint would be renamed to something nobody asked for.
+    """
+    from ..bridge.payload import unsendable_chars
+
+    ops: list[str] = []
+    refused: list[dict] = []
+    for item in renames or []:
+        if not isinstance(item, dict):
+            refused.append({"item": repr(item)[:80], "reason": (
+                "each rename is {'from': <current name>, 'to': <new name>}")})
+            continue
+        old = str(item.get("from") or "")
+        new = str(item.get("to") or "")
+        problems = []
+        for key, value in (("from", old), ("to", new)):
+            if not value.strip():
+                problems.append(f"'{key}' is empty")
+            elif ";" in value or "~~" in value:
+                problems.append(f"'{key}' contains ';' or '~~', which split "
+                                f"the batch payload")
+            else:
+                bad = unsendable_chars(value)
+                if bad:
+                    problems.append(f"'{key}' contains {bad!r}, which the "
+                                    f"bridge flattens to '?'")
+        if not problems and old == new:
+            problems.append("'from' and 'to' are the same name")
+        if problems:
+            refused.append({"from": old, "to": new,
+                            "reason": "; ".join(problems)})
+        else:
+            ops.append(f"old={old};new={new}")
+    return ops, refused
+
+
 async def _apply_edits(bridge, actions, resolved_path, failed):
     """Write one batch of designator edits. Returns (applied, created)."""
     edits_path, written, rejected = write_designator_edits(
@@ -5598,6 +5674,198 @@ def register_library_tools(mcp):
                 "library_path": library_path,
             },
         )
+
+    @mcp.tool()
+    async def lib_save_library(library_path: str) -> dict[str, Any]:
+        """Write ONE open library to disk, and prove the file changed.
+
+        ``app_save_all`` writes EVERY open document, and every save
+        rewrites open SchDocs and PcbDocs with fresh parameter UniqueIDs
+        (measured on a live project, 2026-10-02), so saving one library
+        that way puts churn into every open sheet. This writes only the
+        document at ``library_path``.
+
+        MEASURED, NOT TRUSTED. Altium declines a save while a command is
+        active and does not raise, so ``written_to_disk`` comes from the
+        file: this process's mtime of it before and after, and the
+        handler's FileAge before and after. ``ok`` is false when neither
+        moved or the document still reads modified. If that happens, run
+        ``app_exit_active_command`` and try again.
+
+        A .PcbLib or a .SchLib. It must be open in Altium: a library that
+        is not open holds no unsaved edits.
+
+        Args:
+            library_path: full path of the open .PcbLib or .SchLib.
+
+        Returns:
+            ``{ok, written_to_disk, mtime_changed, was_modified,
+            still_modified, file_age_before, file_age_after,
+            library_path}``.
+        """
+        return await _save_library_verified(get_bridge(), library_path)
+
+    @mcp.tool()
+    async def lib_rename_footprints(
+        renames: list[dict[str, str]],
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Rename MANY footprints in one PcbLib in ONE call.
+
+        The batch sibling of ``lib_rename_footprint``: one PreProcess /
+        PostProcess around all of them, and a status per rename instead of
+        an error on the first bad one.
+
+        Each result's ``status`` is ``renamed`` (written and read back) or
+        why not: ``not_found``, ``name_exists`` (the new name is taken),
+        ``same_name``, ``missing_field``, or ``unchanged`` (the write did
+        not read back).
+
+        Names are REFUSED, never sanitised, when the wire cannot carry
+        them exactly: a ';' or '~~' (the batch separators) or a character
+        above U+00FF (flattened to '?'). They come back under ``refused``
+        and are not sent.
+
+        MARKS the .PcbLib dirty; it does not write. ``lib_save_library``
+        writes just this library and says whether it reached disk.
+
+        Args:
+            renames: ``[{"from": "SOT-23-6_P0,95", "to": "SOT-23-6_P0.95"}]``.
+            library_path: optional .PcbLib path; defaults to the focused lib.
+
+        Returns:
+            ``{renamed, failed, total, results: [{old, new, status,
+            read_back}], refused, pending_save, written_to_disk}``.
+        """
+        ops, refused = _rename_ops(renames)
+        if not ops:
+            return {"error": "no rename could be sent", "renamed": 0,
+                    "refused": refused}
+        bridge = get_bridge()
+        result = await bridge.send_command_async(
+            "library.rename_footprints",
+            {"library_path": library_path, "renames": "~~".join(ops)},
+            timeout=_GEOMETRY_TIMEOUT)
+        if isinstance(result, dict):
+            result = dict(result)
+            result["refused"] = refused
+        return result
+
+    @mcp.tool()
+    async def lib_ipc_batch_generate(
+        csv_paths: list[str],
+        library_path: str,
+        report_dir: str = "",
+        allow_existing: bool = False,
+        strict_preflight: bool = True,
+        finalize_on_error: bool = False,
+        close_reports: bool = True,
+        open_report: Optional[bool] = None,
+        may_steal_focus: bool = True,
+        preflight_only: bool = False,
+        dialog_timeout: float = 30.0,
+        run_timeout: float = 180.0,
+    ) -> dict[str, Any]:
+        """Generate footprints with Altium's IPC Footprint Wizard batch mode.
+
+        One call per batch instead of about ten per CSV. For each CSV in
+        turn: refocus the library, open Tools > IPC Compliant Footprints
+        Batch generator, confirm it writes into the CURRENT PcbLib, add
+        the file, press Start, wait for the run and its report, close the
+        form and the report document. Then once: save, reload, rename the
+        generator's ',' names back to the '.' names the CSV asked for,
+        save, reload, and read the names back from the reopened file.
+
+        THE CSV is the template's own layout: row 0 is the template's row
+        0 (its first cell, e.g. SOIC or SOT23, is how the generator
+        detects the package), row 1 the column names, data after,
+        dimensions in mm.
+
+        PREFLIGHT, BEFORE ANYTHING IS SENT, refuses the traps measured on
+        live runs: xls input (every number becomes a date), a blank
+        PinOrder on SOT23 (a hard error there, though SOIC, SON and SOP
+        accept one), a PinOrder like '1 -2 -3' (it became pad designators
+        '1', '-2', '-3'), duplicate FootprintNames, and names already in
+        the library (each stops the run on an 'already exists' prompt).
+        ``preflight_only`` runs just this and lists the names a run would
+        create.
+
+        ONLY NAMES THIS CALL CREATED ARE RENAMED: a ',' name is renamed
+        only when it is new AND its '.' form is a FootprintName in one of
+        the CSVs, so a footprint that already had a comma is never
+        touched.
+
+        IT STOPS ON THE FIRST PROBLEM AND SAYS WHERE. ``stopped.stage``
+        names the step, and any dialog on screen is reported, untouched:
+        no button whose meaning is unknown is ever pressed. A stop while
+        the batch form is up leaves the bridge blocked behind it
+        (``stopped.bridge_blocked``); ``app_list_open_dialogs`` and
+        ``app_press_dialog_button`` still work then. Footprints made
+        before a stop stay UNSAVED in the editor, listed under ``unsaved``,
+        unless ``finalize_on_error`` is set.
+
+        THIS DRIVES A DIALOG. Its presses go to window handles and need no
+        focus; only the fallback for entering the file name types into
+        the file dialog, which brings Altium to the front
+        (``may_steal_focus``). Leave Altium alone while it runs.
+
+        Args:
+            csv_paths: full paths of the batch CSVs, run one at a time.
+            library_path: full path of the target .PcbLib, open in Altium
+                and saved on disk.
+            report_dir: a folder to look for the generator's report in.
+                Usually unnecessary: the form's Output Folder is read off
+                the form, and the folder of the last report found is
+                remembered. That folder is sticky and is NOT the CSV's.
+            allow_existing: run even when a CSV's names are already in the
+                library; the generator's own 'already exists' prompt then
+                stops the run and is left for a human.
+            strict_preflight: refuse when preflight finds an error.
+            finalize_on_error: after a stop, still save, reload and rename
+                what was made.
+            close_reports: close each report document after reading it.
+            open_report: set the form's 'Open generated report' option;
+                None leaves it alone. Altium remembers the setting.
+            may_steal_focus: allow the keyboard fallback for the file name.
+            preflight_only: check the CSVs and the library, run nothing.
+            dialog_timeout: seconds to wait for each dialog to appear.
+            run_timeout: seconds to allow one CSV's run.
+
+        Returns:
+            ``{ok, generated, renamed, report, runs, preflight, verify,
+            stopped, ...}``. ``generated``: final names of the footprints
+            this call added. ``renamed``: ``[{from, to, status}]``.
+            ``report``: per CSV path, ``fatal``, ``errors``, ``warnings``
+            and the generator's ``messages``. ``runs``: per CSV, what the
+            form showed (options, Output Folder, buttons), how the file
+            name went in, how the run ended, whether the bridge came back.
+        """
+        from . import uiauto as _uiauto
+        from .ipc_batch_flow import run_batch
+        from ..ui import dialog_report, ipc_batch_dialog, windows
+
+        pid = 0
+        if not preflight_only:
+            pid, problem = _uiauto._altium_pid()
+            if problem:
+                return problem
+            if not ipc_batch_dialog.available():
+                return {"ok": False, "reason": (
+                    "driving the batch generator needs pywin32 on Windows")}
+            if windows.dialogs(pid) or windows.is_blocked(pid):
+                return {"ok": False, "stopped": {"stage": "start", "reason": (
+                    "a dialog is already open in Altium. Close it first: "
+                    "the run cannot tell its own dialogs from one that was "
+                    "already there"),
+                    "dialogs": dialog_report.report(pid)}}
+        return await run_batch(
+            get_bridge(), pid, [str(p) for p in csv_paths], library_path,
+            report_dir=report_dir, allow_existing=allow_existing,
+            strict_preflight=strict_preflight,
+            finalize_on_error=finalize_on_error,
+            close_reports=close_reports, open_report=open_report,
+            may_steal_focus=may_steal_focus, preflight_only=preflight_only,
+            dialog_timeout=dialog_timeout, run_timeout=run_timeout)
 
     @mcp.tool()
     async def lib_probe_footprint(

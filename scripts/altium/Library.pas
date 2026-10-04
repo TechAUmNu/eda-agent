@@ -1587,6 +1587,69 @@ Begin
     Result := Target;
 End;
 
+{ Focus a .PcbLib by path for a WRITE and prove it is the one in front.        }
+{                                                                              }
+{ Defined up here, beside ResolveLibFootprint, so every PcbLib write can use  }
+{ it: the pad editors, and Lib_RenameFootprints, which comes before them in  }
+{ this file. DelphiScript has no forward declarations.                        }
+{                                                                              }
+{ The verify-after-open half is Lib_DeleteFootprintPrimitives's: an open that  }
+{ silently fails leaves the PREVIOUS library focused, and a write would land   }
+{ in it while reporting the path that was asked for. Returns Nil with ErrCode  }
+{ and ErrMsg set; rewrites LibPath to the path actually used.                  }
+Function FocusPcbLibForEdit(Var LibPath : String; Var ErrCode : String; Var ErrMsg : String) : IPCB_Library;
+Var
+    Workspace : IWorkspace;
+    Doc : IDocument;
+    FocusedPath : String;
+Begin
+    Result := Nil;
+    ErrCode := '';
+    ErrMsg := '';
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        ErrCode := 'NO_WORKSPACE';
+        ErrMsg := 'No workspace';
+        Exit;
+    End;
+    FocusedPath := '';
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+    If LibPath = '' Then LibPath := FocusedPath;
+    If LibPath = '' Then
+    Begin
+        ErrCode := 'NO_LIBRARY';
+        ErrMsg := 'No library is active and library_path was not supplied';
+        Exit;
+    End;
+    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
+    Begin
+        ResetParameters;
+        AddStringParameter('ObjectKind', 'Document');
+        AddStringParameter('FileName', LibPath);
+        RunProcess('WorkspaceManager:OpenObject');
+    End;
+    FocusedPath := '';
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
+    Begin
+        ErrCode := 'WRONG_DOCUMENT_FOCUSED';
+        ErrMsg := 'Asked for ' + LibPath + ' but the focused document is "'
+            + FocusedPath + '". Nothing was changed.';
+        Exit;
+    End;
+    Result := PCBServer.GetCurrentPCBLibrary;
+    If Result = Nil Then
+    Begin
+        ErrCode := 'NO_PCBLIB';
+        ErrMsg := 'Focused ' + LibPath + ' but it is not a PCB library. These '
+            + 'tools edit a footprint inside a .PcbLib; a placed pad on a '
+            + 'board is a pcb_ tool''s job.';
+    End;
+End;
+
 {..............................................................................}
 { RegisterLibPrimitive - the registration every footprint primitive needs.     }
 {                                                                              }
@@ -10896,6 +10959,214 @@ Begin
     Result := BuildSuccessResponse(RequestId, RespJson);
 End;
 
+{ Lib_RenameFootprints - rename MANY footprints of one PcbLib in ONE call.     }
+{                                                                              }
+{ The batch sibling of Lib_RenameFootprint, built from exactly its members:    }
+{ the same LibraryIterator walk, the same Name read and write, the same view  }
+{ refresh and dirty mark. The library is focused with FocusPcbLibForEdit,     }
+{ the same open plus the post-open check the other PcbLib writes make, built  }
+{ from the same workspace calls. Nothing on an Altium interface is used here  }
+{ that shipped code does not already use, which is what makes it safe to run  }
+{ before a live session has.                                                  }
+{                                                                              }
+{ WHY A BATCH. lib_ipc_batch_generate renames every footprint the IPC wizard   }
+{ wrote with ',' for '.', and one round trip per name made that the slowest    }
+{ part of a batch. One rename that fails must not abandon the rest, so each    }
+{ op gets its own status rather than the whole call an error.                  }
+{                                                                              }
+{ READ BACK, NOT ASSUMED. Each written Name is read again and the status says  }
+{ 'unchanged' when it did not take.                                            }
+{                                                                              }
+{ Params: library_path (optional; defaults to the focused library),           }
+{         renames (required): '~~'-separated ops, each 'old=<name>;new=<name>'.}
+{ Reply:  renamed, failed, total, results (old, new, status, read_back per  }
+{         op), pending_save true / written_to_disk false: it MARKS, never   }
+{         writes.                                                          }
+{..............................................................................}
+Function Lib_RenameFootprints(Params : String; RequestId : String) : String;
+Var
+    LibPath, RenamesStr, Remaining, Op, ErrCode, ErrMsg : String;
+    OldName, NewName, CurName, Status, ReadBack, ItemsJson : String;
+    PcbLib : IPCB_Library;
+    Iter : IPCB_LibraryIterator;
+    Footprint, Target : IPCB_LibComponent;
+    Clash : Boolean;
+    OpCount, Renamed, FailedCount : Integer;
+Begin
+    LibPath := ExtractJsonValue(Params, 'library_path');
+    RenamesStr := ExtractJsonValue(Params, 'renames');
+    If RenamesStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS',
+            'renames is required: old=<name>;new=<name> ops separated by ~~');
+        Exit;
+    End;
+
+    { Focused and then VERIFIED in front, as every other PcbLib write here    }
+    { is: an open that silently fails leaves the previous library focused,  }
+    { and the renames would land in it while the reply named this path.     }
+    PcbLib := FocusPcbLibForEdit(LibPath, ErrCode, ErrMsg);
+    If PcbLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, ErrCode, ErrMsg);
+        Exit;
+    End;
+
+    ItemsJson := '';
+    OpCount := 0;
+    Renamed := 0;
+    FailedCount := 0;
+    Remaining := RenamesStr;
+
+    PCBServer.PreProcess;
+    Try
+        While True Do
+        Begin
+            Op := NextBatchOp(Remaining);
+            If Op = '' Then Break;
+            Inc(OpCount);
+            OldName := GetBatchField(Op, 'old');
+            NewName := GetBatchField(Op, 'new');
+            Status := '';
+            ReadBack := '';
+
+            If (OldName = '') Or (NewName = '') Then
+                Status := 'missing_field'
+            Else If OldName = NewName Then
+                Status := 'same_name'
+            Else
+            Begin
+                { One walk per op, as Lib_RenameFootprint does. A rename    }
+                { earlier in the batch changes what later ops see, so the   }
+                { library is read fresh each time rather than cached.       }
+                Target := Nil;
+                Clash := False;
+                Iter := PcbLib.LibraryIterator_Create;
+                Try
+                    Footprint := Iter.FirstPCBObject;
+                    While Footprint <> Nil Do
+                    Begin
+                        CurName := '';
+                        Try CurName := Footprint.Name; Except End;
+                        If CurName = OldName Then Target := Footprint;
+                        If CurName = NewName Then Clash := True;
+                        Footprint := Iter.NextPCBObject;
+                    End;
+                Finally
+                    PcbLib.LibraryIterator_Destroy(Iter);
+                End;
+
+                If Target = Nil Then
+                    Status := 'not_found'
+                Else If Clash Then
+                    Status := 'name_exists'
+                Else
+                Begin
+                    Try Target.Name := NewName; Except End;
+                    Try ReadBack := Target.Name; Except ReadBack := ''; End;
+                    If ReadBack = NewName Then
+                        Status := 'renamed'
+                    Else
+                        Status := 'unchanged';
+                End;
+            End;
+
+            If Status = 'renamed' Then
+                Inc(Renamed)
+            Else
+                Inc(FailedCount);
+            If ItemsJson <> '' Then ItemsJson := ItemsJson + ',';
+            ItemsJson := ItemsJson
+                + '{"old":"' + EscapeJsonString(OldName) + '"'
+                + ',"new":"' + EscapeJsonString(NewName) + '"'
+                + ',"status":"' + Status + '"'
+                + ',"read_back":"' + EscapeJsonString(ReadBack) + '"}';
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    Try PcbLib.Board.ViewManager_FullUpdate; Except End;
+    Try PcbLib.RefreshView; Except End;
+    If Renamed > 0 Then MarkDocDirtyByPath(PcbLib.Board.FileName);
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"library_path":"' + EscapeJsonString(LibPath) + '"'
+        + ',"renamed":' + IntToStr(Renamed)
+        + ',"failed":' + IntToStr(FailedCount)
+        + ',"total":' + IntToStr(OpCount)
+        + ',"pending_save":true,"written_to_disk":false'
+        + ',"results":[' + ItemsJson + ']}');
+End;
+
+{ Lib_SaveLibrary - write ONE open library to disk, and report what landed.    }
+{                                                                              }
+{ app_save_all writes EVERY open document, and every save rewrites the open    }
+{ SchDocs and PcbDocs with fresh parameter UniqueIDs (measured on a live       }
+{ project, 2026-10-02), so saving one library that way puts churn into every   }
+{ open sheet. This saves the one IServerDocument at library_path.              }
+{                                                                              }
+{ The calls are SaveOneDocByDocRef's, unchanged: SetModified(True) then        }
+{ DoFileSave(''), the unconditional flush that Main.pas explains (the Modified }
+{ flag does not always propagate from ProcessControl, so a save gated on it    }
+{ can skip a dirty document). Only Client and IServerDocument are touched, so  }
+{ this is safe for a SchLib and does not need the PCB server loaded.           }
+{                                                                              }
+{ DoFileSave does not raise when the editor declines, so the reply carries     }
+{ the evidence instead of a verdict: FileAge before and after, and Modified    }
+{ before and after. FileAge has two-second resolution, so the Python side      }
+{ adds its own nanosecond mtime and decides.                                   }
+{                                                                              }
+{ Params: library_path (required).                                            }
+{..............................................................................}
+Function Lib_SaveLibrary(Params : String; RequestId : String) : String;
+Var
+    LibPath : String;
+    ServerDoc : IServerDocument;
+    AgeBefore, AgeAfter : Integer;
+    WasModified, StillModified, ExistsAfter : Boolean;
+Begin
+    LibPath := ExtractJsonValue(Params, 'library_path');
+    If LibPath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS',
+            'library_path is required');
+        Exit;
+    End;
+
+    ServerDoc := Nil;
+    Try ServerDoc := Client.GetDocumentByPath(LibPath); Except ServerDoc := Nil; End;
+    If ServerDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_LOADED',
+            'Not open in Altium, so it holds no unsaved edits: ' + LibPath);
+        Exit;
+    End;
+
+    WasModified := False;
+    Try WasModified := ServerDoc.Modified; Except WasModified := False; End;
+    AgeBefore := -1;
+    Try AgeBefore := FileAge(LibPath); Except AgeBefore := -1; End;
+
+    Try ServerDoc.SetModified(True); Except End;
+    Try ServerDoc.DoFileSave(''); Except End;
+
+    AgeAfter := -1;
+    Try AgeAfter := FileAge(LibPath); Except AgeAfter := -1; End;
+    StillModified := False;
+    Try StillModified := ServerDoc.Modified; Except StillModified := False; End;
+    ExistsAfter := FileExists(LibPath);
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"library_path":"' + EscapeJsonString(LibPath) + '"'
+        + ',"was_modified":' + BoolToJsonStr(WasModified)
+        + ',"still_modified":' + BoolToJsonStr(StillModified)
+        + ',"file_exists":' + BoolToJsonStr(ExistsAfter)
+        + ',"file_age_before":' + IntToStr(AgeBefore)
+        + ',"file_age_after":' + IntToStr(AgeAfter)
+        + ',"file_age_changed":' + BoolToJsonStr(AgeBefore <> AgeAfter) + '}');
+End;
+
 { Look up a rename in a ';'-separated 'old=new' map string; Default if absent.  }
 Function LookupRename(MapStr, OldName, Default : String) : String;
 Var
@@ -13498,65 +13769,6 @@ End;
 { the component is re-serialised on save) and READ BACK field by field.        }
 {..............................................................................}
 
-{ Focus a .PcbLib by path for a WRITE and prove it is the one in front.        }
-{                                                                              }
-{ The verify-after-open half is Lib_DeleteFootprintPrimitives's: an open that  }
-{ silently fails leaves the PREVIOUS library focused, and a write would land   }
-{ in it while reporting the path that was asked for. Returns Nil with ErrCode  }
-{ and ErrMsg set; rewrites LibPath to the path actually used.                  }
-Function FocusPcbLibForEdit(Var LibPath : String; Var ErrCode : String; Var ErrMsg : String) : IPCB_Library;
-Var
-    Workspace : IWorkspace;
-    Doc : IDocument;
-    FocusedPath : String;
-Begin
-    Result := Nil;
-    ErrCode := '';
-    ErrMsg := '';
-    Workspace := GetWorkspace;
-    If Workspace = Nil Then
-    Begin
-        ErrCode := 'NO_WORKSPACE';
-        ErrMsg := 'No workspace';
-        Exit;
-    End;
-    FocusedPath := '';
-    Doc := Workspace.DM_FocusedDocument;
-    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
-    If LibPath = '' Then LibPath := FocusedPath;
-    If LibPath = '' Then
-    Begin
-        ErrCode := 'NO_LIBRARY';
-        ErrMsg := 'No library is active and library_path was not supplied';
-        Exit;
-    End;
-    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
-    Begin
-        ResetParameters;
-        AddStringParameter('ObjectKind', 'Document');
-        AddStringParameter('FileName', LibPath);
-        RunProcess('WorkspaceManager:OpenObject');
-    End;
-    FocusedPath := '';
-    Doc := Workspace.DM_FocusedDocument;
-    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
-    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
-    Begin
-        ErrCode := 'WRONG_DOCUMENT_FOCUSED';
-        ErrMsg := 'Asked for ' + LibPath + ' but the focused document is "'
-            + FocusedPath + '". Nothing was changed.';
-        Exit;
-    End;
-    Result := PCBServer.GetCurrentPCBLibrary;
-    If Result = Nil Then
-    Begin
-        ErrCode := 'NO_PCBLIB';
-        ErrMsg := 'Focused ' + LibPath + ' but it is not a PCB library. These '
-            + 'tools edit a footprint inside a .PcbLib; a placed pad on a '
-            + 'board is a pcb_ tool''s job.';
-    End;
-End;
-
 { The footprint by name, case-insensitively, as Lib_DeleteFootprintPrimitives  }
 { and Lib_SetDesignator match it. Nil when absent.                             }
 Function FindPcbLibFootprint(PcbLib : IPCB_Library; FpWanted : String) : IPCB_LibComponent;
@@ -15178,6 +15390,8 @@ Begin
                                 Result := Lib_SetFootprintDescription(Params, RequestId);
         'remove_model':         Result := Lib_RemoveModel(Params, RequestId);
         'rename_footprint':     Result := Lib_RenameFootprint(Params, RequestId);
+        'rename_footprints':    Result := Lib_RenameFootprints(Params, RequestId);
+        'save_library':         Result := Lib_SaveLibrary(Params, RequestId);
         'set_model_name':       Result := Lib_SetModelName(Params, RequestId);
         'set_model_source':     Result := Lib_SetModelSource(Params, RequestId);
         'probe_footprint':      Result := Lib_ProbeFootprint(Params, RequestId);

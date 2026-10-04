@@ -113,6 +113,37 @@ _RECIPES: tuple[dict[str, Any], ...] = (
             "verified live."),
     },
     {
+        "task": ("Generate IPC-compliant land patterns with the IPC wizard "
+                 "from CSV templates"),
+        "keywords": ("ipc", "wizard", "csv", "template", "land pattern",
+                     "generator", "batchpcblibcreate"),
+        "when": (("ipc",), ("wizard", "footprint"),
+                 ("batch", "footprint", "csv")),
+        "document_kind": "library",
+        "backends": ("altium",),
+        "use": ["lib_ipc_batch_generate", "lib_rename_footprints",
+                "lib_save_library"],
+        "avoid": [
+            ("obj_run_process", "PCB:BatchPCBLibCreate opens a modal, so "
+                                "the call reports a failure while the form "
+                                "is up, and the file dialog, Start, report, "
+                                "',' renames and reload are then all left "
+                                "to drive by hand"),
+            ("app_run_ui_command", "driving the batch form step by step is "
+                                   "the ten-call recipe lib_ipc_batch_"
+                                   "generate replaces"),
+        ],
+        "note": (
+            "One CSV per run, in the template's own layout (row 0 = the "
+            "template's tag row, row 1 = column names). Run it with "
+            "preflight_only first: it refuses xls input, a blank PinOrder "
+            "on SOT23, a PinOrder like '1 -2 -3', and names already in the "
+            "library, and lists the names a run would create. Names the "
+            "generator wrote with ',' for '.' are renamed back, but only "
+            "ones this call created. The library is saved and reloaded at "
+            "the end, so edits can follow straight away."),
+    },
+    {
         "task": "Set mechanical layer names and kinds on a BOARD",
         "keywords": ("mechanical", "layer", "mechkind", "kind", "rename",
                      "pair", "paired", "board"),

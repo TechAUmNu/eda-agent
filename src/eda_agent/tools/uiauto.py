@@ -73,7 +73,8 @@ def _altium_pid():
     return int(status["pid"]), None
 
 
-def _resolve_dialog_control(pid, control_label: str, dialog_title: str):
+def _resolve_dialog_control(pid, control_label: str, dialog_title: str,
+                            prefer_roles=None):
     """One control in one open dialog: (info, None) or (None, refusal).
 
     Factored out of app_set_dialog_control so the tools added alongside
@@ -95,7 +96,7 @@ def _resolve_dialog_control(pid, control_label: str, dialog_title: str):
             "that is not on screen")}
     dialog = open_dialogs[0]
 
-    found = controls.find(dialog, control_label)
+    found = controls.find(dialog, control_label, prefer_roles=prefer_roles)
     if found is None:
         # NOT EVERY CONTROL HAS A LABEL. Altium's grids and property
         # editors leave many unnamed, and a label was the only way to
@@ -357,14 +358,31 @@ def register_uiauto_tools(mcp):
             return {"ok": True, "dialog": dialog.title,
                     "controls": controls.describe_all(dialog)}
 
-        found = controls.find(dialog, control_label)
-        if found is None:
-            labels = [c["label"] or c["name"]
-                      for c in controls.describe_all(dialog)]
-            return {"ok": False,
-                    "reason": (f"{control_label!r} is not in "
-                               f"{dialog.title!r}"),
-                    "offered": [x for x in labels if x]}
+        # A FIELD AND ITS LABEL SHARE A NAME. A common file dialog's File
+        # name edit is named after the static beside it, and the static
+        # comes first, so a text write used to land on the label: MEASURED
+        # on Altium's 'Open Package Data Files' (2026-10-02), where the
+        # write "succeeded" because the label then read back the new text.
+        # A text write asks for the controls that can hold text first.
+        #
+        # Resolved through _resolve_dialog_control, as the sibling tools
+        # are, so '#N' and 'role#N' work here too. Its own refusal has
+        # always pointed callers at this tool's list_only numbering, which
+        # this tool could not then accept.
+        found, problem = _resolve_dialog_control(
+            pid, control_label, dialog_title,
+            prefer_roles=("text", "combobox") if text is not None else None)
+        if problem is not None:
+            return problem
+        if text is not None and found.get("role") == "statictext":
+            return {"ok": False, "control": found.get("label"),
+                    "reason": (f"{control_label!r} resolves only to a "
+                               f"LABEL, and writing it changes the caption "
+                               f"rather than the field. Address the field "
+                               f"as '#N' or 'text#N' from list_only=True"),
+                    "offered": [c["label"] or c["name"] for c in
+                                controls.describe_all(dialog)
+                                if c.get("role") in ("text", "combobox")]}
 
         if checked is not None:
             result = controls.set_checked(found["hwnd"], bool(checked))

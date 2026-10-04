@@ -185,6 +185,11 @@ INTERACTION_OVERRIDES = {
     # answer, and anyone filtering for operations that keep the session
     # responsive must not be handed this one.
     "app_update_from_libraries": MODAL,
+    # Opens the IPC Footprint Wizard's batch form through RunProcess,
+    # which does not return until the form closes. The tool answers
+    # the form itself, but while it runs the bridge cannot answer
+    # anything, exactly as for the wizard above.
+    "lib_ipc_batch_generate": MODAL,
     # MEASURED MODAL during the live sweep of 2026-08-24. Each of these was
     # published as silent, so anything filtering for "keeps the session
     # responsive" was handed a tool that blocks the bridge until a human

@@ -1001,6 +1001,64 @@ class AltiumBridge:
             timeout,
         )
 
+    def send_command_detached(
+        self,
+        command: str,
+        params: Optional[dict[str, Any]] = None,
+    ) -> str:
+        """Publish a request and return its id WITHOUT waiting for a reply.
+
+        FOR A HANDLER THAT IS EXPECTED TO BLOCK. ``RunProcess`` on a
+        process that opens a modal does not return until the modal closes,
+        so ``send_command_async`` on it cannot succeed: its dialog probe
+        sees the disabled main window after three seconds and raises. That
+        is how ``obj_run_process PCB:BatchPCBLibCreate`` reported a failure
+        on every run that worked. A caller that will drive the dialog
+        itself publishes here, drives it over Win32, then reads the reply
+        with ``collect_detached``; the reply arriving is the proof the
+        handler returned and the scripting engine is free again.
+
+        The same policy and liveness checks as the waiting senders.
+        """
+        refusal = refuse_command(command)
+        if refusal is not None:
+            raise AltiumCommandError(refusal, code="REFUSED_BY_POLICY")
+        if not self.is_altium_running():
+            raise AltiumNotRunningError()
+        self._ensure_keepalive()
+        request = CommandRequest(command=command, params=params or {})
+        _trace_log(self.config.workspace_dir,
+                   f"SEND_DETACHED cmd={command} id={request.id[:8]}")
+        self._publish_request(request)
+        return request.id
+
+    def collect_detached(self, request_id: str,
+                         timeout: float) -> Optional[CommandResponse]:
+        """The reply to a detached request, or None if none came in time.
+
+        Deliberately WITHOUT the modal probe ``_poll_response`` runs: the
+        caller detached because a dialog was expected, so a dialog here is
+        not an error. A reply that does not parse yet is retried, since
+        Pascal writes the file in place. The file is removed once read.
+        """
+        path = self._response_path(request_id)
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            try:
+                if path.exists() and path.stat().st_size > 0:
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+                    return CommandResponse.from_dict(data)
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                pass
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.1)
+
     def ping(self) -> bool:
         try:
             self.send_command("application.ping", timeout=3.0)

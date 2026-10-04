@@ -1,4 +1,4 @@
-# Release verification: 2026.10.04.4
+# Release verification: 2026.10.04.5
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -51,6 +51,7 @@ works elsewhere cannot be an undeclared identifier:
 | 26, pin properties | `Designator` | yes, `Lib_AddPins` | low |
 | 27, current model | `IsCurrent` | yes, `Lib_NormalizeImplementations` | low |
 | 28, No-ERC on a pin | `Location` | yes, `Gen_PlaceNetLabel` | low |
+| 30, batch rename | `Name` on a footprint | yes, `Lib_RenameFootprint` | low |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -231,7 +232,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.04.4`, `version_match` =
+Expect `altium_script_version` = `2026.10.04.5`, `version_match` =
 `true`, and `mcp_server_version` = `0.6.1`.
 
 Those are two different versions and they fail differently.
@@ -1507,6 +1508,51 @@ and `proj_get_nets` no longer names the label's net. Make an edit, then
 
 Live session order for steps 25 to 29: 25 first (one ordinal-risk write on
 a scratch library), then 27, 26, 29, 28.
+
+---
+
+## 30. IPC batch generator, library save and batch rename (not yet run live)
+
+Two new handlers, `library.save_library` and `library.rename_footprints`,
+use only members that shipped handlers already use: `Lib_SaveLibrary` is
+`SaveOneDocByDocRef`'s `SetModified` + `DoFileSave('')` plus `FileAge`
+from `AgesForPaths`; `Lib_RenameFootprints` is `Lib_RenameFootprint`'s
+walk and `Name` write in a loop. Low compile risk; run item 1 below
+first anyway, on a scratch library, because the batch tool chains them.
+
+1. On a scratch PcbLib with two footprints `A` and `B`, open in Altium:
+
+   ```
+   lib_rename_footprints(renames=[{"from": "A", "to": "A2"},
+                                  {"from": "Missing", "to": "X"},
+                                  {"from": "B", "to": "A2"}],
+                         library_path=<scratch>)
+   ```
+
+   Expect statuses `renamed`, `not_found`, `name_exists`, and
+   `pending_save: true`. Then `lib_save_library(<scratch>)`: expect
+   `ok: true`, `written_to_disk: true`, `still_modified: false`. Then
+   `lib_reload_library` and `lib_get_footprints`: `A2` and `B`. Confirm
+   `app_ping` answers after each call.
+
+2. `lib_ipc_batch_generate(csv_paths=[<a one-row SOT23 CSV whose
+   FootprintName contains a '.'>], library_path=<scratch>,
+   preflight_only=True)`: expect `ok: true` and the name under
+   `preflight.expected_names`. Nothing opens in Altium.
+
+3. The same call without `preflight_only`. RECORD these read-backs, which
+   settle what was taken from the extension's binary rather than seen:
+   `runs[0].dialog.dialog_title`, `runs[0].dialog.before.options`,
+   `runs[0].dialog.before.output_folder_candidates`,
+   `runs[0].dialog.destination.label`,
+   `runs[0].dialog.add_file.route.route` (`handle` or `keyboard`),
+   `runs[0].dialog.run.finished_by`, `runs[0].dialog.run.seen_stop`,
+   `runs[0].dialog.run.main_window_blocked`, `runs[0].engine_free`,
+   `runs[0].report_closed`. Expect `ok: true`, the footprint under
+   `generated` with its '.', and one entry under `renamed`.
+
+4. Run item 3 again unchanged: it must refuse at `stopped.stage =
+   "preflight"` naming the footprint as already present, and open nothing.
 
 ---
 

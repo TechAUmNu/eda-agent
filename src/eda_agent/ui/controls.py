@@ -164,7 +164,8 @@ def describe_all(window) -> list:
     return out
 
 
-def find(window, label: str, role: Optional[str] = None):
+def find(window, label: str, role: Optional[str] = None,
+         prefer_roles: Optional[tuple] = None):
     """One control by its visible label, ignoring & , case and chrome.
 
     Matching on the label rather than an index is the same choice made
@@ -180,6 +181,12 @@ def find(window, label: str, role: Optional[str] = None):
     Exact is tried across every control BEFORE the relaxed pass, so a
     dialog holding both 'Next' and '&Next >' still resolves the one that
     was asked for rather than whichever came first in the tree.
+
+    ``prefer_roles`` CHOOSES AMONG NAMESAKES. A field is named after the
+    label beside it, and the label comes first in the tree, so the first
+    match for 'File name:' in a common file dialog is the static, not the
+    edit. Given roles, the first match of the first listed role wins;
+    without them the result is exactly the first match, as it always was.
     """
     def flat(text):
         return str(text or "").replace("&", "").strip().lower()
@@ -190,21 +197,29 @@ def find(window, label: str, role: Optional[str] = None):
         # 'Save > Export' keeps its middle intact.
         return flat(text).strip("<>. \t")
 
+    def pick(candidates):
+        if role is not None:
+            candidates = [c for c in candidates if c["role"] == role]
+        for wanted_role in prefer_roles or ():
+            for info in candidates:
+                if info["role"] == wanted_role:
+                    return info
+        return candidates[0] if candidates else None
+
     described = describe_all(window)
     wanted = flat(label)
-    for info in described:
-        if flat(info["label"]) == wanted or flat(info["name"]) == wanted:
-            if role is None or info["role"] == role:
-                return info
+    hit = pick([info for info in described
+                if flat(info["label"]) == wanted
+                or flat(info["name"]) == wanted])
+    if hit is not None:
+        return hit
 
     loose = bare(label)
     if not loose:
         return None
-    for info in described:
-        if bare(info["label"]) == loose or bare(info["name"]) == loose:
-            if role is None or info["role"] == role:
-                return info
-    return None
+    return pick([info for info in described
+                 if bare(info["label"]) == loose
+                 or bare(info["name"]) == loose])
 
 
 def _click(hwnd: int) -> None:
