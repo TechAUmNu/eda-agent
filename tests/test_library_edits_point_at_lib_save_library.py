@@ -120,3 +120,42 @@ def test_no_library_handler_reply_sends_the_agent_to_app_save_all(
     assert not offenders, (
         "a library handler's next_step or note names app_save_all without "
         "lib_save_library:\n" + "\n---\n".join(o[:200] for o in offenders))
+
+
+# One step away from every failed lib_save_library: its reason says to run
+# app_exit_active_command, and that tool's docstring and reply are where
+# the agent reads what to do NEXT. Both said app_save_all.
+APPLICATION_PAS = ROOT / "scripts" / "altium" / "Application.pas"
+
+
+def test_the_exit_active_command_docstring_names_lib_save_library():
+    from eda_agent.tools.application import register_application_tools
+
+    captured: dict = {}
+
+    class _Mcp:
+        def tool(self, *a, **k):
+            def deco(fn):
+                captured[fn.__name__] = fn
+                return fn
+            return deco
+
+    register_application_tools(_Mcp())
+    doc = captured["app_exit_active_command"].__doc__ or ""
+    assert "lib_save_library" in doc, (
+        "app_exit_active_command sends the agent to app_save_all after a "
+        "failed lib_save_library")
+
+
+def test_the_exit_active_command_reply_names_lib_save_library():
+    from tests.pascal_source import strip_comments
+
+    code = strip_comments(APPLICATION_PAS.read_text(encoding="utf-8",
+                                                    errors="replace"))
+    start = code.index("Function App_ExitActiveCommand")
+    body = code[start:code.index("End;", code.index("BuildSuccessResponse",
+                                                   start))]
+    assert "app_save_all" in body          # the scan sees the reply
+    assert "lib_save_library" in body, (
+        "the exit_active_command reply names app_save_all without "
+        "lib_save_library")

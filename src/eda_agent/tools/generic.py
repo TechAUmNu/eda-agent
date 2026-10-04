@@ -10,8 +10,8 @@ a pass-through layer for object iteration, property access, and process executio
 import difflib
 import re
 from typing import Any, Optional
-from ..bridge.payload import (finite_number, name_wire_problem,
-                              payload_safe, whole_number)
+from ..bridge.payload import (MAX_COORD_MILS, finite_number,
+                              name_wire_problem, payload_safe, whole_number)
 from ..bridge import get_bridge
 from ..safety import refuse_process, untrusted_text_note
 from .pin_hints import pin_location_hint
@@ -183,13 +183,16 @@ def no_erc_targets_payload(targets: Any) -> tuple[str, list[str]]:
             continue
         # Whole mils by the house guard. int() truncated 12.7 to 12 and
         # turned True into 1, and an infinity raised OverflowError past
-        # the except; the Pascal reads these with StrToIntDef.
-        x = whole_number(t.get("x"))
-        y = whole_number(t.get("y"))
+        # the except; the Pascal reads these with StrToIntDef. Bounded by
+        # the coordinate space too: x=1e30 passed IsIntStr, StrToIntDef
+        # turned it into 0, and the marker was placed at the origin and
+        # reported as placed.
+        x = whole_number(t.get("x"), MAX_COORD_MILS)
+        y = whole_number(t.get("y"), MAX_COORD_MILS)
         if x is None or y is None:
             problems.append(
                 f"targets[{i}]: give designator + pin, or whole-number "
-                f"x + y in mils")
+                f"x + y in mils (at most {MAX_COORD_MILS} either way)")
             continue
         ops.append(f"x={x};y={y}")
     return "~~".join(ops), problems

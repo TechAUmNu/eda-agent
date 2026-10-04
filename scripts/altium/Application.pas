@@ -833,7 +833,9 @@ Begin
         + ',"dirty_after":' + IntToStr(DirtyAfter)
         + ',"note":"this closes a transaction left open by a handler that '
         + 'died between PreProcess and PostProcess. It does not itself save '
-        + 'anything: call app_save_all afterwards and check still_dirty."}');
+        + 'anything. Save again afterwards: a library with lib_save_library, '
+        + 'which writes only that file; app_save_all only to write every open '
+        + 'document, and check still_dirty."}');
 End;
 
 Function HandleApplicationCommand(Action : String; Params : String; RequestId : String) : String;

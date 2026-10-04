@@ -379,3 +379,27 @@ def test_an_open_dialog_refusal_reads_the_screen_off_the_event_loop(
         "Unsaved Changes"
     assert seen["thread"] is not threading.main_thread(), (
         "the screen report ran on the event loop's thread")
+
+
+def test_an_open_dialog_refusal_survives_a_screen_report_that_raises(
+        monkeypatch, tmp_path):
+    """The refusal reads the screen through _screen_report like every
+    stop: an OCR failure is an entry in the refusal, not a traceback in
+    place of it."""
+    from eda_agent.tools import uiauto
+    from eda_agent.ui import dialog_report, ipc_batch_dialog, windows
+
+    def broken(pid):
+        raise RuntimeError("OCR engine unavailable")
+
+    monkeypatch.setattr(uiauto, "_altium_pid", lambda: (42, None))
+    monkeypatch.setattr(ipc_batch_dialog, "available", lambda: True)
+    monkeypatch.setattr(windows, "dialogs", lambda pid: ["a dialog"])
+    monkeypatch.setattr(windows, "is_blocked", lambda pid: True)
+    monkeypatch.setattr(dialog_report, "report", broken)
+
+    out = asyncio.run(_library_tools()["lib_ipc_batch_generate"](
+        csv_paths=[str(tmp_path / "a.csv")],
+        library_path=str(tmp_path / "x.PcbLib")))
+    assert out["ok"] is False and "already open" in out["reason"]
+    assert "OCR engine unavailable" in out["stopped"]["dialogs"]["error"]

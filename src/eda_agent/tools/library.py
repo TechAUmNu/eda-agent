@@ -8,9 +8,9 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 from ..bridge import get_bridge
-from ..bridge.payload import (finite_number, name_wire_problem, non_finite,
-                              payload_safe, unsendable_chars, whole_number,
-                              wire_bool)
+from ..bridge.payload import (MAX_COORD_MILS, finite_number, join_ops,
+                              name_wire_problem, non_finite, payload_safe,
+                              unsendable_chars, whole_number, wire_bool)
 from ..libimport import extract_cse_zip, inspect_cse_zip
 from .bulk_hints import BulkHintTracker
 from .datasheet_hints import tag_response
@@ -41,29 +41,38 @@ def _encode_layer_ops(layers) -> "str | dict":
         if not name:
             return {"success": False,
                     "error": "every layer entry needs a 'layer' key"}
+        # layer selects, name renames and kind is a vocabulary word, so all
+        # three are refused by the name rule, never sanitised. The old
+        # check looked for '~~' only: name='A;enabled=false' went out as a
+        # live enabled=false ahead of the real flag, and GetBatchField's
+        # first match won.
+        for key, value in (("layer", name), ("name", entry.get("name")),
+                           ("kind", entry.get("kind"))):
+            why = "" if value is None else name_wire_problem(str(value))
+            if why:
+                return {"success": False,
+                        "error": f"{key} {str(value)!r} {why}"}
         fields = [f"layer={name}"]
         if entry.get("name") is not None:
             fields.append(f"name={entry['name']}")
         if entry.get("enabled") is not None:
-            fields.append(
-                f"enabled={'true' if entry['enabled'] else 'false'}")
+            # By the one boolean rule: truthiness read "false" as true.
+            enabled = wire_bool(entry["enabled"])
+            if enabled is None:
+                return {"success": False,
+                        "error": (f"enabled must be true or false, got "
+                                  f"{entry['enabled']!r}")}
+            fields.append(f"enabled={'true' if enabled else 'false'}")
         if entry.get("kind") is not None:
             fields.append(f"kind={entry['kind']}")
-        joined = ";".join(str(f) for f in fields)
-        # ';' separates fields and '~~' separates operations, so a value
-        # carrying either would silently split into something else.
-        if "~~" in joined:
-            return {"success": False,
-                    "error": (f"a value contains the '~~' separator and "
-                              f"cannot be encoded: {joined}")}
-        ops.append(joined)
+        ops.append(";".join(str(f) for f in fields))
 
     if not ops:
         return {"success": False,
                 "error": ("layers is empty, so nothing would change. An "
                           "empty request that reports success is how a "
                           "library gets skipped unnoticed")}
-    return "~~".join(ops)
+    return join_ops(ops)
 
 
 # Schematic symbol grid is 100 mils. Every pin Location and every
@@ -231,6 +240,13 @@ async def _save_library_verified(bridge, library_path: str) -> dict:
     caller must not go on to reload, because closing a dirty library raises
     Altium's Unsaved Changes prompt and blocks the bridge.
     """
+    if not str(library_path or "").strip():
+        # Path("") is the working directory, whose mtime would stand in
+        # for the library's; and there is no document to save.
+        return {"ok": False, "written_to_disk": False, "library_path": "",
+                "reason": "no library path to save (the PcbLib could not be "
+                          "resolved)"}
+
     def mtime():
         try:
             return Path(library_path).stat().st_mtime_ns
@@ -458,7 +474,8 @@ def _pads_payload(pads: list[dict[str, Any]],
     A pad whose number field is not a finite number, or whose plated /
     allow_blank_designator is not a boolean, is dropped and counted the
     same way: sending it would raise here or write a value nobody asked
-    for.
+    for. So is a corner_radius that is not a whole percentage 0 to 100,
+    the rule lib_add_footprint_pad and the pad edits already apply.
     """
     op_strs: list[str] = []
     skipped_invalid = 0
@@ -489,6 +506,12 @@ def _pads_payload(pads: list[dict[str, Any]],
                for k in _PAD_NUMBER_KEYS):
             skipped_invalid += 1
             continue
+        # A whole percentage, as the single-pad tool and the pad edits
+        # insist: round("50") raised, 50.5 was rounded and 150 went out.
+        corner = whole_number(p.get("corner_radius", 25))
+        if corner is None or not 0 <= corner <= 100:
+            skipped_invalid += 1
+            continue
         fields = [
             f"designator={desig}",
             f"x={_mil(p.get('x', 0))}",
@@ -497,8 +520,10 @@ def _pads_payload(pads: list[dict[str, Any]],
             f"y_size={_mil(p.get('y_size', 60))}",
             f"hole_size={_mil(p.get('hole_size', 0))}",
             f"shape={_payload_safe(p.get('shape', 'rectangular'))}",
-            f"corner_radius={round(p.get('corner_radius', 25))}",
-            f"rotation={_payload_safe(p.get('rotation', 0))}",
+            f"corner_radius={corner}",
+            # Formatted, never sent raw: "1_000" passes float() and reads
+            # as 0 in StrToFloatDef.
+            f"rotation={_mil(p.get('rotation', 0))}",
             f"layer={_payload_safe(p.get('layer', 'TopLayer'))}",
         ]
         # optional pad features (patch 2): emitted only when given
@@ -512,7 +537,7 @@ def _pads_payload(pads: list[dict[str, Any]],
         if p.get('hole_rotation') is not None:
             fields.append(f"hole_rotation={float(p['hole_rotation'])}")
         op_strs.append(";".join(fields))
-    return "~~".join(op_strs), skipped_invalid
+    return join_ops(op_strs), skipped_invalid
 
 
 #: Per-edit fields lib_modify_footprint_pads accepts, by how they travel.
@@ -698,7 +723,9 @@ def _pad_edits_payload(edits: object,
                             f"field to set")
             continue
         ops.append(";".join(fields))
-    return "~~".join(ops), problems
+    # join_ops, not "~~": a layer ending in '~' made the NEXT edit's key
+    # '~designator', which reads as '' and selects the unnamed pads.
+    return join_ops(ops), problems
 
 
 def _pad_selectors_payload(pads: object) -> tuple[str, list[str]]:
@@ -823,7 +850,8 @@ def _tracks_payload(tracks: list[dict[str, Any]]) -> tuple[str, int]:
             f"layer={_payload_safe(t.get('layer') or 'TopOverlay')}",
         ]
         op_strs.append(";".join(fields))
-    return "~~".join(op_strs), skipped_invalid
+    # join_ops: a layer ending in '~' cost the next track its x1.
+    return join_ops(op_strs), skipped_invalid
 
 
 def _fills_payload(
@@ -877,7 +905,7 @@ def _fills_payload(
         if keepout:
             fields.append("keepout=true")
         op_strs.append(";".join(fields))
-    return "~~".join(op_strs), skipped
+    return join_ops(op_strs), skipped
 
 
 #: Region kinds the Pascal accepts. Anything else is refused on this side,
@@ -948,7 +976,7 @@ def _regions_payload(
         if layer:
             fields.append(f"layer={_payload_safe(layer)}")
         op_strs.append(";".join(fields))
-    return "~~".join(op_strs), skipped
+    return join_ops(op_strs), skipped
 
 
 #: Values the text tool's ``registration`` diagnostic accepts.
@@ -967,7 +995,10 @@ def _pins_payload(pins: list[dict[str, Any]]) -> tuple[str, int]:
 
     Returns ``(payload, skipped_invalid)``. lib_add_footprint_pads drops
     blank designators the same way, so the count is reported, never
-    silently absorbed.
+    silently absorbed. A pin carrying a number or flag that is not one is
+    dropped and counted too: x, y, length and rotation must be finite
+    numbers (x, y and length within the coordinate space, MAX_COORD_MILS),
+    and owner_part_id a whole number, 0 or more.
     """
     op_strs: list[str] = []
     skipped_invalid = 0
@@ -986,19 +1017,37 @@ def _pins_payload(pins: list[dict[str, Any]]) -> tuple[str, int]:
         if any(v is None for v in flags.values()):
             skipped_invalid += 1
             continue
+        # Numbers by the house guards, never bare round()/int(): text, NaN
+        # or an infinity raised a traceback here, and owner_part_id True
+        # or 1.7 quietly became sub-part 1. Positions are still rounded and
+        # snapped to the pin grid, which is the documented forgiveness.
+        nums = {k: _num(p.get(k, default))
+                for k, default in (("x", 0), ("y", 0), ("length", 200),
+                                   ("rotation", 0))}
+        if (any(v is None for v in nums.values())
+                or any(abs(nums[k]) > MAX_COORD_MILS
+                       for k in ("x", "y", "length"))):
+            skipped_invalid += 1
+            continue
+        owner = None
+        if p.get("owner_part_id") is not None:
+            owner = whole_number(p["owner_part_id"])
+            if owner is None or owner < 0:
+                skipped_invalid += 1
+                continue
         fields = [
             f"designator={desig}",
             f"name={name}",
-            f"x={_snap(round(p.get('x', 0)))}",
-            f"y={_snap(round(p.get('y', 0)))}",
-            f"length={_snap(round(p.get('length', 200)))}",
-            f"rotation={round(p.get('rotation', 0))}",
+            f"x={_snap(round(nums['x']))}",
+            f"y={_snap(round(nums['y']))}",
+            f"length={_snap(round(nums['length']))}",
+            f"rotation={round(nums['rotation'])}",
             f"electrical_type="
             f"{_payload_safe(p.get('electrical_type', 'passive'))}",
             f"hidden={'true' if flags.get('hidden') else 'false'}",
         ]
-        if "owner_part_id" in p and p["owner_part_id"] is not None:
-            fields.append(f"owner_part_id={int(p['owner_part_id'])}")
+        if owner is not None:
+            fields.append(f"owner_part_id={owner}")
         # IEEE edge decorations. Omitted entirely when unset, because a
         # fresh pin already carries eNoSymbol and the Pascal only writes
         # the property when the field is present, which keeps every
@@ -1014,7 +1063,7 @@ def _pins_payload(pins: list[dict[str, Any]]) -> tuple[str, int]:
             if key in flags:
                 fields.append(f"{key}={'true' if flags[key] else 'false'}")
         op_strs.append(";".join(fields))
-    return "~~".join(op_strs), skipped_invalid
+    return join_ops(op_strs), skipped_invalid
 
 
 #: Every key lib_set_pin_properties reads from one pin edit. A key outside
@@ -1046,12 +1095,14 @@ def _pin_edits_payload(pins: Any) -> tuple[str, list[str]]:
       refused, not substituted, and so is a trailing '~'
       (``name_wire_problem``). The designator SELECTS the pin, and a
       fragment such as ``1`` matches a real pin on most symbols, so the
-      edit would land on the wrong one.
+      edit would land on the wrong one. The value checked is the value
+      SENT: both designators are stripped, so ``"2~ "`` is checked as
+      ``"2~"``.
 
     ``length`` and ``owner_part_id`` must be whole numbers (the Pascal
     reads them as integers and refuses anything else, so rounding here
-    would only hide the refusal), and the three flags parse by
-    ``wire_bool``: the string "false" is false.
+    would only hide the refusal; length also within MAX_COORD_MILS), and
+    the three flags parse by ``wire_bool``: the string "false" is false.
 
     Electrical words are NOT checked here: the Pascal asks the one shared
     chain (StrToPinElectrical) and refuses an unknown word per op, so the
@@ -1079,6 +1130,12 @@ def _pin_edits_payload(pins: Any) -> tuple[str, list[str]]:
             continue
         for key in ("designator", "new_designator", "name"):
             value = p.get(key)
+            # Checked exactly as it will be sent. The designators go out
+            # stripped, so "2~ " checked raw passed and went out as "2~",
+            # which ran into the separator and took the next edit's
+            # designator with it.
+            if value is not None and key != "name":
+                value = str(value).strip()
             why = "" if value is None else name_wire_problem(str(value))
             if why:
                 problems.append(
@@ -1096,10 +1153,11 @@ def _pin_edits_payload(pins: Any) -> tuple[str, list[str]]:
                                 f"a whole number, 0 or more")
                 continue
         if p.get("length") is not None:
-            length = whole_number(p["length"])
+            length = whole_number(p["length"], MAX_COORD_MILS)
             if length is None or length <= 0:
                 problems.append(f"pins[{i}] ({desig}): length must be a "
-                                f"whole number of mils, greater than zero")
+                                f"whole number of mils, greater than zero "
+                                f"and at most {MAX_COORD_MILS}")
                 continue
         flags: dict[str, bool] = {}
         for key in ("show_name", "show_designator", "hidden"):
@@ -1129,7 +1187,9 @@ def _pin_edits_payload(pins: Any) -> tuple[str, list[str]]:
         if length is not None:
             fields.append(f"length={length}")
         ops.append(";".join(fields))
-    return "~~".join(ops), problems
+    # join_ops: an electrical_type ending in '~' took the next edit's
+    # designator with it.
+    return join_ops(ops), problems
 
 
 #: Altium's Component Type, in the words its Properties panel uses, to the
@@ -1548,7 +1608,9 @@ def register_library_tools(mcp):
 
         if not payload:
             return {
-                "error": "No valid pins (every entry was missing a designator)",
+                "error": ("No valid pins (every entry was missing a "
+                          "designator, or carried a number or flag that is "
+                          "not one)"),
                 "added": 0,
                 "total": len(pins),
                 "skipped_invalid": skipped_invalid,
@@ -1638,32 +1700,72 @@ def register_library_tools(mcp):
                   single-part symbols.
 
         Returns:
-            Dict with ``added``, ``failed``, ``total`` counts.
+            Dict with ``added``, ``failed``, ``total`` counts. A text whose
+            number or flag is not one refuses the whole call, naming it
+            (``{ok: false, reason, problems}``), and nothing is placed.
         """
         op_strs: list[str] = []
-        for item in texts:
+        problems: list[str] = []
+        for i, item in enumerate(texts):
+            if not isinstance(item, dict):
+                problems.append(f"texts[{i}] is not an object")
+                continue
             content = _payload_safe(str(item.get("text", "")).strip())
             if not content:
                 continue
+            # Numbers and flags by the house guards. round()/int() raised a
+            # traceback on text, NaN or an infinity, and owner_part_id True
+            # became sub-part 1; truthiness drew "false" as bold.
+            nums = {k: _num(item.get(k, default))
+                    for k, default in (("x", 0), ("y", 0), ("rotation", 0))}
+            bad = [k for k, v in nums.items() if v is None
+                   or (k != "rotation" and abs(v) > MAX_COORD_MILS)]
+            font_size = whole_number(item.get("font_size", 10))
+            if font_size is None or font_size <= 0:
+                bad.append("font_size")
+            owner = None
+            if item.get("owner_part_id") is not None:
+                owner = whole_number(item["owner_part_id"])
+                if owner is None or owner < 0:
+                    bad.append("owner_part_id")
+            flags = {}
+            for key in ("bold", "italic"):
+                flag = (False if item.get(key) is None
+                        else wire_bool(item[key]))
+                if flag is None:
+                    bad.append(key)
+                flags[key] = flag
+            if bad:
+                problems.append(
+                    f"texts[{i}] ({content!r}): {', '.join(bad)} not "
+                    f"understood (x, y, rotation are finite numbers; "
+                    f"font_size a whole number above 0; owner_part_id a "
+                    f"whole number, 0 or more; bold and italic true or "
+                    f"false)")
+                continue
             fields = [
                 f"text={content}",
-                f"x={_snap(round(item.get('x', 0)))}",
-                f"y={_snap(round(item.get('y', 0)))}",
-                f"rotation={round(item.get('rotation', 0))}",
-                f"font_size={int(item.get('font_size', 10))}",
+                f"x={_snap(round(nums['x']))}",
+                f"y={_snap(round(nums['y']))}",
+                f"rotation={round(nums['rotation'])}",
+                f"font_size={font_size}",
                 f"font_name={_payload_safe(item.get('font_name', 'Arial'))}",
-                f"bold={'true' if item.get('bold') else 'false'}",
-                f"italic={'true' if item.get('italic') else 'false'}",
+                f"bold={'true' if flags['bold'] else 'false'}",
+                f"italic={'true' if flags['italic'] else 'false'}",
             ]
-            if item.get("owner_part_id") is not None:
-                fields.append(f"owner_part_id={int(item['owner_part_id'])}")
+            if owner is not None:
+                fields.append(f"owner_part_id={owner}")
             op_strs.append(";".join(fields))
+        if problems:
+            return {"ok": False, "added": 0, "problems": problems,
+                    "reason": ("nothing was placed: "
+                               + "; ".join(problems[:5]))}
         if not op_strs:
             return {"error": "No texts provided", "added": 0}
         bridge = get_bridge()
         return await bridge.send_command_async(
             "library.add_symbol_text",
-            {"texts": "~~".join(op_strs)},
+            {"texts": join_ops(op_strs)},
         )
 
     @mcp.tool()
@@ -2638,7 +2740,12 @@ def register_library_tools(mcp):
         designator, reads back to confirm, saves, and reloads. Afterwards those
         designators are stroke and ``lib_fix_designators`` can centre them.
 
-        Returns ``{library_path, designators, converted, names, saved}``.
+        The save is ``lib_save_library``'s (this one file, checked on disk),
+        never ``app_save_all``. If it does not land, the library is not
+        reloaded and ``errors`` says why.
+
+        Returns ``{library_path, designators, converted, names, saved,
+        save}``.
         """
         bridge = get_bridge()
         params: dict[str, Any] = {}
@@ -2651,13 +2758,22 @@ def register_library_tools(mcp):
         saved = False
         if res.get("converted"):
             resolved = res.get("library_path") or library_path
-            try:
-                await bridge.send_command_async(
-                    "application.save_all", {}, timeout=_GEOMETRY_TIMEOUT)
-                saved = True
-            except Exception as e:
-                res.setdefault("errors", []).append(f"save failed: {e}")
-            await _reload_library(bridge, resolved)
+            # ONE library, and only when the file proves it changed.
+            # app_save_all rewrote every open SchDoc and PcbDoc with fresh
+            # UniqueIDs, and "saved" meant only that nothing raised: a save
+            # Altium declined left the library dirty, and the reload below
+            # then closed it into the Unsaved Changes prompt, blocking the
+            # bridge. No reload unless the save landed.
+            save = await _save_library_verified(bridge, resolved or "")
+            res["save"] = save
+            saved = bool(save.get("ok"))
+            if saved:
+                await _reload_library(bridge, resolved)
+            else:
+                res.setdefault("errors", []).append(
+                    f"save failed, so the library was NOT reloaded (closing "
+                    f"it dirty raises Altium's Unsaved Changes prompt): "
+                    f"{save.get('reason')}")
         res["saved"] = saved
         return res
 
@@ -2726,7 +2842,9 @@ def register_library_tools(mcp):
         coordinates, and writes nothing. Pass ``dry_run=False`` to apply.
 
         Applying RUNS TO CONVERGENCE: apply, save, reload the PcbLib, re-plan,
-        repeat until nothing is left. The reload is mandatory, not cosmetic:
+        repeat until nothing is left. The save is ``lib_save_library``'s
+        (this one file, checked on disk), never ``app_save_all``; a save
+        that does not land stops the loop before the reload. The reload is mandatory, not cosmetic:
         Altium caches each text's bounding rectangle at load and never refreshes
         it when the text moves or is resized, so a second pass without a reload
         would centre against stale geometry and shove designators off the part.
@@ -2811,13 +2929,19 @@ def register_library_tools(mcp):
             if not a:
                 break
 
-            try:
-                await bridge.send_command_async(
-                    "application.save_all", {}, timeout=_GEOMETRY_TIMEOUT)
-                saved = True
-            except Exception as e:
-                failed.append({"footprint": "*", "error": f"save failed: {e}"})
+            # ONE library, proven on disk (see lib_convert_designators_to_
+            # stroke): app_save_all churned every open sheet, and a save
+            # Altium declined did not raise, so the reload that follows
+            # closed a dirty library into the Unsaved Changes prompt.
+            save = await _save_library_verified(bridge, resolved_path or "")
+            if not save.get("ok"):
+                failed.append({
+                    "footprint": "*",
+                    "error": (f"save failed, so the library was NOT "
+                              f"reloaded and no further pass ran: "
+                              f"{save.get('reason')}")})
                 break
+            saved = True
 
             if not await _reload_library(bridge, resolved_path):
                 failed.append({
@@ -3883,24 +4007,32 @@ def register_library_tools(mcp):
                         "';' or '~~'"}
             parts = [f"target={target}"]
             style_set = False
-            if op.get("font_id") is not None:
-                parts.append(f"font_id={int(op['font_id'])}")
-                style_set = True
-            if op.get("color") is not None:
-                parts.append(f"color={int(op['color'])}")
-                style_set = True
+            # Whole numbers and booleans by the house guards: int() raised
+            # a traceback on junk and truncated 1.7, and truthiness read
+            # is_hidden "false" as true, hiding every label it touched.
+            for key in ("font_id", "color"):
+                if op.get(key) is not None:
+                    value = whole_number(op[key])
+                    if value is None:
+                        return {"ok": False, "reason":
+                                f"ops[{i}].{key} must be a whole number"}
+                    parts.append(f"{key}={value}")
+                    style_set = True
             if op.get("is_hidden") is not None:
-                parts.append(
-                    "is_hidden="
-                    + ("true" if op["is_hidden"] else "false")
-                )
+                hidden = wire_bool(op["is_hidden"])
+                if hidden is None:
+                    return {"ok": False, "reason":
+                            f"ops[{i}].is_hidden must be true or false"}
+                parts.append(f"is_hidden={'true' if hidden else 'false'}")
                 style_set = True
-            if op.get("orientation") is not None:
-                parts.append(f"orientation={int(op['orientation'])}")
-                style_set = True
-            if op.get("justification") is not None:
-                parts.append(f"justification={int(op['justification'])}")
-                style_set = True
+            for key in ("orientation", "justification"):
+                if op.get(key) is not None:
+                    value = whole_number(op[key])
+                    if value is None:
+                        return {"ok": False, "reason":
+                                f"ops[{i}].{key} must be a whole number"}
+                    parts.append(f"{key}={value}")
+                    style_set = True
             if not style_set:
                 return {"ok": False, "reason":
                         f"ops[{i}] must set at least one of font_id / "
@@ -3908,7 +4040,7 @@ def register_library_tools(mcp):
             encoded_ops.append(";".join(parts))
         bridge = get_bridge()
         params: dict[str, Any] = {
-            "ops": "~~".join(encoded_ops),
+            "ops": join_ops(encoded_ops),
             "limit": str(limit),
         }
         if component_name:
@@ -6033,8 +6165,8 @@ def register_library_tools(mcp):
             under ``warnings``. A CSV listed twice is refused by preflight.
         """
         from . import uiauto as _uiauto
-        from .ipc_batch_flow import run_batch
-        from ..ui import dialog_report, ipc_batch_dialog, windows
+        from .ipc_batch_flow import _screen_report, run_batch
+        from ..ui import ipc_batch_dialog, windows
 
         pid = 0
         if not preflight_only:
@@ -6050,9 +6182,11 @@ def register_library_tools(mcp):
                           "one that was already there")
                 # In an executor, as run_batch does it: the report can run
                 # Windows OCR (about 2 s a dialog), which would stall the
-                # MCP event loop if called inline.
+                # MCP event loop if called inline. Through _screen_report,
+                # as every stop does, so an OCR failure here is an entry in
+                # the refusal, not a traceback in place of it.
                 dialogs = await asyncio.get_running_loop().run_in_executor(
-                    None, dialog_report.report, pid)
+                    None, _screen_report, pid)
                 return {"ok": False, "reason": reason,
                         "stopped": {"stage": "start", "reason": reason,
                                     "dialogs": dialogs}}

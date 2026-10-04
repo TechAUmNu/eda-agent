@@ -267,6 +267,17 @@ def test_a_name_with_a_tab_is_rejected_not_corrupted(tmp_path):
 
 
 # --- the tool ---------------------------------------------------------------
+#: What library.save_library answers when the write landed: the handler's
+#: FileAge moved and the document no longer reads modified. The test paths
+#: do not exist, so the Python mtime witness is None and FileAge decides.
+_SAVED = {"library_path": "Demo.PcbLib", "was_modified": True,
+          "still_modified": False, "file_age_changed": True}
+
+#: The same save, declined: Altium refuses while a command is active and
+#: does not raise, so nothing on disk moved.
+_DECLINED = dict(_SAVED, still_modified=True, file_age_changed=False)
+
+
 class _Cfg:
     def __init__(self, d):
         self.workspace_dir = d
@@ -306,6 +317,8 @@ class _FakeBridge:
         if command == "library.reload_library":
             self.reloaded = True
             return {"reloaded": True, "library_path": "Demo.PcbLib"}
+        if command == "library.save_library":
+            return dict(_SAVED)
         return {}
 
 
@@ -326,6 +339,7 @@ def test_dry_run_is_the_default_and_writes_nothing(monkeypatch, tmp_path):
     commands = [c for c, _ in bridge.calls]
     assert "library.set_designators" not in commands
     assert "application.save_all" not in commands
+    assert "library.save_library" not in commands
     assert not (tmp_path / "designator_edits.tsv").exists()
 
 
@@ -344,7 +358,10 @@ def test_apply_sends_one_bulk_call_then_saves_once(monkeypatch, tmp_path):
     assert len(bulk) == 1  # NOT one call per footprint
     assert bulk[0]["library_path"] == "Demo.PcbLib"
     assert bulk[0]["edits_path"].endswith("designator_edits.tsv")
-    assert [c for c, _ in bridge.calls].count("application.save_all") == 1
+    # ONE library saved, by path, never every open document.
+    saves = [p for c, p in bridge.calls if c == "library.save_library"]
+    assert saves == [{"library_path": "Demo.PcbLib"}]
+    assert "application.save_all" not in [c for c, _ in bridge.calls]
     # the per-footprint command must not be used any more
     assert "library.set_designator" not in [c for c, _ in bridge.calls]
 
@@ -401,6 +418,8 @@ def test_post_write_verification_catches_duplicates(monkeypatch, tmp_path):
             if command == "library.set_designators":
                 return {"applied": 2, "created": 1, "failed": 0, "refused": 0,
                         "missing": []}
+            if command == "library.save_library":
+                return dict(_SAVED)
             return {}
 
     res, _ = _call({"dry_run": False}, monkeypatch, tmp_path,
@@ -462,6 +481,8 @@ def test_post_write_verification_catches_strays(monkeypatch, tmp_path):
             if command == "library.set_designators":
                 return {"applied": 2, "created": 0, "failed": 0, "refused": 0,
                         "missing": []}
+            if command == "library.save_library":
+                return dict(_SAVED)
             return {}
 
     res, _ = _call({"dry_run": False}, monkeypatch, tmp_path,
@@ -492,6 +513,7 @@ class _ConvergingBridge(_FakeBridge):
         self.saves = 0
         self.passes_needed = passes_needed
         self.stuck = stuck
+        self.save_reply = _SAVED
 
     async def send_command_async(self, command, params=None, timeout=None):
         self.calls.append((command, dict(params or {})))
@@ -515,9 +537,9 @@ class _ConvergingBridge(_FakeBridge):
             self.writes += 1
             return {"applied": 1, "created": 0, "failed": 0, "refused": 0,
                     "missing": []}
-        if command == "application.save_all":
+        if command == "library.save_library":
             self.saves += 1
-            return {}
+            return dict(self.save_reply)
         if command == "library.reload_library":
             self.reloads += 1
             return {"reloaded": True, "library_path": "Demo.PcbLib"}
@@ -596,6 +618,41 @@ def test_dry_run_never_reloads(monkeypatch, tmp_path):
     assert bridge.reloads == 0 and bridge.writes == 0
 
 
+def test_a_declined_save_stops_before_the_reload(monkeypatch, tmp_path):
+    """Altium declines a save while a command is active, and does not
+    raise. With app_save_all that read as saved; the reload that followed
+    closed a DIRTY library, raised the Unsaved Changes prompt and blocked
+    the bridge. The verified save must stop the loop first."""
+    bridge = _ConvergingBridge(tmp_path, passes_needed=3)
+    bridge.save_reply = _DECLINED
+    res, bridge = _call({"dry_run": False}, monkeypatch, tmp_path,
+                        bridge=bridge)
+    assert bridge.saves == 1
+    assert bridge.reloads == 0, "reloaded a library whose save did not land"
+    assert bridge.writes == 1
+    assert res["saved"] is False and res["converged"] is False
+    assert any("save failed" in f["error"] and "NOT reloaded" in f["error"]
+               and "app_exit_active_command" in f["error"]
+               for f in res["failed"])
+    assert "application.save_all" not in [c for c, _ in bridge.calls]
+
+
+def test_a_refused_save_stops_before_the_reload(monkeypatch, tmp_path):
+    class _Refusing(_ConvergingBridge):
+        async def send_command_async(self, command, params=None,
+                                     timeout=None):
+            if command == "library.save_library":
+                self.calls.append((command, dict(params or {})))
+                raise RuntimeError("NOT_LOADED")
+            return await super().send_command_async(command, params, timeout)
+
+    bridge = _Refusing(tmp_path, passes_needed=3)
+    res, bridge = _call({"dry_run": False}, monkeypatch, tmp_path,
+                        bridge=bridge)
+    assert bridge.reloads == 0 and res["saved"] is False
+    assert any("NOT_LOADED" in f["error"] for f in res["failed"])
+
+
 # --- TrueType -> stroke conversion ------------------------------------------
 def test_convert_to_stroke_saves_and_reloads_when_something_changed(
         monkeypatch, tmp_path):
@@ -609,6 +666,9 @@ def test_convert_to_stroke_saves_and_reloads_when_something_changed(
             if command == "library.convert_designators_to_stroke":
                 return {"library_path": "Demo.PcbLib", "designators": 44,
                         "converted": 3, "names": ["A", "B", "C"]}
+            if command == "library.save_library":
+                assert params == {"library_path": "Demo.PcbLib"}
+                return dict(_SAVED)
             return {}
 
     monkeypatch.setattr(lib, "get_bridge", lambda: _Bridge())
@@ -618,9 +678,41 @@ def test_convert_to_stroke_saves_and_reloads_when_something_changed(
     c = r[0] if isinstance(r, tuple) else r
     res = json.loads(c[0].text)
     assert res["converted"] == 3 and res["saved"] is True
-    # a change must be flushed AND the caches rebuilt
-    assert "application.save_all" in calls
-    assert "library.reload_library" in calls
+    # a change must be flushed AND the caches rebuilt, saving ONE library
+    assert "library.save_library" in calls
+    assert "application.save_all" not in calls
+    assert calls.index("library.save_library") < calls.index(
+        "library.reload_library")
+
+
+def test_convert_to_stroke_does_not_reload_after_a_declined_save(
+        monkeypatch, tmp_path):
+    """The reload closes the library. Closed dirty, it raises Altium's
+    Unsaved Changes prompt and the bridge is blocked behind it."""
+    calls = []
+
+    class _Bridge:
+        config = _Cfg(tmp_path)
+
+        async def send_command_async(self, command, params=None, timeout=None):
+            calls.append(command)
+            if command == "library.convert_designators_to_stroke":
+                return {"library_path": "Demo.PcbLib", "designators": 44,
+                        "converted": 3, "names": ["A", "B", "C"]}
+            if command == "library.save_library":
+                return dict(_DECLINED)
+            return {}
+
+    monkeypatch.setattr(lib, "get_bridge", lambda: _Bridge())
+    m = FastMCP("t")
+    register_all_tools(m)
+    r = asyncio.run(m.call_tool("lib_convert_designators_to_stroke", {}))
+    c = r[0] if isinstance(r, tuple) else r
+    res = json.loads(c[0].text)
+    assert res["saved"] is False and res["save"]["ok"] is False
+    assert "library.reload_library" not in calls
+    assert "application.save_all" not in calls
+    assert any("NOT reloaded" in e for e in res["errors"])
 
 
 def test_convert_to_stroke_no_save_when_nothing_to_convert(monkeypatch, tmp_path):
@@ -644,6 +736,7 @@ def test_convert_to_stroke_no_save_when_nothing_to_convert(monkeypatch, tmp_path
     res = json.loads(c[0].text)
     assert res["converted"] == 0 and res["saved"] is False
     assert "application.save_all" not in calls
+    assert "library.save_library" not in calls
 
 
 def test_refused_creates_are_surfaced_as_failures(monkeypatch, tmp_path):
@@ -670,3 +763,4 @@ def test_nothing_to_do_means_no_write_and_no_save(monkeypatch, tmp_path):
     commands = [c for c, _ in bridge.calls]
     assert "library.set_designators" not in commands
     assert "application.save_all" not in commands
+    assert "library.save_library" not in commands

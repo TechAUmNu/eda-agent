@@ -95,6 +95,12 @@ _CASES = [
         "component_name": "U1",
         "pins": [{"designator": "1", "new_designator": "2~"},
                  {"designator": "3", "name": "X"}]}),
+    # The same, behind trailing whitespace: checked raw, "2~ " passed and
+    # went out stripped as "2~".
+    ("lib_set_pin_properties", {
+        "component_name": "U1",
+        "pins": [{"designator": "1", "new_designator": "2~ "},
+                 {"designator": "3", "name": "X"}]}),
 ]
 
 

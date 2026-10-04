@@ -281,7 +281,9 @@ def test_text_registrations_agree_with_the_pascal():
 # ---------------------------------------------------------------------------
 
 def _fields(op: str) -> dict[str, str]:
-    return dict(f.split("=", 1) for f in op.split(";"))
+    # GetBatchField's rule: a field with no '=' names nothing and is
+    # skipped. join_ops closes every operation but the last with one.
+    return dict(f.split("=", 1) for f in op.split(";") if "=" in f)
 
 
 def test_a_decimal_track_survives():

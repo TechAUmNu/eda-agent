@@ -434,8 +434,11 @@ def register_application_tools(mcp):
 
         Calling it when nothing is outstanding is harmless.
 
-        It saves nothing by itself. Run ``app_save_all`` afterwards and
-        check ``still_dirty``.
+        It saves nothing by itself. Save again afterwards: a LIBRARY with
+        ``lib_save_library`` (it writes that one file and checks
+        ``written_to_disk``), and ``app_save_all`` only when every open
+        document should be written (it rewrites open SchDocs and PcbDocs
+        with fresh UniqueIDs; check its ``still_dirty``).
 
         Returns:
             Dict reporting whether each server accepted the unwind, plus
