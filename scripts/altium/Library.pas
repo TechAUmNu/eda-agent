@@ -1328,6 +1328,307 @@ Begin
     Try Result := Footprint.Y; Except End;
 End;
 
+{ ResolveLayerName - Human name for any TLayer, including the mechanical      }
+{ layers above 16 that GetLayerString cannot map (it returns 'Unknown' for    }
+{ them, and a modern Altium build encodes those as large ordinals such as     }
+{ 0x04000012). Falls back to the board's own layer stack, which names every   }
+{ layer the document actually has. Returns '' if nothing can name it, so the  }
+{ caller can fall back to the raw ordinal.                                    }
+{ (Moved up from beside Lib_GetLibraryGeometry so the add handlers below can   }
+{ echo a resolved layer: DelphiScript has no forward declarations.)            }
+Function ResolveLayerName(Board : IPCB_Board; Lyr : TLayer) : String;
+Var
+    LayerObj : IPCB_LayerObject_V7;
+    Stack : IPCB_LayerStack_V7;
+Begin
+    Result := '';
+    Try Result := GetLayerString(Lyr); Except End;
+    If (Result <> '') And (Result <> 'Unknown') Then Exit;
+    Result := '';
+    If Board = Nil Then Exit;
+    Try
+        Stack := Board.LayerStack_V7;
+        If Stack <> Nil Then
+        Begin
+            LayerObj := Stack.LayerObject_V7[Lyr];
+            If LayerObj <> Nil Then Result := LayerObj.Name;
+        End;
+    Except
+        Result := '';
+    End;
+End;
+
+{..............................................................................}
+{ ResolveLibFootprint - the footprint a footprint-authoring call writes into.  }
+{                                                                              }
+{ ONE RESOLVER FOR EVERY ADD HANDLER. Before this, only Lib_AddFootprintText   }
+{ could name its footprint; pads, tracks and arcs wrote into whatever          }
+{ PcbLib.CurrentComponent happened to be, so the one reliable way to aim a     }
+{ track at a footprint was to stamp a text on it first.                        }
+{                                                                              }
+{ Params read here, so every caller accepts them without repeating the code:   }
+{   library_path   - optional .PcbLib; focused first, and VERIFIED focused     }
+{                    afterwards, the way Lib_DeleteFootprintPrimitives does,   }
+{                    because an OpenObject that silently fails leaves the      }
+{                    previous library in front and the write would land there. }
+{   component_name - optional footprint name (footprint_name is accepted as   }
+{                    the same thing). Empty means the library's current one.  }
+{                                                                              }
+{ A NAMED FOOTPRINT IS MADE CURRENT, AND THE SWITCH IS VERIFIED. Every add     }
+{ handler registers its primitive with the footprint AND with PcbLib.Board,    }
+{ and Lib_SetDesignator records why the second matters here:                   }
+{ Board.AddPCBObject attaches to the library's CURRENT component. A footprint  }
+{ that is named but not current would get the primitive through               }
+{ Footprint.AddPCBObject while the board attached the same object to whichever }
+{ footprint is current: one primitive split across two footprints. So the     }
+{ switch is checked by reading CurrentComponent back, and a switch that did   }
+{ not take refuses the write.                                                  }
+{ Lib_AddFootprintText used SetState_CurrentComponent inside a silent Try and  }
+{ never checked it; this uses the property write Lib_SetDesignator and         }
+{ Lib_CreateFootprint use, with the same read-back Lib_SetDesignator has.      }
+{                                                                              }
+{ MAKING A FOOTPRINT CURRENT CAN MOVE ITS ORIGIN (Lib_SetDesignator: "the      }
+{ create path makes the component current, which relocates it"). Callers read }
+{ FootprintOriginX / Y AFTER this returns, never before.                       }
+{                                                                              }
+{ Returns Nil with ErrCode and Why filled when nothing resolves. Interfaces    }
+{ come back through the Result and strings through Var, the shape              }
+{ GetPCBBoardForMutation and FocusSchLib already use.                          }
+{..............................................................................}
+Function ResolveLibFootprint(Params : String; Var ErrCode : String; Var Why : String) : IPCB_LibComponent;
+Var
+    LibPath, FocusedPath, FpWanted, FpName : String;
+    Workspace : IWorkspace;
+    Doc : IDocument;
+    PcbLib : IPCB_Library;
+    Iter : IPCB_LibraryIterator;
+    Footprint, Target : IPCB_LibComponent;
+Begin
+    Result := Nil;
+    ErrCode := '';
+    Why := '';
+    LibPath := ExtractJsonValue(Params, 'library_path');
+    FpWanted := ExtractJsonValue(Params, 'component_name');
+    If FpWanted = '' Then FpWanted := ExtractJsonValue(Params, 'footprint_name');
+
+    If LibPath <> '' Then
+    Begin
+        Workspace := GetWorkspace;
+        If Workspace = Nil Then
+        Begin
+            ErrCode := 'NO_WORKSPACE';
+            Why := 'No workspace';
+            Exit;
+        End;
+        FocusedPath := '';
+        Doc := Workspace.DM_FocusedDocument;
+        If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+        If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
+        Begin
+            ResetParameters;
+            AddStringParameter('ObjectKind', 'Document');
+            AddStringParameter('FileName', LibPath);
+            RunProcess('WorkspaceManager:OpenObject');
+            FocusedPath := '';
+            Doc := Workspace.DM_FocusedDocument;
+            If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+            If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
+            Begin
+                ErrCode := 'WRONG_DOCUMENT_FOCUSED';
+                Why := 'Asked for ' + LibPath + ' but the focused document is "'
+                    + FocusedPath + '". Nothing was added.';
+                Exit;
+            End;
+        End;
+    End;
+
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    If PcbLib = Nil Then
+    Begin
+        ErrCode := 'NO_PCBLIB';
+        Why := 'No PCB library is active';
+        Exit;
+    End;
+
+    If FpWanted = '' Then
+    Begin
+        Target := PcbLib.CurrentComponent;
+        If Target = Nil Then
+        Begin
+            ErrCode := 'NO_FOOTPRINT';
+            Why := 'No footprint is selected (pass component_name to choose one)';
+            Exit;
+        End;
+        Result := Target;
+        Exit;
+    End;
+
+    Target := Nil;
+    Iter := PcbLib.LibraryIterator_Create;
+    Try
+        Footprint := Iter.FirstPCBObject;
+        While Footprint <> Nil Do
+        Begin
+            FpName := '';
+            Try FpName := Footprint.Name; Except End;
+            If UpperCase(FpName) = UpperCase(FpWanted) Then
+            Begin
+                Target := Footprint;
+                Break;
+            End;
+            Footprint := Iter.NextPCBObject;
+        End;
+    Finally
+        PcbLib.LibraryIterator_Destroy(Iter);
+    End;
+    If Target = Nil Then
+    Begin
+        ErrCode := 'FOOTPRINT_NOT_FOUND';
+        Why := 'Footprint not found in library: ' + FpWanted;
+        Exit;
+    End;
+
+    If PcbLib.CurrentComponent <> Target Then
+    Begin
+        Try PcbLib.CurrentComponent := Target; Except End;
+        If PcbLib.CurrentComponent <> Target Then
+        Begin
+            ErrCode := 'SELECT_FAILED';
+            Why := 'Could not make footprint "' + FpWanted + '" current, so '
+                + 'nothing was added: the library board attaches a new '
+                + 'primitive to its CURRENT footprint, and adding anyway '
+                + 'would split it across two footprints.';
+            Exit;
+        End;
+    End;
+    Result := Target;
+End;
+
+{..............................................................................}
+{ RegisterLibPrimitive - the registration every footprint primitive needs.     }
+{                                                                              }
+{ The same four calls Lib_AddFootprintPad carries inline, and for the same     }
+{ measured reason: Footprint.AddPCBObject alone leaves an object that every    }
+{ read reports and the save discards. It has to be added to the library's      }
+{ backing Board as well, and the registration broadcast to both. Factored out  }
+{ so a new primitive kind cannot be written with three of the four.            }
+{                                                                              }
+{ Mode selects which half runs, and exists ONLY to settle one live question:   }
+{ text was measured persisting twice after one call (2026-10-03), while pads  }
+{ and tracks registered the same way persist once. 'both' is the default and  }
+{ the proven pattern; 'footprint' and 'board' let one live session test which }
+{ registration a text needs without redeploying the script. Every handler but  }
+{ Lib_AddFootprintText passes 'both'.                                          }
+{                                                                              }
+{ Prim is the base type. Passing an IPCB_Fill or IPCB_Text in is an upcast,    }
+{ which BindPrimitiveToNet in PCB.pas already does with every primitive kind.  }
+{..............................................................................}
+Procedure RegisterLibPrimitive(PcbLib : IPCB_Library; Footprint : IPCB_LibComponent; Prim : IPCB_Primitive; Mode : String);
+Begin
+    If (Mode = 'both') Or (Mode = 'footprint') Then
+    Begin
+        Footprint.AddPCBObject(Prim);
+        PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
+            c_Broadcast, PCBM_BoardRegisteration, Prim.I_ObjectAddress);
+    End;
+    If (Mode = 'both') Or (Mode = 'board') Then
+    Begin
+        PcbLib.Board.AddPCBObject(Prim);
+        PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress,
+            c_Broadcast, PCBM_BoardRegisteration, Prim.I_ObjectAddress);
+    End;
+End;
+
+{..............................................................................}
+{ LibTextAddresses - every text object in a footprint, as '|addr|addr|'.       }
+{                                                                              }
+{ A membership string, the shape Lib_GetLibraryGeometry's SeenKeys uses, so no }
+{ TStringList has to be created and freed. Yields counts what the group        }
+{ iterator handed back INCLUDING repeats: a primitive added this session is    }
+{ yielded twice until the library is reloaded (measured for pads, 15b5a27),    }
+{ and the count is how a reply can say so instead of hiding it.                }
+{..............................................................................}
+Function LibTextAddresses(Footprint : IPCB_LibComponent; Var Yields : Integer) : String;
+Var
+    GrpIter : IPCB_GroupIterator;
+    Txt : IPCB_Text;
+    Addr : String;
+Begin
+    Result := '|';
+    Yields := 0;
+    If Footprint = Nil Then Exit;
+    GrpIter := Footprint.GroupIterator_Create;
+    Try
+        GrpIter.AddFilter_ObjectSet(MkSet(eTextObject));
+        Txt := GrpIter.FirstPCBObject;
+        While Txt <> Nil Do
+        Begin
+            Inc(Yields);
+            Addr := '';
+            Try Addr := IntToStr(Txt.I_ObjectAddress); Except End;
+            If (Addr <> '') And (Pos('|' + Addr + '|', Result) = 0) Then
+                Result := Result + Addr + '|';
+            Txt := GrpIter.NextPCBObject;
+        End;
+    Finally
+        Footprint.GroupIterator_Destroy(GrpIter);
+    End;
+End;
+
+{..............................................................................}
+{ RemoveLibTextByAddress - take ONE text object out of a footprint, from both  }
+{ the footprint and the library board, the mirror of RegisterLibPrimitive.     }
+{                                                                              }
+{ Removed WHILE THE ITERATOR IS OPEN, after the walk has stopped at the match: }
+{ Lib_DeleteFootprintPrimitives measured that GroupIterator_Destroy releases   }
+{ what the iterator handed out, so removing after the destroy dereferenced a   }
+{ dangling object inside ScriptingSystem.DLL. The walk never resumes after the }
+{ removal, so the skip-entries hazard of removing mid-walk cannot arise.       }
+{                                                                              }
+{ FOOTPRINT FIRST, BOARD SECOND. The footprint removal is the one this         }
+{ codebase already performs. While the board still holds the object it cannot  }
+{ have been freed, so handing it to Board.RemovePCBObject afterwards is safe;  }
+{ the reverse order could hand a freed object to the footprint. Each is in its }
+{ own Try because a double-registered object may already be gone from the      }
+{ second owner.                                                                }
+{                                                                              }
+{ The caller owns PreProcess / PostProcess.                                     }
+{..............................................................................}
+Function RemoveLibTextByAddress(PcbLib : IPCB_Library; Footprint : IPCB_LibComponent; Addr : String) : Boolean;
+Var
+    GrpIter : IPCB_GroupIterator;
+    Prim : IPCB_Primitive;
+    ThisAddr : String;
+Begin
+    Result := False;
+    If (Footprint = Nil) Or (Addr = '') Then Exit;
+    GrpIter := Footprint.GroupIterator_Create;
+    Try
+        GrpIter.AddFilter_ObjectSet(MkSet(eTextObject));
+        Prim := GrpIter.FirstPCBObject;
+        While Prim <> Nil Do
+        Begin
+            ThisAddr := '';
+            Try ThisAddr := IntToStr(Prim.I_ObjectAddress); Except End;
+            If ThisAddr = Addr Then Break;
+            Prim := GrpIter.NextPCBObject;
+        End;
+        If Prim <> Nil Then
+        Begin
+            Try
+                Footprint.RemovePCBObject(Prim);
+                Result := True;
+            Except End;
+            Try
+                PcbLib.Board.RemovePCBObject(Prim);
+                Result := True;
+            Except End;
+        End;
+    Finally
+        Footprint.GroupIterator_Destroy(GrpIter);
+    End;
+End;
+
 {..............................................................................}
 { PAD SHAPE ON EVERY COPPER LAYER                                              }
 {                                                                              }
@@ -1510,7 +1811,7 @@ Var
     Footprint : IPCB_LibComponent;
     Pad : IPCB_Pad;
     PadLayer : TLayer;
-    ShapeHow : String;
+    ShapeHow, ErrCode, Why : String;
 Begin
     ShapeHow := '';
     Designator := ExtractJsonValue(Params, 'designator');
@@ -1524,17 +1825,20 @@ Begin
     Rotation := StrToFloatDef(ExtractJsonValue(Params, 'rotation'), 0);
     CornerRadius := StrToIntDef(ExtractJsonValue(Params, 'corner_radius'), 25);
 
+    { The footprint through the shared resolver, like the track, arc, text,   }
+    { fill and region handlers: component_name / library_path aim the call   }
+    { at a named footprint (made current, switch read back); without them it }
+    { is the library's current footprint, exactly as before.                 }
+    Footprint := ResolveLibFootprint(Params, ErrCode, Why);
+    If Footprint = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, ErrCode, Why);
+        Exit;
+    End;
     PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'No PCB library is active');
-        Exit;
-    End;
-
-    Footprint := PcbLib.CurrentComponent;
-    If Footprint = Nil Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'NO_FOOTPRINT', 'No footprint is selected');
         Exit;
     End;
 
@@ -1626,7 +1930,7 @@ Var
     PlatedStr, HoleTypeStr, MaskStr, PasteStr : String;
     SlotLen, HoleRot : Double;
     Cache : TPadCache;
-    ShapeHow : String;
+    ShapeHow, ErrCode, Why : String;
     RRAsked, RRUnconfirmed : Integer;
 Begin
     RRAsked := 0;
@@ -1638,17 +1942,20 @@ Begin
         Exit;
     End;
 
+    { The footprint through the shared resolver, like the track, arc, text,   }
+    { fill and region handlers: component_name / library_path aim the call   }
+    { at a named footprint (made current, switch read back); without them it }
+    { is the library's current footprint, exactly as before.                 }
+    Footprint := ResolveLibFootprint(Params, ErrCode, Why);
+    If Footprint = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, ErrCode, Why);
+        Exit;
+    End;
     PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'No PCB library is active');
-        Exit;
-    End;
-
-    Footprint := PcbLib.CurrentComponent;
-    If Footprint = Nil Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'NO_FOOTPRINT', 'No footprint is selected');
         Exit;
     End;
 
@@ -1781,33 +2088,44 @@ Begin
         + ',"total":' + IntToStr(OpCount) + '}');
 End;
 
+{..............................................................................}
+{ Lib_AddFootprintTrack - one track on a PcbLib footprint.                     }
+{                                                                              }
+{ Coordinates and width are DECIMAL mils, parsed with StrToFloatDef and        }
+{ converted with MilsToCoordF, the 1/10000-mil path PCB_PlaceTrack has used   }
+{ since 66e9e62 and the pad handlers since 0266d07. StrToIntDef here           }
+{ quantised every courtyard and assembly line to 1 mil (25.4 um), and a value  }
+{ like 12.5 did not round, it came back as the DEFAULT, because StrToIntDef    }
+{ cannot read a decimal point at all.                                          }
+{                                                                              }
+{ Params: x1, y1, x2, y2, width (mils), layer, component_name, library_path.  }
+{..............................................................................}
 Function Lib_AddFootprintTrack(Params : String; RequestId : String) : String;
 Var
-    X1, Y1, X2, Y2, Width : Integer;
-    LayerStr : String;
+    X1, Y1, X2, Y2, Width : Double;
+    LayerStr, LayerName, ErrCode, Why : String;
     PcbLib : IPCB_Library;
     Footprint : IPCB_LibComponent;
     Track : IPCB_Track;
     Layer : TLayer;
 Begin
-    X1 := StrToIntDef(ExtractJsonValue(Params, 'x1'), 0);
-    Y1 := StrToIntDef(ExtractJsonValue(Params, 'y1'), 0);
-    X2 := StrToIntDef(ExtractJsonValue(Params, 'x2'), 0);
-    Y2 := StrToIntDef(ExtractJsonValue(Params, 'y2'), 0);
-    Width := StrToIntDef(ExtractJsonValue(Params, 'width'), 10);
+    X1 := StrToFloatDef(ExtractJsonValue(Params, 'x1'), 0);
+    Y1 := StrToFloatDef(ExtractJsonValue(Params, 'y1'), 0);
+    X2 := StrToFloatDef(ExtractJsonValue(Params, 'x2'), 0);
+    Y2 := StrToFloatDef(ExtractJsonValue(Params, 'y2'), 0);
+    Width := StrToFloatDef(ExtractJsonValue(Params, 'width'), 10);
     LayerStr := ExtractJsonValue(Params, 'layer');
 
+    Footprint := ResolveLibFootprint(Params, ErrCode, Why);
+    If Footprint = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, ErrCode, Why);
+        Exit;
+    End;
     PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'No PCB library is active');
-        Exit;
-    End;
-
-    Footprint := PcbLib.CurrentComponent;
-    If Footprint = Nil Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'NO_FOOTPRINT', 'No footprint is selected');
         Exit;
     End;
 
@@ -1823,50 +2141,48 @@ Begin
     End;
 
     PCBServer.PreProcess;
-
-    Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
-    If Track <> Nil Then
-    Begin
-        Track.X1 := FootprintOriginX(Footprint) + MilsToCoord(X1);
-        Track.Y1 := FootprintOriginY(Footprint) + MilsToCoord(Y1);
-        Track.X2 := FootprintOriginX(Footprint) + MilsToCoord(X2);
-        Track.Y2 := FootprintOriginY(Footprint) + MilsToCoord(Y2);
-        Track.Width := MilsToCoord(Width);
+    Try
+        Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+        If Track = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Failed to create track');
+            Exit;
+        End;
+        Track.X1 := FootprintOriginX(Footprint) + MilsToCoordF(X1);
+        Track.Y1 := FootprintOriginY(Footprint) + MilsToCoordF(Y1);
+        Track.X2 := FootprintOriginX(Footprint) + MilsToCoordF(X2);
+        Track.Y2 := FootprintOriginY(Footprint) + MilsToCoordF(Y2);
+        Track.Width := MilsToCoordF(Width);
         Track.Layer := Layer;
+        RegisterLibPrimitive(PcbLib, Footprint, Track, 'both');
+    Finally
+        PCBServer.PostProcess;
+    End;
 
-        Footprint.AddPCBObject(Track);
-        { The primitive must be registered with the library's backing Board as
-          well as with the footprint, and the registration broadcast to both.
-          Footprint.AddPCBObject alone is not enough: the object exists in the
-          working copy, every read reports it, and the save discards it. That
-          cost an afternoon on an LCSC import, where pads and tracks reported
-          success and the footprint came back empty, and it was read as Altium
-          refusing to author land patterns at all. Lib_AddFootprintText had the
-          full sequence and was the only authoring call that survived a save. }
-        PcbLib.Board.AddPCBObject(Track);
-        PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
-            c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
-        PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress,
-            c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
-
-        Result := BuildSuccessResponse(RequestId, '{"success":true}');
-    End
-    Else
-        Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Failed to create track');
-
-    PCBServer.PostProcess;
     MarkDocDirtyByPath(PcbLib.Board.FileName);
+    NoteNextStep('This edit is in memory only. Run app_save_all to write '
+        + 'it to disk, and check still_dirty in the reply.');
+    { The RESOLVED layer, named the way the stack names it, so a renamed or }
+    { Mechanical17+ layer does not echo as GetLayerString's 'Unknown'.     }
+    LayerName := ResolveLayerName(PcbLib.Board, Layer);
+    If LayerName = '' Then LayerName := LayerStr;
+    Result := BuildSuccessResponse(RequestId,
+        '{"success":true'
+        + ',"footprint":"' + EscapeJsonString(Footprint.Name) + '"'
+        + ',"layer":"' + EscapeJsonString(LayerName) + '"'
+        + ',"pending_save":true}');
 End;
 
 { Batch track authoring: same shape as Lib_AddFootprintPads. A `tracks` array }
 { (~~ / ; / = separators) -- silkscreen outline + assembly outline in one IPC }
 { round-trip instead of one-per-segment. Per-track fields: x1,y1,x2,y2,width, }
-{ layer (TopOverlay default / BottomOverlay), mirroring the singular handler. }
+{ layer (TopOverlay default), all lengths in DECIMAL mils. The footprint is   }
+{ chosen once for the whole batch by component_name / library_path.          }
 Function Lib_AddFootprintTracks(Params : String; RequestId : String) : String;
 Var
-    TracksStr, Op, Remaining, LayerStr, BadLayers : String;
+    TracksStr, Op, Remaining, LayerStr, BadLayers, ErrCode, Why : String;
     OpCount, Added, Failed : Integer;
-    X1, Y1, X2, Y2, Width : Integer;
+    X1, Y1, X2, Y2, Width : Double;
     PcbLib : IPCB_Library;
     Footprint : IPCB_LibComponent;
     Track : IPCB_Track;
@@ -1879,17 +2195,16 @@ Begin
         Exit;
     End;
 
+    Footprint := ResolveLibFootprint(Params, ErrCode, Why);
+    If Footprint = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, ErrCode, Why);
+        Exit;
+    End;
     PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'No PCB library is active');
-        Exit;
-    End;
-
-    Footprint := PcbLib.CurrentComponent;
-    If Footprint = Nil Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'NO_FOOTPRINT', 'No footprint is selected');
         Exit;
     End;
 
@@ -1906,11 +2221,11 @@ Begin
             Op := NextBatchOp(Remaining);
             If Op = '' Then Break;
             OpCount := OpCount + 1;
-            X1 := StrToIntDef(GetBatchField(Op, 'x1'), 0);
-            Y1 := StrToIntDef(GetBatchField(Op, 'y1'), 0);
-            X2 := StrToIntDef(GetBatchField(Op, 'x2'), 0);
-            Y2 := StrToIntDef(GetBatchField(Op, 'y2'), 0);
-            Width := StrToIntDef(GetBatchField(Op, 'width'), 10);
+            X1 := StrToFloatDef(GetBatchField(Op, 'x1'), 0);
+            Y1 := StrToFloatDef(GetBatchField(Op, 'y1'), 0);
+            X2 := StrToFloatDef(GetBatchField(Op, 'x2'), 0);
+            Y2 := StrToFloatDef(GetBatchField(Op, 'y2'), 0);
+            Width := StrToFloatDef(GetBatchField(Op, 'width'), 10);
             LayerStr := GetBatchField(Op, 'layer');
             { Empty -> silkscreen (the safe default); any named layer is        }
             { honoured so courtyard/assembly tracks can go on Mechanical layers.}
@@ -1932,27 +2247,13 @@ Begin
                 Continue;
             End;
 
-            Track.X1 := FootprintOriginX(Footprint) + MilsToCoord(X1);
-            Track.Y1 := FootprintOriginY(Footprint) + MilsToCoord(Y1);
-            Track.X2 := FootprintOriginX(Footprint) + MilsToCoord(X2);
-            Track.Y2 := FootprintOriginY(Footprint) + MilsToCoord(Y2);
-            Track.Width := MilsToCoord(Width);
+            Track.X1 := FootprintOriginX(Footprint) + MilsToCoordF(X1);
+            Track.Y1 := FootprintOriginY(Footprint) + MilsToCoordF(Y1);
+            Track.X2 := FootprintOriginX(Footprint) + MilsToCoordF(X2);
+            Track.Y2 := FootprintOriginY(Footprint) + MilsToCoordF(Y2);
+            Track.Width := MilsToCoordF(Width);
             Track.Layer := Layer;
-
-            Footprint.AddPCBObject(Track);
-            { The primitive must be registered with the library's backing Board as
-              well as with the footprint, and the registration broadcast to both.
-              Footprint.AddPCBObject alone is not enough: the object exists in the
-              working copy, every read reports it, and the save discards it. That
-              cost an afternoon on an LCSC import, where pads and tracks reported
-              success and the footprint came back empty, and it was read as Altium
-              refusing to author land patterns at all. Lib_AddFootprintText had the
-              full sequence and was the only authoring call that survived a save. }
-            PcbLib.Board.AddPCBObject(Track);
-            PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
-                c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
-            PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress,
-                c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
+            RegisterLibPrimitive(PcbLib, Footprint, Track, 'both');
             Inc(Added);
         End;
     Finally
@@ -1960,16 +2261,24 @@ Begin
     End;
 
     MarkDocDirtyByPath(PcbLib.Board.FileName);
+    If Added > 0 Then
+        NoteNextStep('This edit is in memory only. Run app_save_all to write '
+            + 'it to disk, and check still_dirty in the reply.');
 
     Result := BuildSuccessResponse(RequestId,
         '{"added":' + IntToStr(Added) + ',"failed":' + IntToStr(Failed)
         + ',"unknown_layers":"' + EscapeJsonString(BadLayers) + '"'
-        + ',"total":' + IntToStr(OpCount) + '}');
+        + ',"total":' + IntToStr(OpCount)
+        + ',"footprint":"' + EscapeJsonString(Footprint.Name) + '"'
+        + ',"pending_save":' + BoolToJsonStr(Added > 0) + '}');
 End;
 
 Function Lib_AddFootprintArc(Params : String; RequestId : String) : String;
 Var
-    XCenter, YCenter, Radius, Width : Integer;
+    { Every length is DOUBLE now, centre, radius and width alike: the same    }
+    { StrToIntDef defect the angles had (see below) applied to a 12.5 mil      }
+    { radius, which came back as the 100 mil default.                         }
+    XCenter, YCenter, Radius, Width : Double;
     { Angles are DOUBLE and are read with StrToFloatDef below. They are     }
     { declared `float` on the Python side, so the wire carries "360.0" and  }
     { StrToIntDef returned its DEFAULT on every call. EndAngle came through }
@@ -1977,31 +2286,30 @@ Var
     { zero sweep while the call reported success. IPCB_Arc takes Doubles,   }
     { so a half degree need not be rounded away either.                     }
     StartAngle, EndAngle : Double;
-    LayerStr : String;
+    LayerStr, LayerName, ErrCode, Why : String;
     PcbLib : IPCB_Library;
     Footprint : IPCB_LibComponent;
     Arc : IPCB_Arc;
     Layer : TLayer;
 Begin
-    XCenter := StrToIntDef(ExtractJsonValue(Params, 'x_center'), 0);
-    YCenter := StrToIntDef(ExtractJsonValue(Params, 'y_center'), 0);
-    Radius := StrToIntDef(ExtractJsonValue(Params, 'radius'), 100);
+    XCenter := StrToFloatDef(ExtractJsonValue(Params, 'x_center'), 0);
+    YCenter := StrToFloatDef(ExtractJsonValue(Params, 'y_center'), 0);
+    Radius := StrToFloatDef(ExtractJsonValue(Params, 'radius'), 100);
     StartAngle := StrToFloatDef(ExtractJsonValue(Params, 'start_angle'), 0.0);
     EndAngle := StrToFloatDef(ExtractJsonValue(Params, 'end_angle'), 360.0);
-    Width := StrToIntDef(ExtractJsonValue(Params, 'width'), 10);
+    Width := StrToFloatDef(ExtractJsonValue(Params, 'width'), 10);
     LayerStr := ExtractJsonValue(Params, 'layer');
 
+    Footprint := ResolveLibFootprint(Params, ErrCode, Why);
+    If Footprint = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, ErrCode, Why);
+        Exit;
+    End;
     PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'No PCB library is active');
-        Exit;
-    End;
-
-    Footprint := PcbLib.CurrentComponent;
-    If Footprint = Nil Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'NO_FOOTPRINT', 'No footprint is selected');
         Exit;
     End;
 
@@ -2017,40 +2325,37 @@ Begin
     End;
 
     PCBServer.PreProcess;
-
-    Arc := PCBServer.PCBObjectFactory(eArcObject, eNoDimension, eCreate_Default);
-    If Arc <> Nil Then
-    Begin
-        Arc.XCenter := FootprintOriginX(Footprint) + MilsToCoord(XCenter);
-        Arc.YCenter := FootprintOriginY(Footprint) + MilsToCoord(YCenter);
-        Arc.Radius := MilsToCoord(Radius);
+    Try
+        Arc := PCBServer.PCBObjectFactory(eArcObject, eNoDimension, eCreate_Default);
+        If Arc = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Failed to create arc');
+            Exit;
+        End;
+        Arc.XCenter := FootprintOriginX(Footprint) + MilsToCoordF(XCenter);
+        Arc.YCenter := FootprintOriginY(Footprint) + MilsToCoordF(YCenter);
+        Arc.Radius := MilsToCoordF(Radius);
         Arc.StartAngle := StartAngle;
         Arc.EndAngle := EndAngle;
-        Arc.LineWidth := MilsToCoord(Width);
+        Arc.LineWidth := MilsToCoordF(Width);
         Arc.Layer := Layer;
+        RegisterLibPrimitive(PcbLib, Footprint, Arc, 'both');
+    Finally
+        PCBServer.PostProcess;
+    End;
 
-        Footprint.AddPCBObject(Arc);
-        { The primitive must be registered with the library's backing Board as
-          well as with the footprint, and the registration broadcast to both.
-          Footprint.AddPCBObject alone is not enough: the object exists in the
-          working copy, every read reports it, and the save discards it. That
-          cost an afternoon on an LCSC import, where pads and tracks reported
-          success and the footprint came back empty, and it was read as Altium
-          refusing to author land patterns at all. Lib_AddFootprintText had the
-          full sequence and was the only authoring call that survived a save. }
-        PcbLib.Board.AddPCBObject(Arc);
-        PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
-            c_Broadcast, PCBM_BoardRegisteration, Arc.I_ObjectAddress);
-        PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress,
-            c_Broadcast, PCBM_BoardRegisteration, Arc.I_ObjectAddress);
-
-        Result := BuildSuccessResponse(RequestId, '{"success":true}');
-    End
-    Else
-        Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Failed to create arc');
-
-    PCBServer.PostProcess;
     MarkDocDirtyByPath(PcbLib.Board.FileName);
+    NoteNextStep('This edit is in memory only. Run app_save_all to write '
+        + 'it to disk, and check still_dirty in the reply.');
+    { The RESOLVED layer, named the way the stack names it, so a renamed or }
+    { Mechanical17+ layer does not echo as GetLayerString's 'Unknown'.     }
+    LayerName := ResolveLayerName(PcbLib.Board, Layer);
+    If LayerName = '' Then LayerName := LayerStr;
+    Result := BuildSuccessResponse(RequestId,
+        '{"success":true'
+        + ',"footprint":"' + EscapeJsonString(Footprint.Name) + '"'
+        + ',"layer":"' + EscapeJsonString(LayerName) + '"'
+        + ',"pending_save":true}');
 End;
 
 { Lib_AddFootprintText - Stamp a text primitive onto a PcbLib footprint.       }
@@ -2059,33 +2364,55 @@ End;
 { own does not register the new primitive properly with the placement editor }
 { -- the text shows up only after a save+reload. The working pattern is to  }
 { add to BOTH the footprint AND the underlying Board, then broadcast        }
-{ PCBM_BoardRegisteration to both. We replicate that exactly.               }
+{ PCBM_BoardRegisteration to both. RegisterLibPrimitive does exactly that.  }
+{                                                                              }
+{ DUPLICATE TEXT (measured 2026-10-03: one call, two identical texts). Three  }
+{ things changed, each closing one way it can happen, and the reply now says  }
+{ which happened so one live call settles the rest:                          }
+{   1. The footprint is chosen through ResolveLibFootprint, which makes it     }
+{      current with a VERIFIED property write. This handler used a silent     }
+{      SetState_CurrentComponent, and Board.AddPCBObject attaches to whichever }
+{      footprint is current, so a switch that did not take put one text into  }
+{      two footprints.                                                         }
+{   2. Every text object the call CREATED is counted by address (new_objects), }
+{      and how often the group iterator yields it (group_yields; 2 is the      }
+{      measured double registration, harmless, gone after a reload). A second }
+{      NEW object carrying the same string is removed from the footprint and   }
+{      the board, and counted in duplicates_removed.                          }
+{   3. registration = both | footprint | board selects which half of the      }
+{      registration runs, so a live session can find the one that persists    }
+{      exactly once without a redeploy. Default both, unchanged.              }
+{ The other half of the 2026-10-03 symptom was READ-side: the footprint       }
+{ policy audit reads Lib_GetLibraryGeometry, whose text walk did not           }
+{ de-duplicate by address, so a double-registered text read back as two. It   }
+{ does now.                                                                    }
 {                                                                              }
 { Params:                                                                      }
 {   text        (required) - the string to place                              }
-{   x, y                   - coordinates in mils, relative to board origin    }
+{   x, y                   - DECIMAL mils, relative to the footprint origin   }
 {   size                   - text height in mils (default 50)                 }
 {   width                  - stroke width in mils (default 8)                 }
-{   rotation               - degrees, default 0                                }
-{   layer                  - GetLayerFromString name, default 'TopOverlay'   }
+{   rotation               - degrees, default 0, fractions allowed            }
+{   layer                  - layer name, default 'TopOverlay'                 }
 {   use_ttfont=true|false  - default false (stroke font)                      }
+{   mirror=true|false      - default false                                     }
 {   library_path           - optional .PcbLib to focus first                  }
-{   component_name         - optional footprint name; switches active fp     }
+{   component_name         - optional footprint name; made current, verified  }
+{   registration           - both (default) | footprint | board               }
 Function Lib_AddFootprintText(Params : String; RequestId : String) : String;
 Var
-    TextStr, LayerStr, CompName, LibPath, FocusedPath, FlagStr, RespJson : String;
-    MirrorStr : String;
-    Mirror : Boolean;
-    Workspace : IWorkspace;
-    Doc : IDocument;
+    TextStr, LayerStr, FlagStr, RespJson, ErrCode, Why : String;
+    MirrorStr, RegMode, BeforeAddrs, AfterAddrs, NewAddr, Rest, Addr : String;
+    RawStr, ExtraAddrs, LayerName : String;
+    Mirror, UseTTFont : Boolean;
     PcbLib : IPCB_Library;
     Footprint : IPCB_LibComponent;
     Text : IPCB_Text;
-    Board : IPCB_Board;
-    Iter : IPCB_LibraryIterator;
+    GrpIter : IPCB_GroupIterator;
+    Txt : IPCB_Text;
     Layer : TLayer;
-    X, Y, Size, Width, Rotation : Integer;
-    UseTTFont : Boolean;
+    X, Y, Size, Width, Rotation : Double;
+    BeforeYields, NewObjects, NewYields, DupFound, Removed, BarPos : Integer;
 Begin
     TextStr := ExtractJsonValue(Params, 'text');
     If TextStr = '' Then
@@ -2093,11 +2420,11 @@ Begin
         Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'text is required');
         Exit;
     End;
-    X := StrToIntDef(ExtractJsonValue(Params, 'x'), 0);
-    Y := StrToIntDef(ExtractJsonValue(Params, 'y'), 0);
-    Size := StrToIntDef(ExtractJsonValue(Params, 'size'), 50);
-    Width := StrToIntDef(ExtractJsonValue(Params, 'width'), 8);
-    Rotation := StrToIntDef(ExtractJsonValue(Params, 'rotation'), 0);
+    X := StrToFloatDef(ExtractJsonValue(Params, 'x'), 0);
+    Y := StrToFloatDef(ExtractJsonValue(Params, 'y'), 0);
+    Size := StrToFloatDef(ExtractJsonValue(Params, 'size'), 50);
+    Width := StrToFloatDef(ExtractJsonValue(Params, 'width'), 8);
+    Rotation := StrToFloatDef(ExtractJsonValue(Params, 'rotation'), 0);
     LayerStr := ExtractJsonValue(Params, 'layer');
     If LayerStr = '' Then LayerStr := 'TopOverlay';
     FlagStr := ExtractJsonValue(Params, 'use_ttfont');
@@ -2107,29 +2434,21 @@ Begin
     { eBottomOverlay without MirrorFlag, and eTopOverlay with it.          }
     MirrorStr := ExtractJsonValue(Params, 'mirror');
     Mirror := (MirrorStr = 'true') Or (MirrorStr = 'True') Or (MirrorStr = '1');
-    LibPath := ExtractJsonValue(Params, 'library_path');
-    CompName := ExtractJsonValue(Params, 'component_name');
-
-    If LibPath <> '' Then
+    RegMode := LowerCase(Trim(ExtractJsonValue(Params, 'registration')));
+    If RegMode = '' Then RegMode := 'both';
+    If (RegMode <> 'both') And (RegMode <> 'footprint') And (RegMode <> 'board') Then
     Begin
-        Workspace := GetWorkspace;
-        If Workspace = Nil Then
-        Begin
-            Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
-            Exit;
-        End;
-        FocusedPath := '';
-        Doc := Workspace.DM_FocusedDocument;
-        If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
-        If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
-        Begin
-            ResetParameters;
-            AddStringParameter('ObjectKind', 'Document');
-            AddStringParameter('FileName', LibPath);
-            RunProcess('WorkspaceManager:OpenObject');
-        End;
+        Result := BuildErrorResponse(RequestId, 'INVALID_PARAM',
+            'registration must be both, footprint or board, not "' + RegMode + '"');
+        Exit;
     End;
 
+    Footprint := ResolveLibFootprint(Params, ErrCode, Why);
+    If Footprint = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, ErrCode, Why);
+        Exit;
+    End;
     PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
@@ -2137,47 +2456,17 @@ Begin
         Exit;
     End;
 
-    { Switch to a named footprint if asked, otherwise use the active one.  }
-    If CompName <> '' Then
-    Begin
-        Footprint := Nil;
-        Iter := PcbLib.LibraryIterator_Create;
-        Try
-            Footprint := Iter.FirstPCBObject;
-            While Footprint <> Nil Do
-            Begin
-                If Footprint.Name = CompName Then Break;
-                Footprint := Iter.NextPCBObject;
-            End;
-        Finally
-            PcbLib.LibraryIterator_Destroy(Iter);
-        End;
-        If Footprint = Nil Then
-        Begin
-            Result := BuildErrorResponse(RequestId, 'FOOTPRINT_NOT_FOUND',
-                'Footprint not found in library: ' + CompName);
-            Exit;
-        End;
-        Try PcbLib.SetState_CurrentComponent(Footprint); Except End;
-    End
-    Else
-        Footprint := PcbLib.CurrentComponent;
-
-    If Footprint = Nil Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'NO_FOOTPRINT',
-            'No footprint is selected (pass component_name to choose one)');
-        Exit;
-    End;
-
-    Board := PcbLib.Board;
-    Layer := ResolveLayerId(Board, LayerStr);
+    Layer := ResolveLayerId(PcbLib.Board, LayerStr);
     If Layer = eNoLayer Then
     Begin
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_LAYER',
-            'Unknown layer name: ' + LayerStr + '. ' + BoardLayerNamesHint(Board));
+            'Unknown layer name: ' + LayerStr + '. ' + BoardLayerNamesHint(PcbLib.Board));
         Exit;
     End;
+
+    { Every text object the footprint holds BEFORE the call, by address. What }
+    { is not in this set afterwards is what this call created.               }
+    BeforeAddrs := LibTextAddresses(Footprint, BeforeYields);
 
     PCBServer.PreProcess;
     Try
@@ -2188,40 +2477,557 @@ Begin
                 'PCBObjectFactory returned Nil for eTextObject');
             Exit;
         End;
-        { Relative to the footprint's own origin. Board.XOrigin is a board-wide
-          reference and would drop the text far from the footprint. }
-        Text.XLocation := Footprint.X + MilsToCoord(X);
-        Text.YLocation := Footprint.Y + MilsToCoord(Y);
+        { Relative to the footprint's own origin, read AFTER the resolver made
+          it current. Board.XOrigin is a board-wide reference and would drop
+          the text far from the footprint. }
+        Text.XLocation := FootprintOriginX(Footprint) + MilsToCoordF(X);
+        Text.YLocation := FootprintOriginY(Footprint) + MilsToCoordF(Y);
         Text.Layer := Layer;
         Text.UseTTFonts := UseTTFont;
         Text.UnderlyingString := TextStr;
-        Text.Size := MilsToCoord(Size);
-        Text.Width := MilsToCoord(Width);
+        Text.Size := MilsToCoordF(Size);
+        Text.Width := MilsToCoordF(Width);
         Try Text.MirrorFlag := Mirror; Except End;
         Try Text.Rotation := Rotation; Except End;
-
-        { The working pattern: add to footprint AND to its                  }
-        { underlying Board, then broadcast registration to both. Footprint  }
-        { alone is not enough -- the placement editor will not see the new }
-        { primitive until a save+reload.                                    }
-        Footprint.AddPCBObject(Text);
-        Board.AddPCBObject(Text);
-        PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
-            c_Broadcast, PCBM_BoardRegisteration, Text.I_ObjectAddress);
-        PCBServer.SendMessageToRobots(Board.I_ObjectAddress,
-            c_Broadcast, PCBM_BoardRegisteration, Text.I_ObjectAddress);
+        RegisterLibPrimitive(PcbLib, Footprint, Text, RegMode);
     Finally
         PCBServer.PostProcess;
     End;
+
+    NewAddr := '';
+    Try NewAddr := IntToStr(Text.I_ObjectAddress); Except End;
+
+    { What the call created: every text object whose address was not there   }
+    { before. NewYields counts repeats, NewObjects distinct objects.          }
+    { ExtraAddrs collects new objects that are NOT the one created here and   }
+    { carry the same raw string: a genuine duplicate, the 2026-10-03 symptom. }
+    NewObjects := 0;
+    NewYields := 0;
+    DupFound := 0;
+    ExtraAddrs := '';
+    AfterAddrs := '|';
+    GrpIter := Footprint.GroupIterator_Create;
+    Try
+        GrpIter.AddFilter_ObjectSet(MkSet(eTextObject));
+        Txt := GrpIter.FirstPCBObject;
+        While Txt <> Nil Do
+        Begin
+            Addr := '';
+            Try Addr := IntToStr(Txt.I_ObjectAddress); Except End;
+            If (Addr <> '') And (Pos('|' + Addr + '|', BeforeAddrs) = 0) Then
+            Begin
+                Inc(NewYields);
+                If Pos('|' + Addr + '|', AfterAddrs) = 0 Then
+                Begin
+                    AfterAddrs := AfterAddrs + Addr + '|';
+                    Inc(NewObjects);
+                    RawStr := '';
+                    Try RawStr := Txt.UnderlyingString; Except End;
+                    If (Addr <> NewAddr) And (RawStr = TextStr) Then
+                    Begin
+                        ExtraAddrs := ExtraAddrs + Addr + '|';
+                        Inc(DupFound);
+                    End;
+                End;
+            End;
+            Txt := GrpIter.NextPCBObject;
+        End;
+    Finally
+        Footprint.GroupIterator_Destroy(GrpIter);
+    End;
+
+    { Remove the duplicates, one per pass, each from both owners. Only     }
+    { objects that did not exist before this call and carry this call's    }
+    { string can be here, so nothing the footprint already held is touched. }
+    Removed := 0;
+    If ExtraAddrs <> '' Then
+    Begin
+        PCBServer.PreProcess;
+        Try
+            Rest := ExtraAddrs;
+            While Rest <> '' Do
+            Begin
+                BarPos := Pos('|', Rest);
+                If BarPos = 0 Then Break;
+                Addr := Copy(Rest, 1, BarPos - 1);
+                Rest := Copy(Rest, BarPos + 1, Length(Rest));
+                If Addr = '' Then Continue;
+                If RemoveLibTextByAddress(PcbLib, Footprint, Addr) Then Inc(Removed);
+            End;
+        Finally
+            PCBServer.PostProcess;
+        End;
+    End;
+
+    MarkDocDirtyByPath(PcbLib.Board.FileName);
+    NoteNextStep('This edit is in memory only. Run app_save_all to write '
+        + 'it to disk, and check still_dirty in the reply.');
+    LayerName := ResolveLayerName(PcbLib.Board, Layer);
+    If LayerName = '' Then LayerName := LayerStr;
 
     RespJson :=
         '{"success":true' +
         ',"footprint":"' + EscapeJsonString(Footprint.Name) + '"' +
         ',"text":"' + EscapeJsonString(TextStr) + '"' +
-        ',"layer":"' + EscapeJsonString(LayerStr) + '"' +
-        ',"x":' + IntToStr(X) +
-        ',"y":' + IntToStr(Y) + '}';
+        ',"layer":"' + EscapeJsonString(LayerName) + '"' +
+        ',"x":' + FloatToJsonStr(X) +
+        ',"y":' + FloatToJsonStr(Y) +
+        ',"registration":"' + RegMode + '"' +
+        ',"new_objects":' + IntToStr(NewObjects) +
+        ',"group_yields":' + IntToStr(NewYields) +
+        ',"duplicates_found":' + IntToStr(DupFound) +
+        ',"duplicates_removed":' + IntToStr(Removed) +
+        ',"pending_save":true}';
     Result := BuildSuccessResponse(RequestId, RespJson);
+End;
+
+{..............................................................................}
+{ Lib_AddFootprintFills - rectangular fills on ANY layer of a PcbLib footprint.}
+{                                                                              }
+{ For what used to be board-level notes: stencil apertures on TopPaste (with   }
+{ the pad's own paste suppressed by its paste_expansion), solder-mask openings }
+{ on TopSolder, keep-outs. A fill is a rectangle and a rotation about its      }
+{ centre; anything else is a region (Lib_AddFootprintRegions).                 }
+{                                                                              }
+{ The same members PCB_PlaceFill writes on a board (X1Location..Y2Location,    }
+{ Rotation, Layer), the corners normalised so X1/Y1 is the low corner, plus    }
+{ the RegisterLibPrimitive registration every footprint primitive needs.       }
+{                                                                              }
+{ LAYER IS REQUIRED PER FILL. Tracks default to silkscreen because a stray     }
+{ silk line is harmless; a fill defaulted to anything would be copper or paste }
+{ that nobody asked for, so an empty layer fails that one fill.               }
+{                                                                              }
+{ keepout=true on a fill NOT on KeepOutLayer writes IsKeepout, the layer-      }
+{ specific keep-out. UNVERIFIED WRITE: IsKeepout is read in PCB.pas and        }
+{ PCBGeneric.pas but written nowhere else, and the reply reads it back         }
+{ (keepout_applied) so the first live call says whether it took. A fill ON     }
+{ KeepOutLayer is a keep-out by its layer and needs no write.                  }
+{                                                                              }
+{ Params: fills (batch: x1,y1,x2,y2,layer,rotation,keepout; DECIMAL mils),    }
+{         component_name, library_path.                                        }
+{..............................................................................}
+Function Lib_AddFootprintFills(Params : String; RequestId : String) : String;
+Var
+    FillsStr, Op, Remaining, LayerStr, BadLayers, FailReasons, ErrCode, Why : String;
+    ItemStr, KeepStr : String;
+    OpCount, Added, Failed, KeepAsked, KeepApplied : Integer;
+    X1, Y1, X2, Y2, Rotation, Tmp : Double;
+    WantKeepout, GotKeepout : Boolean;
+    PcbLib : IPCB_Library;
+    Footprint : IPCB_LibComponent;
+    Fill : IPCB_Fill;
+    Layer : TLayer;
+Begin
+    FillsStr := ExtractJsonValue(Params, 'fills');
+    If FillsStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'fills is required');
+        Exit;
+    End;
+
+    Footprint := ResolveLibFootprint(Params, ErrCode, Why);
+    If Footprint = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, ErrCode, Why);
+        Exit;
+    End;
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    If PcbLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'No PCB library is active');
+        Exit;
+    End;
+
+    Added := 0;
+    Failed := 0;
+    OpCount := 0;
+    KeepAsked := 0;
+    KeepApplied := 0;
+    BadLayers := '';
+    FailReasons := '';
+    Remaining := FillsStr;
+
+    PCBServer.PreProcess;
+    Try
+        While True Do
+        Begin
+            Op := NextBatchOp(Remaining);
+            If Op = '' Then Break;
+            OpCount := OpCount + 1;
+            ItemStr := 'fill ' + IntToStr(OpCount);
+            X1 := StrToFloatDef(GetBatchField(Op, 'x1'), 0);
+            Y1 := StrToFloatDef(GetBatchField(Op, 'y1'), 0);
+            X2 := StrToFloatDef(GetBatchField(Op, 'x2'), 0);
+            Y2 := StrToFloatDef(GetBatchField(Op, 'y2'), 0);
+            Rotation := StrToFloatDef(GetBatchField(Op, 'rotation'), 0);
+            LayerStr := GetBatchField(Op, 'layer');
+            KeepStr := LowerCase(GetBatchField(Op, 'keepout'));
+            WantKeepout := (KeepStr = 'true') Or (KeepStr = '1');
+
+            If LayerStr = '' Then
+            Begin
+                Inc(Failed);
+                AddFailReason(FailReasons, ItemStr, 'layer is required');
+                Continue;
+            End;
+            Layer := ResolveLayerId(PcbLib.Board, LayerStr);
+            If Layer = eNoLayer Then
+            Begin
+                Inc(Failed);
+                If BadLayers = '' Then BadLayers := LayerStr
+                Else If Pos(LayerStr, BadLayers) = 0 Then
+                    BadLayers := BadLayers + ', ' + LayerStr;
+                AddFailReason(FailReasons, ItemStr, 'unknown layer ' + LayerStr);
+                Continue;
+            End;
+
+            If X1 > X2 Then Begin Tmp := X1; X1 := X2; X2 := Tmp; End;
+            If Y1 > Y2 Then Begin Tmp := Y1; Y1 := Y2; Y2 := Tmp; End;
+            If (X1 = X2) Or (Y1 = Y2) Then
+            Begin
+                Inc(Failed);
+                AddFailReason(FailReasons, ItemStr, 'zero area');
+                Continue;
+            End;
+
+            Fill := PCBServer.PCBObjectFactory(eFillObject, eNoDimension, eCreate_Default);
+            If Fill = Nil Then
+            Begin
+                Inc(Failed);
+                AddFailReason(FailReasons, ItemStr, 'PCBObjectFactory returned Nil');
+                Continue;
+            End;
+
+            Fill.X1Location := FootprintOriginX(Footprint) + MilsToCoordF(X1);
+            Fill.Y1Location := FootprintOriginY(Footprint) + MilsToCoordF(Y1);
+            Fill.X2Location := FootprintOriginX(Footprint) + MilsToCoordF(X2);
+            Fill.Y2Location := FootprintOriginY(Footprint) + MilsToCoordF(Y2);
+            Fill.Rotation := Rotation;
+            Fill.Layer := Layer;
+
+            If WantKeepout And (Layer <> eKeepOutLayer) Then
+            Begin
+                Inc(KeepAsked);
+                Try Fill.IsKeepout := True; Except End;
+                GotKeepout := False;
+                Try GotKeepout := Fill.IsKeepout; Except GotKeepout := False; End;
+                If GotKeepout Then Inc(KeepApplied);
+            End;
+
+            RegisterLibPrimitive(PcbLib, Footprint, Fill, 'both');
+            Inc(Added);
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    If Added > 0 Then
+    Begin
+        MarkDocDirtyByPath(PcbLib.Board.FileName);
+        NoteNextStep('This edit is in memory only. Run app_save_all to write '
+            + 'it to disk, and check still_dirty in the reply.');
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"added":' + IntToStr(Added) + ',"failed":' + IntToStr(Failed)
+        + ',"total":' + IntToStr(OpCount)
+        + ',"unknown_layers":"' + EscapeJsonString(BadLayers) + '"'
+        + ',"failures":[' + FailReasons + ']'
+        + ',"keepout_requested":' + IntToStr(KeepAsked)
+        + ',"keepout_applied":' + IntToStr(KeepApplied)
+        + ',"footprint":"' + EscapeJsonString(Footprint.Name) + '"'
+        + ',"pending_save":' + BoolToJsonStr(Added > 0) + '}');
+End;
+
+{..............................................................................}
+{ NextCsvValue - take the next comma-separated value off the front of S.       }
+{                                                                              }
+{ The NextBatchOp shape (a Var String consumed from the front), for the one    }
+{ batch field that carries a list: a region's pts=x1,y1,x2,y2,... Walking the }
+{ string twice, once to count and once to fill the contour, needs no storage:  }
+{ a fixed local array corrupts a Function's return slot in DelphiScript, and   }
+{ this keeps TStringList housekeeping out of the region loop as well.          }
+{..............................................................................}
+Function NextCsvValue(Var S : String) : String;
+Var
+    CommaPos : Integer;
+Begin
+    CommaPos := Pos(',', S);
+    If CommaPos > 0 Then
+    Begin
+        Result := Trim(Copy(S, 1, CommaPos - 1));
+        S := Copy(S, CommaPos + 1, Length(S));
+    End
+    Else
+    Begin
+        Result := Trim(S);
+        S := '';
+    End;
+End;
+
+{..............................................................................}
+{ Lib_AddFootprintRegions - polygonal regions on ANY layer of a footprint.     }
+{                                                                              }
+{ The outline goes in through the one region-authoring path this codebase has, }
+{ PCB_PlaceRegion's: MainContour.Replicate, set Count, write the 1-based X[i]  }
+{ and Y[i], SetOutlineContour. Every reader in PCB.pas and Generic.pas walks a }
+{ contour as 1..Count, which is the indexing written here.                     }
+{                                                                              }
+{ THE CONTOUR IS READ BACK BEFORE THE REGION IS KEPT. A region whose outline   }
+{ did not take is a degenerate object, so if MainContour.Count is not the     }
+{ number of vertices sent, that region fails and is never registered.          }
+{                                                                              }
+{ kind, per region:                                                            }
+{   copper   (default) a solid region on the layer: copper, paste aperture,    }
+{            mask opening, mechanical shading. Kind is left as the factory's. }
+{   cutout   a polygon-pour cutout: Kind := eRegionKind_Cutout. The same write }
+{            obj_modify makes (PCBGeneric.pas), itself awaiting live proof in  }
+{            RELEASE_VERIFICATION step 16; read back as kind_applied.          }
+{   keepout  on KeepOutLayer (the default layer for this kind) a keep-out by   }
+{            its layer, no write needed; on any other layer the layer-specific }
+{            keep-out, IsKeepout := True, UNVERIFIED and read back as          }
+{            keepout_applied.                                                  }
+{ An unknown kind fails that region rather than falling back to copper.        }
+{                                                                              }
+{ Vertices arrive as one batch field, pts=x1,y1,x2,y2,... in DECIMAL mils     }
+{ relative to the footprint origin, walked twice with NextCsvValue: once to    }
+{ count and check, once to fill the contour.                                   }
+{                                                                              }
+{ Params: regions (batch: pts, layer, kind), component_name, library_path.    }
+{..............................................................................}
+Function Lib_AddFootprintRegions(Params : String; RequestId : String) : String;
+Var
+    RegionsStr, Op, Remaining, LayerStr, KindStr, PtsStr, Walk, Token : String;
+    XTok, YTok, BadLayers, FailReasons, ErrCode, Why, ItemStr : String;
+    OpCount, Added, Failed, K, N, NPts, Got, Vertices : Integer;
+    KindAsked, KindApplied, KeepAsked, KeepApplied : Integer;
+    GotKeepout, KindOk, AllNumbers : Boolean;
+    PcbLib : IPCB_Library;
+    Footprint : IPCB_LibComponent;
+    Region : IPCB_Region;
+    Contour : IPCB_Contour;
+    Layer : TLayer;
+Begin
+    RegionsStr := ExtractJsonValue(Params, 'regions');
+    If RegionsStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'regions is required');
+        Exit;
+    End;
+
+    Footprint := ResolveLibFootprint(Params, ErrCode, Why);
+    If Footprint = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, ErrCode, Why);
+        Exit;
+    End;
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    If PcbLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'No PCB library is active');
+        Exit;
+    End;
+
+    Added := 0;
+    Failed := 0;
+    OpCount := 0;
+    Vertices := 0;
+    KindAsked := 0;
+    KindApplied := 0;
+    KeepAsked := 0;
+    KeepApplied := 0;
+    BadLayers := '';
+    FailReasons := '';
+    Remaining := RegionsStr;
+
+    PCBServer.PreProcess;
+    Try
+        While True Do
+        Begin
+            Op := NextBatchOp(Remaining);
+            If Op = '' Then Break;
+            OpCount := OpCount + 1;
+            ItemStr := 'region ' + IntToStr(OpCount);
+            KindStr := LowerCase(Trim(GetBatchField(Op, 'kind')));
+            If KindStr = '' Then KindStr := 'copper';
+            If (KindStr <> 'copper') And (KindStr <> 'cutout') And (KindStr <> 'keepout') Then
+            Begin
+                Inc(Failed);
+                AddFailReason(FailReasons, ItemStr,
+                    'unknown kind ' + KindStr + ' (copper, cutout or keepout)');
+                Continue;
+            End;
+
+            LayerStr := GetBatchField(Op, 'layer');
+            If (LayerStr = '') And (KindStr = 'keepout') Then LayerStr := 'KeepOutLayer';
+            If LayerStr = '' Then
+            Begin
+                Inc(Failed);
+                AddFailReason(FailReasons, ItemStr, 'layer is required');
+                Continue;
+            End;
+            Layer := ResolveLayerId(PcbLib.Board, LayerStr);
+            If Layer = eNoLayer Then
+            Begin
+                Inc(Failed);
+                If BadLayers = '' Then BadLayers := LayerStr
+                Else If Pos(LayerStr, BadLayers) = 0 Then
+                    BadLayers := BadLayers + ', ' + LayerStr;
+                AddFailReason(FailReasons, ItemStr, 'unknown layer ' + LayerStr);
+                Continue;
+            End;
+
+            { pts=x,y,x,y,... counted and checked first. A truncated list is    }
+            { refused rather than padded with a zero, and so is a value that is  }
+            { not a number: StrToFloatDef would quietly turn it into 0.          }
+            PtsStr := GetBatchField(Op, 'pts');
+            Walk := PtsStr;
+            N := 0;
+            AllNumbers := True;
+            While Walk <> '' Do
+            Begin
+                Token := NextCsvValue(Walk);
+                If Not IsFloatStr(Token) Then AllNumbers := False;
+                N := N + 1;
+            End;
+            If Not AllNumbers Then
+            Begin
+                Inc(Failed);
+                AddFailReason(FailReasons, ItemStr, 'pts holds a value that is not a number');
+                Continue;
+            End;
+            If (N Mod 2) <> 0 Then
+            Begin
+                Inc(Failed);
+                AddFailReason(FailReasons, ItemStr, 'pts holds an odd number of values');
+                Continue;
+            End;
+            NPts := N Div 2;
+            If NPts < 3 Then
+            Begin
+                Inc(Failed);
+                AddFailReason(FailReasons, ItemStr, 'at least 3 vertices are required');
+                Continue;
+            End;
+
+            Region := PCBServer.PCBObjectFactory(eRegionObject, eNoDimension, eCreate_Default);
+            If Region = Nil Then
+            Begin
+                Inc(Failed);
+                AddFailReason(FailReasons, ItemStr, 'PCBObjectFactory returned Nil');
+                Continue;
+            End;
+            Region.Layer := Layer;
+
+            Contour := Region.MainContour.Replicate;
+            Contour.Count := NPts;
+            Walk := PtsStr;
+            For K := 1 To NPts Do
+            Begin
+                XTok := NextCsvValue(Walk);
+                YTok := NextCsvValue(Walk);
+                Contour.X[K] := FootprintOriginX(Footprint)
+                    + MilsToCoordF(StrToFloatDef(XTok, 0));
+                Contour.Y[K] := FootprintOriginY(Footprint)
+                    + MilsToCoordF(StrToFloatDef(YTok, 0));
+            End;
+            Region.SetOutlineContour(Contour);
+
+            Got := -1;
+            Try Got := Region.MainContour.Count; Except Got := -1; End;
+            If Got <> NPts Then
+            Begin
+                Inc(Failed);
+                AddFailReason(FailReasons, ItemStr, 'the outline holds ' + IntToStr(Got)
+                    + ' of ' + IntToStr(NPts) + ' vertices after SetOutlineContour');
+                Continue;
+            End;
+
+            If KindStr = 'cutout' Then
+            Begin
+                Inc(KindAsked);
+                Try Region.Kind := eRegionKind_Cutout; Except End;
+                KindOk := False;
+                Try KindOk := (Region.Kind = eRegionKind_Cutout); Except KindOk := False; End;
+                If KindOk Then Inc(KindApplied);
+            End;
+            If (KindStr = 'keepout') And (Layer <> eKeepOutLayer) Then
+            Begin
+                Inc(KeepAsked);
+                Try Region.IsKeepout := True; Except End;
+                GotKeepout := False;
+                Try GotKeepout := Region.IsKeepout; Except GotKeepout := False; End;
+                If GotKeepout Then Inc(KeepApplied);
+            End;
+
+            RegisterLibPrimitive(PcbLib, Footprint, Region, 'both');
+            Vertices := Vertices + Got;
+            Inc(Added);
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    If Added > 0 Then
+    Begin
+        MarkDocDirtyByPath(PcbLib.Board.FileName);
+        NoteNextStep('This edit is in memory only. Run app_save_all to write '
+            + 'it to disk, and check still_dirty in the reply.');
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"added":' + IntToStr(Added) + ',"failed":' + IntToStr(Failed)
+        + ',"total":' + IntToStr(OpCount)
+        + ',"vertices":' + IntToStr(Vertices)
+        + ',"unknown_layers":"' + EscapeJsonString(BadLayers) + '"'
+        + ',"failures":[' + FailReasons + ']'
+        + ',"kind_requested":' + IntToStr(KindAsked)
+        + ',"kind_applied":' + IntToStr(KindApplied)
+        + ',"keepout_requested":' + IntToStr(KeepAsked)
+        + ',"keepout_applied":' + IntToStr(KeepApplied)
+        + ',"footprint":"' + EscapeJsonString(Footprint.Name) + '"'
+        + ',"pending_save":' + BoolToJsonStr(Added > 0) + '}');
+End;
+
+{..............................................................................}
+{ Lib_SetCurrentFootprint - make a named footprint the library's current one. }
+{                                                                              }
+{ The PcbLib twin of Lib_SetCurrentComponent, which only knows SchLibs. Until  }
+{ this, the only way to aim the pad tools at an existing footprint was to      }
+{ stamp a text on it with component_name and delete the text afterwards.      }
+{ Everything is ResolveLibFootprint, so the switch is verified the same way   }
+{ the add handlers verify it, and the reply carries the origin read AFTER the  }
+{ switch, which is the frame every add handler writes in.                      }
+{                                                                              }
+{ Params: component_name (required; footprint_name accepted), library_path.   }
+{..............................................................................}
+Function Lib_SetCurrentFootprint(Params : String; RequestId : String) : String;
+Var
+    FpWanted, ErrCode, Why : String;
+    Footprint : IPCB_LibComponent;
+Begin
+    FpWanted := ExtractJsonValue(Params, 'component_name');
+    If FpWanted = '' Then FpWanted := ExtractJsonValue(Params, 'footprint_name');
+    If FpWanted = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM',
+            'component_name is required: the footprint to make current');
+        Exit;
+    End;
+
+    Footprint := ResolveLibFootprint(Params, ErrCode, Why);
+    If Footprint = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, ErrCode, Why);
+        Exit;
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"success":true'
+        + ',"footprint":"' + EscapeJsonString(Footprint.Name) + '"'
+        + ',"origin_x_mils":' + FloatToJsonStr(CoordToMilsF(FootprintOriginX(Footprint)))
+        + ',"origin_y_mils":' + FloatToJsonStr(CoordToMilsF(FootprintOriginY(Footprint)))
+        + '}');
 End;
 
 { Lib_GetFootprints - Enumerate every footprint in the active (or named)     }
@@ -2522,34 +3328,6 @@ Begin
     Result := BuildSuccessResponse(RequestId, RespJson);
 End;
 
-{ ResolveLayerName - Human name for any TLayer, including the mechanical      }
-{ layers above 16 that GetLayerString cannot map (it returns 'Unknown' for    }
-{ them, and a modern Altium build encodes those as large ordinals such as     }
-{ 0x04000012). Falls back to the board's own layer stack, which names every   }
-{ layer the document actually has. Returns '' if nothing can name it, so the  }
-{ caller can fall back to the raw ordinal.                                    }
-Function ResolveLayerName(Board : IPCB_Board; Lyr : TLayer) : String;
-Var
-    LayerObj : IPCB_LayerObject_V7;
-    Stack : IPCB_LayerStack_V7;
-Begin
-    Result := '';
-    Try Result := GetLayerString(Lyr); Except End;
-    If (Result <> '') And (Result <> 'Unknown') Then Exit;
-    Result := '';
-    If Board = Nil Then Exit;
-    Try
-        Stack := Board.LayerStack_V7;
-        If Stack <> Nil Then
-        Begin
-            LayerObj := Stack.LayerObject_V7[Lyr];
-            If LayerObj <> Nil Then Result := LayerObj.Name;
-        End;
-    Except
-        Result := '';
-    End;
-End;
-
 { Lib_GetLibraryGeometry - Dump the policy-relevant geometry of EVERY         }
 { footprint in one library pass, for the footprint-policy auditor.            }
 {                                                                              }
@@ -2581,6 +3359,7 @@ Var
     ShapeStr, LayerStr, KindStr, PrimKey, SeenKeys : String;
     PadsJson, PrimsJson, TextsJson, FpsJson, RespJson : String;
     TxtStr, CenterJson : String;
+    SeenAddrs, PrimAddr : String;
     Workspace : IWorkspace;
     Doc : IDocument;
     PcbLib : IPCB_Library;
@@ -2664,6 +3443,15 @@ Begin
                 PadN := 0;
                 SumX := 0;
                 SumY := 0;
+                { DEDUPE BY OBJECT ADDRESS, as Lib_GetFootprintPads and
+                  Lib_ProbeFootprint already do. A primitive added this
+                  session is registered with the footprint AND the library
+                  board, and until a reload the group iterator yields it
+                  twice: measured as pad_count 6 for three pads. Without
+                  this the policy audit counted every new pad twice and saw
+                  every new text twice, which is how one text added by
+                  lib_add_footprint_text read back as two (2026-10-03). }
+                SeenAddrs := '|';
                 Try
                     GrpIter := Footprint.GroupIterator_Create;
                     Try
@@ -2671,6 +3459,14 @@ Begin
                         Pad := GrpIter.FirstPCBObject;
                         While Pad <> Nil Do
                         Begin
+                            PrimAddr := '';
+                            Try PrimAddr := IntToStr(Pad.I_ObjectAddress); Except End;
+                            If (PrimAddr <> '') And (Pos('|' + PrimAddr + '|', SeenAddrs) > 0) Then
+                            Begin
+                                Pad := GrpIter.NextPCBObject;
+                                Continue;
+                            End;
+                            If PrimAddr <> '' Then SeenAddrs := SeenAddrs + PrimAddr + '|';
                             ShapeStr := 'round';
                             Try
                                 If Pad.TopShape = eRectangular Then ShapeStr := 'rectangular'
@@ -2778,6 +3574,7 @@ Begin
                 TextsJson := '[';
                 TextN := 0;
                 DesigCount := 0;
+                SeenAddrs := '|';
                 Try
                     GrpIter := Footprint.GroupIterator_Create;
                     Try
@@ -2785,6 +3582,14 @@ Begin
                         Txt := GrpIter.FirstPCBObject;
                         While Txt <> Nil Do
                         Begin
+                            PrimAddr := '';
+                            Try PrimAddr := IntToStr(Txt.I_ObjectAddress); Except End;
+                            If (PrimAddr <> '') And (Pos('|' + PrimAddr + '|', SeenAddrs) > 0) Then
+                            Begin
+                                Txt := GrpIter.NextPCBObject;
+                                Continue;
+                            End;
+                            If PrimAddr <> '' Then SeenAddrs := SeenAddrs + PrimAddr + '|';
                             { UnderlyingString is the RAW authored string. .Text
                               is the RENDERED one: with special-string conversion
                               on, '.Designator' renders as the component's actual
@@ -11564,7 +12369,7 @@ End;
 Function Lib_DeleteFootprintPrimitives(Params : String; RequestId : String) : String;
 Var
     LibPath, FocusedPath, FpWanted, FpName, ObjTypeStr, LayerStr : String;
-    ConfirmStr, RemovedJson : String;
+    ConfirmStr, RemovedJson, PrimAddr, BoardGone : String;
     Workspace : IWorkspace;
     Doc : IDocument;
     PcbLib : IPCB_Library;
@@ -11577,7 +12382,7 @@ Var
       the way the script expects is its own runtime fault. }
     ObjFilter : Integer;
     WantLayer, MatchLayer : TLayer;
-    IncludePads, Found : Boolean;
+    IncludePads, Found, Gone, FirstSight : Boolean;
     Removed, I, Examined : Integer;
 Begin
     LibPath := ExtractJsonValue(Params, 'library_path');
@@ -11681,6 +12486,22 @@ Begin
         Exit;
     End;
 
+    { MAKE IT CURRENT, verified, before removing anything. The removal below
+      takes each primitive out of the library BOARD as well as the footprint
+      (see there), and the board holds only the current footprint's
+      primitives. Same switch and read-back as ResolveLibFootprint. }
+    If PcbLib.CurrentComponent <> Target Then
+    Begin
+        Try PcbLib.CurrentComponent := Target; Except End;
+        If PcbLib.CurrentComponent <> Target Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'SELECT_FAILED',
+                'Could not make footprint "' + FpWanted + '" current. '
+                + 'Nothing was deleted.');
+            Exit;
+        End;
+    End;
+
     ObjFilter := ObjectTypeFromStringPCB(ObjTypeStr);
     If (ObjTypeStr <> '') And (ObjFilter = -1) Then
     Begin
@@ -11727,6 +12548,7 @@ Begin
     Removed := 0;
     Examined := 0;
     RemovedJson := '';
+    BoardGone := '|';
 
     PCBServer.PreProcess;
     Try
@@ -11773,21 +12595,56 @@ Begin
                   the one-match-per-pass design exists to avoid cannot
                   arise. The outer loop takes a fresh iterator for the next
                   one. }
+                { FROM BOTH OWNERS, the mirror of the add. Every add handler
+                  registers with the footprint AND PcbLib.Board, so removing
+                  from the footprint alone left the board's registration in
+                  place: the delete read back as done, and the primitive was
+                  back after save and reload. That is the owner's recipe
+                  "delete, reload, delete again" (2026-10-03), and their note
+                  that a generated footprint "ignores primitive deletes until
+                  the library is reloaded".
+                  Footprint first: it is the removal already proven here,
+                  and while the board still holds the object it cannot have
+                  been freed. Board second, and ONCE per object: a
+                  double-registered primitive is yielded twice, and its
+                  second yield only takes the footprint's second entry. }
                 If Found And (Prim <> Nil) Then
                 Begin
+                    PrimAddr := '';
+                    Try PrimAddr := IntToStr(Prim.I_ObjectAddress); Except End;
+                    FirstSight := (PrimAddr = '')
+                        Or (Pos('|' + PrimAddr + '|', BoardGone) = 0);
+                    Gone := False;
                     Try
                         Target.RemovePCBObject(Prim);
-                        Removed := Removed + 1;
-                        If RemovedJson <> '' Then
-                            RemovedJson := RemovedJson + ',';
-                        RemovedJson := RemovedJson + '"'
-                            + EscapeJsonString(GetLayerString(MatchLayer))
-                            + '"';
-                    Except
-                        { It matched and would not go. Stop rather than
-                          loop on it forever. }
+                        Gone := True;
+                    Except End;
+                    If FirstSight Then
+                    Begin
+                        If PrimAddr <> '' Then
+                            BoardGone := BoardGone + PrimAddr + '|';
+                        Try
+                            PcbLib.Board.RemovePCBObject(Prim);
+                            Gone := True;
+                        Except End;
+                        If Gone Then
+                        Begin
+                            Removed := Removed + 1;
+                            If RemovedJson <> '' Then
+                                RemovedJson := RemovedJson + ',';
+                            RemovedJson := RemovedJson + '"'
+                                + EscapeJsonString(GetLayerString(MatchLayer))
+                                + '"';
+                        End
+                        Else
+                            { It matched and would not go. Stop rather than
+                              loop on it forever. }
+                            Found := False;
+                    End
+                    Else If Not Gone Then
+                        { A repeat yield of an object already removed that
+                          will not leave the footprint: stop, as above. }
                         Found := False;
-                    End;
                 End;
             Finally
                 Target.GroupIterator_Destroy(GrpIter);
@@ -13472,6 +14329,9 @@ Begin
         'add_footprint_tracks': Result := Lib_AddFootprintTracks(Params, RequestId);
         'add_footprint_arc':    Result := Lib_AddFootprintArc(Params, RequestId);
         'add_footprint_text':   Result := Lib_AddFootprintText(Params, RequestId);
+        'add_footprint_fills':  Result := Lib_AddFootprintFills(Params, RequestId);
+        'add_footprint_regions': Result := Lib_AddFootprintRegions(Params, RequestId);
+        'set_current_footprint': Result := Lib_SetCurrentFootprint(Params, RequestId);
         'get_footprints':       Result := Lib_GetFootprints(Params, RequestId);
         'get_footprint_pads':   Result := Lib_GetFootprintPads(Params, RequestId);
         'get_library_geometry': Result := Lib_GetLibraryGeometry(Params, RequestId);

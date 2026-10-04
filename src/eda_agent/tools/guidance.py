@@ -86,6 +86,33 @@ _RECIPES: tuple[dict[str, Any], ...] = (
             "not saved: app_save_all writes it."),
     },
     {
+        "task": "Add paste apertures, mask openings or keep-outs inside a "
+                "footprint",
+        "keywords": ("paste", "stencil", "aperture", "solder", "mask",
+                     "opening", "keepout", "keep-out", "fill", "region",
+                     "cutout", "pcblib"),
+        "document_kind": "library",
+        "backends": ("altium",),
+        "use": ["lib_add_footprint_fills", "lib_add_footprint_regions"],
+        "avoid": [
+            ("pcb_place_fill", "acts on a BOARD; the fill never reaches "
+                               "the footprint"),
+            ("pcb_place_region", "acts on a BOARD, not the footprint"),
+            ("pcb_make_paste_grid", "splits a placed pad's paste on a "
+                                    "BOARD; the library keeps the old "
+                                    "aperture"),
+        ],
+        "note": (
+            "Fills are rectangles with a rotation, regions any polygon. "
+            "Both take any layer by name (TopPaste, TopSolder, KeepOutLayer, "
+            "Mechanical13) and a component_name. Suppress a pad's own paste "
+            "with paste_expansion in lib_add_footprint_pads before placing "
+            "apertures over it. A keep-out on KeepOutLayer blocks every "
+            "layer; one on a copper layer blocks that layer only and "
+            "reports keepout_applied, because that write is not yet "
+            "verified live."),
+    },
+    {
         "task": "Set mechanical layer names and kinds on a BOARD",
         "keywords": ("mechanical", "layer", "mechkind", "kind", "rename",
                      "pair", "paired", "board"),

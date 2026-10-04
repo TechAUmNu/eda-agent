@@ -677,6 +677,179 @@ def _write_description_edits(descriptions: dict) -> tuple[str, str]:
     return str(batch_path), ""
 
 
+def _num(value: object) -> Optional[float]:
+    """A finite float, or None for anything that is not one.
+
+    Every footprint geometry field goes through here before ``_mil``.
+    ``float()`` on a caller's junk raises, which would hand an MCP client a
+    stack trace, and NaN or infinity would reach the Pascal as text that
+    ``StrToFloatDef`` answers with its DEFAULT, putting the primitive at the
+    origin while the call reports success. A bool is refused too: ``True``
+    is a number to Python and never a coordinate.
+    """
+    if isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _tracks_payload(tracks: list[dict[str, Any]]) -> tuple[str, int]:
+    """Build the ``tracks`` batch payload, and count what was dropped.
+
+    Sibling of :func:`_pads_payload`. Coordinates and width go through
+    ``_mil``, so a 12.5 mil courtyard line arrives as 12.5 rather than the
+    whole mil ``round()`` used to make of it. The Pascal reads them with
+    StrToFloatDef now, which is what makes the decimal meaningful: under
+    StrToIntDef a decimal did not round, it fell back to the DEFAULT.
+
+    A track missing an endpoint, carrying a non-number, or with a width
+    that is not positive is dropped and counted, never sent as zeros.
+    """
+    op_strs: list[str] = []
+    skipped_invalid = 0
+    for t in tracks:
+        if not isinstance(t, dict):
+            skipped_invalid += 1
+            continue
+        coords = [_num(t.get(k)) for k in ("x1", "y1", "x2", "y2")]
+        width = _num(t.get("width", 10))
+        if any(c is None for c in coords) or width is None or width <= 0:
+            skipped_invalid += 1
+            continue
+        fields = [
+            f"x1={_mil(coords[0])}", f"y1={_mil(coords[1])}",
+            f"x2={_mil(coords[2])}", f"y2={_mil(coords[3])}",
+            f"width={_mil(width)}",
+            f"layer={_payload_safe(t.get('layer') or 'TopOverlay')}",
+        ]
+        op_strs.append(";".join(fields))
+    return "~~".join(op_strs), skipped_invalid
+
+
+def _fills_payload(
+        fills: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    """Build the ``fills`` batch payload, and say what was dropped and why.
+
+    Returns ``(payload, skipped)`` where each skipped entry names the
+    fill's index and the reason, the shape the Pascal's own ``failures``
+    use, so a caller reads both lists the same way.
+
+    LAYER IS REQUIRED. A track defaults to silkscreen because a stray silk
+    line is harmless; a fill defaulted to anything would be copper or paste
+    that nobody asked for.
+    """
+    op_strs: list[str] = []
+    skipped: list[dict[str, Any]] = []
+    for i, f in enumerate(fills):
+        if not isinstance(f, dict):
+            skipped.append({"item": i, "reason": "not an object"})
+            continue
+        coords = [_num(f.get(k)) for k in ("x1", "y1", "x2", "y2")]
+        if any(c is None for c in coords):
+            skipped.append({"item": i, "reason": "x1, y1, x2 and y2 must "
+                                                  "all be numbers (mils)"})
+            continue
+        if coords[0] == coords[2] or coords[1] == coords[3]:
+            skipped.append({"item": i, "reason": "zero area"})
+            continue
+        layer = str(f.get("layer") or "").strip()
+        if not layer:
+            skipped.append({"item": i, "reason": "layer is required"})
+            continue
+        rotation = _num(f.get("rotation", 0))
+        if rotation is None:
+            skipped.append({"item": i, "reason": "rotation is not a number"})
+            continue
+        fields = [
+            f"x1={_mil(coords[0])}", f"y1={_mil(coords[1])}",
+            f"x2={_mil(coords[2])}", f"y2={_mil(coords[3])}",
+            f"rotation={_mil(rotation)}",
+            f"layer={_payload_safe(layer)}",
+        ]
+        if f.get("keepout"):
+            fields.append("keepout=true")
+        op_strs.append(";".join(fields))
+    return "~~".join(op_strs), skipped
+
+
+#: Region kinds the Pascal accepts. Anything else is refused on this side,
+#: because the alternative is a copper region the caller did not ask for.
+_REGION_KINDS = ("copper", "cutout", "keepout")
+
+
+def _vertex(point: object) -> Optional[tuple[float, float]]:
+    """One vertex as ``(x, y)``, from ``[x, y]`` or ``{"x": .., "y": ..}``."""
+    if isinstance(point, dict):
+        x, y = _num(point.get("x")), _num(point.get("y"))
+    elif isinstance(point, (list, tuple)) and len(point) == 2:
+        x, y = _num(point[0]), _num(point[1])
+    else:
+        return None
+    if x is None or y is None:
+        return None
+    return x, y
+
+
+def _regions_payload(
+        regions: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    """Build the ``regions`` batch payload, and say what was dropped and why.
+
+    Vertices travel in ONE field, ``pts=x1,y1,x2,y2,...``. Commas are data
+    to the batch grammar (only ``;`` and ``~~`` separate), and every value
+    here is a number this function formatted, so nothing a caller types can
+    reach the field.
+
+    A closing vertex that repeats the first is dropped: Altium closes a
+    region's contour itself, and the repeat would be a zero-length edge.
+    """
+    op_strs: list[str] = []
+    skipped: list[dict[str, Any]] = []
+    for i, r in enumerate(regions):
+        if not isinstance(r, dict):
+            skipped.append({"item": i, "reason": "not an object"})
+            continue
+        kind = str(r.get("kind") or "copper").strip().lower()
+        if kind not in _REGION_KINDS:
+            skipped.append({"item": i, "reason": (
+                f"unknown kind {kind!r}; use one of {', '.join(_REGION_KINDS)}")})
+            continue
+        raw = r.get("vertices")
+        if not isinstance(raw, (list, tuple)):
+            skipped.append({"item": i, "reason": "vertices must be a list of "
+                                                  "[x, y] points (mils)"})
+            continue
+        pts = [_vertex(p) for p in raw]
+        if any(p is None for p in pts):
+            skipped.append({"item": i, "reason": "every vertex must be "
+                                                  "[x, y] with numbers"})
+            continue
+        if len(pts) > 1 and pts[0] == pts[-1]:
+            pts = pts[:-1]
+        if len(pts) < 3:
+            skipped.append({"item": i, "reason": "at least 3 distinct "
+                                                  "vertices are required"})
+            continue
+        layer = str(r.get("layer") or "").strip()
+        if not layer and kind != "keepout":
+            skipped.append({"item": i, "reason": "layer is required (only "
+                                                  "kind=keepout defaults, to "
+                                                  "KeepOutLayer)"})
+            continue
+        flat = ",".join(f"{_mil(x)},{_mil(y)}" for x, y in pts)
+        fields = [f"pts={flat}", f"kind={kind}"]
+        if layer:
+            fields.append(f"layer={_payload_safe(layer)}")
+        op_strs.append(";".join(fields))
+    return "~~".join(op_strs), skipped
+
+
+#: Values the text tool's ``registration`` diagnostic accepts.
+_TEXT_REGISTRATIONS = ("both", "footprint", "board")
+
+
 def _pins_payload(pins: list[dict[str, Any]]) -> tuple[str, int]:
     """Build the ``pins`` batch payload, and count what was dropped.
 
@@ -1411,16 +1584,11 @@ def register_library_tools(mcp):
         tracks = geom.all_tracks()
         tracks_res: dict[str, Any] = {}
         if tracks:
-            track_ops = [
-                ";".join([
-                    f"x1={round(t['x1'])}", f"y1={round(t['y1'])}",
-                    f"x2={round(t['x2'])}", f"y2={round(t['y2'])}",
-                    f"width={round(t['width'])}", f"layer={t['layer']}",
-                ])
-                for t in tracks
-            ]
+            # The shared builder: generated outlines keep their sub-mil
+            # geometry instead of being rounded to whole mils here.
+            tracks_payload, _ = _tracks_payload(tracks)
             tracks_res = await bridge.send_command_async(
-                "library.add_footprint_tracks", {"tracks": "~~".join(track_ops)})
+                "library.add_footprint_tracks", {"tracks": tracks_payload})
 
         return {
             "footprint": name,
@@ -1447,6 +1615,8 @@ def register_library_tools(mcp):
         layer: str = "TopLayer",
         rotation: float = 0,
         corner_radius: int = 25,
+        component_name: Optional[str] = None,
+        library_path: Optional[str] = None,
     ) -> dict[str, Any]:
         """Add a pad to the current footprint.
 
@@ -1470,27 +1640,36 @@ def register_library_tools(mcp):
             corner_radius: Corner radius percentage for shape="roundrect"
                 (Altium stores RR radius as a %; 25 is typical). Applied
                 on every copper layer, through-hole pads included.
+            component_name: Footprint to add the pad to. It is made the
+                library's current footprint, and the switch is checked,
+                as the track, arc, text, fill and region tools do.
+                Defaults to the current footprint.
+            library_path: Optional .PcbLib to focus first; refused when a
+                different document ends up in front.
 
         Returns:
             Dictionary confirming pad addition; ``shape_status`` says
             whether a roundrect read back ("confirmed") or not.
         """
+        params: dict[str, Any] = {
+            "designator": designator,
+            "x": _mil(x),
+            "y": _mil(y),
+            "x_size": _mil(x_size),
+            "y_size": _mil(y_size),
+            "hole_size": _mil(hole_size),
+            "shape": shape,
+            "layer": layer,
+            "rotation": rotation,
+            "corner_radius": corner_radius,
+        }
+        if component_name:
+            params["component_name"] = component_name
+        if library_path:
+            params["library_path"] = library_path
         bridge = get_bridge()
         result = await bridge.send_command_async(
-            "library.add_footprint_pad",
-            {
-                "designator": designator,
-                "x": _mil(x),
-                "y": _mil(y),
-                "x_size": _mil(x_size),
-                "y_size": _mil(y_size),
-                "hole_size": _mil(hole_size),
-                "shape": shape,
-                "layer": layer,
-                "rotation": rotation,
-                "corner_radius": corner_radius,
-            },
-        )
+            "library.add_footprint_pad", params)
         hint = BulkHintTracker.record_and_hint("lib_add_footprint_pad")
         if hint and isinstance(result, dict):
             result["_hint_bulk"] = hint
@@ -1500,6 +1679,8 @@ def register_library_tools(mcp):
     async def lib_add_footprint_pads(
         pads: list[dict[str, Any]],
         allow_blank_designator: bool = False,
+        component_name: Optional[str] = None,
+        library_path: Optional[str] = None,
     ) -> dict[str, Any]:
         """Add MANY pads to the current footprint in ONE call.
 
@@ -1536,6 +1717,11 @@ def register_library_tools(mcp):
                   per-pad override of the design rule.
             allow_blank_designator: Keep pads whose designator is blank
                 (fiducials, mechanical pads) instead of dropping them.
+            component_name: Footprint to add to, for the whole batch. It
+                is made the library's current footprint, and the switch is
+                checked. Defaults to the current footprint.
+            library_path: Optional .PcbLib to focus first; refused when a
+                different document ends up in front.
 
         Example, a 4-pad 0402 + corner pad in one call:
             lib_add_footprint_pads(pads=[
@@ -1562,45 +1748,73 @@ def register_library_tools(mcp):
                 "skipped_invalid": skipped_invalid,
             }
 
+        params: dict[str, Any] = {"pads": payload}
+        if component_name:
+            params["component_name"] = component_name
+        if library_path:
+            params["library_path"] = library_path
         bridge = get_bridge()
         result = await bridge.send_command_async(
-            "library.add_footprint_pads",
-            {"pads": payload},
-        )
+            "library.add_footprint_pads", params)
         if isinstance(result, dict) and skipped_invalid:
             result["skipped_invalid"] = skipped_invalid
         return result
 
     @mcp.tool()
     async def lib_add_footprint_track(
-        x1: int,
-        y1: int,
-        x2: int,
-        y2: int,
-        width: int = 10,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        width: float = 10,
         layer: str = "TopOverlay",
+        component_name: Optional[str] = None,
+        library_path: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Add a track to the current footprint (for silkscreen/courtyard).
+        """Add a track to a footprint (for silkscreen/courtyard).
+
+        Lengths are DECIMAL mils, kept to 1/10000 mil like the pad tools:
+        a 0.15 mm courtyard line is 5.9055, not 6.
 
         Args:
-            x1: Start X in mils
+            x1: Start X in mils, relative to the footprint origin
             y1: Start Y in mils
             x2: End X in mils
             y2: End Y in mils
             width: Track width in mils
             layer: Layer name. Default "TopOverlay" (silkscreen). Any
                 Altium layer is accepted, e.g. "BottomOverlay" or
-                "Mechanical1".."Mechanical16" for courtyard / assembly
+                "Mechanical1".."Mechanical32" for courtyard / assembly
                 outlines.
+            component_name: Footprint to draw in. It is made the
+                library's current footprint, and the switch is checked,
+                so later calls without a name keep using it. Defaults to
+                the current footprint.
+            library_path: Optional .PcbLib to focus first. Defaults to the
+                active document.
 
         Returns:
-            Dictionary confirming track addition
+            Dict with ``success``, ``footprint``, ``layer`` and
+            ``pending_save`` (run ``app_save_all`` to write the file).
         """
+        coords = [_num(v) for v in (x1, y1, x2, y2)]
+        w = _num(width)
+        if any(c is None for c in coords) or w is None or w <= 0:
+            return {"ok": False, "reason": (
+                "x1, y1, x2, y2 must be numbers and width a positive number, "
+                "all in mils")}
+        params: dict[str, Any] = {
+            "x1": _mil(coords[0]), "y1": _mil(coords[1]),
+            "x2": _mil(coords[2]), "y2": _mil(coords[3]),
+            "width": _mil(w), "layer": layer,
+        }
+        if component_name:
+            params["component_name"] = component_name
+        if library_path:
+            params["library_path"] = library_path
         bridge = get_bridge()
         result = await bridge.send_command_async(
-            "library.add_footprint_track",
-            {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "width": width, "layer": layer},
-        )
+            "library.add_footprint_track", params)
         hint = BulkHintTracker.record_and_hint("lib_add_footprint_track")
         if hint and isinstance(result, dict):
             result["_hint_bulk"] = hint
@@ -1609,21 +1823,31 @@ def register_library_tools(mcp):
     @mcp.tool()
     async def lib_add_footprint_tracks(
         tracks: list[dict[str, Any]],
+        component_name: Optional[str] = None,
+        library_path: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Add MANY tracks to the current footprint in ONE call.
+        """Add MANY tracks to a footprint in ONE call.
 
         PREFER THIS over looping `lib_add_footprint_track`. A silkscreen
         outline + assembly outline is 8+ segments; built one at a time
         that's 8+ LLM turns and 8+ PreProcess/PostProcess+save cycles.
         Batched it's one turn, one PreProcess/PostProcess, one save.
 
+        Lengths are DECIMAL mils, kept to 1/10000 mil like the pad tools,
+        so a courtyard need not be rounded outward to whole mils.
+
         Args:
             tracks: List of track dicts, each with:
-                - x1, y1, x2, y2 (int, mils) -- endpoints
-                - width (int, mils, default 10)
+                - x1, y1, x2, y2 (mils, decimals kept) -- endpoints,
+                  relative to the footprint origin
+                - width (mils, default 10)
                 - layer (str, default "TopOverlay" silkscreen). Any
                   Altium layer name, e.g. "BottomOverlay" or
-                  "Mechanical1".."Mechanical16" for courtyard/assembly.
+                  "Mechanical1".."Mechanical32" for courtyard/assembly.
+            component_name: Footprint to draw in, for the whole batch. It
+                is made the library's current footprint, and the switch is
+                checked. Defaults to the current footprint.
+            library_path: Optional .PcbLib to focus first.
 
         Example, a 100x60 mil silkscreen rectangle in one call:
             lib_add_footprint_tracks(tracks=[
@@ -1634,95 +1858,104 @@ def register_library_tools(mcp):
             ])
 
         Returns:
-            Dict with added, failed, total counts.
+            Dict with added, failed, total counts, ``footprint`` and
+            ``pending_save``; ``skipped_invalid`` counts tracks dropped
+            here for a missing or non-numeric field.
         """
-        op_strs: list[str] = []
-        skipped_invalid = 0
-        for t in tracks:
-            if not all(k in t for k in ("x1", "y1", "x2", "y2")):
-                skipped_invalid += 1
-                continue
-            fields = [
-                f"x1={round(t.get('x1', 0))}",
-                f"y1={round(t.get('y1', 0))}",
-                f"x2={round(t.get('x2', 0))}",
-                f"y2={round(t.get('y2', 0))}",
-                f"width={round(t.get('width', 10))}",
-                f"layer={_payload_safe(t.get('layer', 'TopOverlay'))}",
-            ]
-            op_strs.append(";".join(fields))
-
-        if not op_strs:
+        payload, skipped_invalid = _tracks_payload(tracks)
+        if not payload:
             return {
-                "error": "No valid tracks (each needs x1,y1,x2,y2)",
+                "error": "No valid tracks (each needs numeric x1,y1,x2,y2 "
+                         "and a positive width)",
                 "added": 0,
                 "total": len(tracks),
                 "skipped_invalid": skipped_invalid,
             }
-
+        params: dict[str, Any] = {"tracks": payload}
+        if component_name:
+            params["component_name"] = component_name
+        if library_path:
+            params["library_path"] = library_path
         bridge = get_bridge()
         result = await bridge.send_command_async(
-            "library.add_footprint_tracks",
-            {"tracks": "~~".join(op_strs)},
-        )
+            "library.add_footprint_tracks", params)
         if isinstance(result, dict) and skipped_invalid:
             result["skipped_invalid"] = skipped_invalid
         return result
 
     @mcp.tool()
     async def lib_add_footprint_arc(
-        x_center: int,
-        y_center: int,
-        radius: int,
+        x_center: float,
+        y_center: float,
+        radius: float,
         start_angle: float = 0,
         end_angle: float = 360,
-        width: int = 10,
+        width: float = 10,
         layer: str = "TopOverlay",
+        component_name: Optional[str] = None,
+        library_path: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Add an arc to the current footprint.
+        """Add an arc to a footprint.
+
+        Centre, radius and width are DECIMAL mils, kept to 1/10000 mil.
 
         Args:
-            x_center: Center X in mils
+            x_center: Center X in mils, relative to the footprint origin
             y_center: Center Y in mils
             radius: Arc radius in mils
             start_angle: Start angle in degrees
             end_angle: End angle in degrees
             width: Line width in mils
             layer: Layer name. Default "TopOverlay" (silkscreen). Any
-                Altium layer accepted, e.g. "Mechanical1".."Mechanical16"
+                Altium layer accepted, e.g. "Mechanical1".."Mechanical32"
                 for pin-1 / assembly markers.
+            component_name: Footprint to draw in. It is made the
+                library's current footprint, and the switch is checked.
+                Defaults to the current footprint.
+            library_path: Optional .PcbLib to focus first.
 
         Returns:
-            Dictionary confirming arc addition
+            Dict with ``success``, ``footprint``, ``layer`` and
+            ``pending_save``.
         """
+        nums = [_num(v) for v in (x_center, y_center, radius, start_angle,
+                                  end_angle, width)]
+        if any(n is None for n in nums) or nums[2] <= 0 or nums[5] <= 0:
+            return {"ok": False, "reason": (
+                "x_center, y_center, start_angle and end_angle must be "
+                "numbers, and radius and width positive numbers (mils)")}
+        params: dict[str, Any] = {
+            "x_center": _mil(nums[0]),
+            "y_center": _mil(nums[1]),
+            "radius": _mil(nums[2]),
+            "start_angle": _mil(nums[3]),
+            "end_angle": _mil(nums[4]),
+            "width": _mil(nums[5]),
+            "layer": layer,
+        }
+        if component_name:
+            params["component_name"] = component_name
+        if library_path:
+            params["library_path"] = library_path
         bridge = get_bridge()
         result = await bridge.send_command_async(
-            "library.add_footprint_arc",
-            {
-                "x_center": x_center,
-                "y_center": y_center,
-                "radius": radius,
-                "start_angle": start_angle,
-                "end_angle": end_angle,
-                "width": width,
-                "layer": layer,
-            },
-        )
+            "library.add_footprint_arc", params)
         return result
 
     @mcp.tool()
     async def lib_add_footprint_text(
         text: str,
-        x: int = 0,
-        y: int = 0,
-        size: int = 50,
-        width: int = 8,
-        rotation: int = 0,
+        x: float = 0,
+        y: float = 0,
+        size: float = 50,
+        width: float = 8,
+        rotation: float = 0,
         layer: str = "TopOverlay",
         use_ttfont: bool = False,
         mirror: bool = False,
         library_path: Optional[str] = None,
         component_name: Optional[str] = None,
+        registration: str = "both",
     ) -> dict[str, Any]:
         """Add a text primitive to a PcbLib footprint.
 
@@ -1733,25 +1966,28 @@ def register_library_tools(mcp):
         board, then broadcasts ``PCBM_BoardRegisteration`` to both, which
         is the pattern that registers the primitive reliably.
 
+        ONE TEXT PER CALL, CHECKED. Text was measured coming back twice
+        from one call. The reply now counts what the call created:
+        ``new_objects`` is how many distinct text objects appeared (1 is
+        right), ``group_yields`` how often the footprint lists them (2 is
+        the known double registration of a primitive added this session,
+        harmless and gone after a reload), and a second NEW object with
+        the same string is removed on the spot and counted in
+        ``duplicates_removed``. ``lib_audit_footprint_policies`` no longer
+        reads the double registration as two texts either.
+
         Args:
             text: The string to place. Required.
-            x, y: Coordinates in mils, relative to the FOOTPRINT's origin,
-                which is what the handler has always actually done
-                (``Footprint.X + MilsToCoord(x)``). The old wording said
-                "board origin" and that was wrong: a PcbLib footprint sits
-                at Altium's library origin, 50000 mils out, so the two
-                readings differ by more than a metre. The pad, track and
-                arc tools wrote absolute board coordinates and produced
-                footprints whose geometry was nowhere near them; they now
-                match this one.
+            x, y: Coordinates in DECIMAL mils, relative to the FOOTPRINT's
+                origin, kept to 1/10000 mil.
             size: Text height in mils. 50 is a common silkscreen size;
                 drop to 30-40 for tight footprints.
             width: Stroke width in mils. 8 reads cleanly at 50 mil
                 size; scale with ``size``.
             rotation: Rotation in degrees (0, 90, 180, 270 typical).
-            layer: Layer name resolved by GetLayerFromString
-                (``TopOverlay``, ``BottomOverlay``, ``TopSolder``,
-                ``BottomSolder``, ``Mechanical1`` ... ``Mechanical32``).
+            layer: Layer name (``TopOverlay``, ``BottomOverlay``,
+                ``TopSolder``, ``BottomSolder``, ``Mechanical1`` ...
+                ``Mechanical32``).
             use_ttfont: ``True`` for TrueType; default ``False`` is the
                 vector stroke font that fab houses prefer.
             mirror: Mirror the text. Set this for anything on a BOTTOM
@@ -1760,22 +1996,39 @@ def register_library_tools(mcp):
                 the mistake (bottom text unmirrored, top text mirrored).
             library_path: Optional .PcbLib to focus before adding.
                 Defaults to the active document.
-            component_name: Optional footprint name to switch to before
-                adding. Defaults to the currently active footprint.
+            component_name: Footprint to add to. It is made the library's
+                current footprint and the switch is checked, so a name
+                that cannot be selected is refused instead of the text
+                landing elsewhere. Defaults to the current footprint.
+            registration: Diagnostic, leave at "both". "footprint" or
+                "board" runs only that half of the registration, so one
+                live session can show which persists exactly once after
+                save and reload.
 
         Returns:
             Dict with ``success``, ``footprint``, ``text``, ``layer``,
-            ``x``, ``y``.
+            ``x``, ``y``, ``registration``, ``new_objects``,
+            ``group_yields``, ``duplicates_found``, ``duplicates_removed``
+            and ``pending_save``.
         """
         if not text:
             return {"ok": False,
                     "reason": "text is required: pass the string to place"}
+        nums = [_num(v) for v in (x, y, size, width, rotation)]
+        if any(n is None for n in nums) or nums[2] <= 0 or nums[3] <= 0:
+            return {"ok": False, "reason": (
+                "x, y and rotation must be numbers, and size and width "
+                "positive numbers (mils)")}
+        mode = (registration or "both").strip().lower()
+        if mode not in _TEXT_REGISTRATIONS:
+            return {"ok": False, "reason": (
+                f"registration must be one of {', '.join(_TEXT_REGISTRATIONS)}")}
         bridge = get_bridge()
         params: dict[str, Any] = {
             "text": text,
-            "x": x, "y": y,
-            "size": size, "width": width,
-            "rotation": rotation, "layer": layer,
+            "x": _mil(nums[0]), "y": _mil(nums[1]),
+            "size": _mil(nums[2]), "width": _mil(nums[3]),
+            "rotation": _mil(nums[4]), "layer": layer,
         }
         if use_ttfont:
             params["use_ttfont"] = "true"
@@ -1785,10 +2038,182 @@ def register_library_tools(mcp):
             params["library_path"] = library_path
         if component_name:
             params["component_name"] = component_name
+        if mode != "both":
+            params["registration"] = mode
         result = await bridge.send_command_async(
             "library.add_footprint_text", params,
         )
         return result
+
+    @mcp.tool()
+    async def lib_add_footprint_fills(
+        fills: list[dict[str, Any]],
+        component_name: Optional[str] = None,
+        library_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Add rectangular fills on ANY layer of a footprint, in ONE call.
+
+        FOR THE THINGS THAT USED TO BE BOARD-LEVEL NOTES: stencil apertures
+        on TopPaste (suppress the pad's own paste with its
+        ``paste_expansion`` in ``lib_add_footprint_pads``), solder-mask
+        openings on TopSolder, keep-outs, mechanical marks. Inside the
+        footprint they travel with the part to every board.
+
+        NOT ``pcb_place_fill``, which acts on a BOARD and, aimed at a
+        library, can land on whichever board an open project holds.
+
+        Args:
+            fills: List of fill dicts, each with:
+                - x1, y1, x2, y2 (mils, decimals kept) -- opposite
+                  corners, relative to the footprint origin, either order
+                - layer (str, REQUIRED): e.g. "TopPaste", "BottomPaste",
+                  "TopSolder", "BottomSolder", "TopLayer", "KeepOutLayer",
+                  "Mechanical1".."Mechanical32"
+                - rotation (degrees about the fill centre, default 0)
+                - keepout (bool, default False): make a fill on a copper
+                  layer a keep-out for that layer only. A fill on
+                  "KeepOutLayer" is a keep-out already. Not yet verified
+                  live: read ``keepout_applied`` in the reply.
+            component_name: Footprint to add to, for the whole batch. It
+                is made the library's current footprint, and the switch
+                is checked. Defaults to the current footprint.
+            library_path: Optional .PcbLib to focus first.
+
+        Example, a 3x3 grid of 49.213 mil paste apertures on a thermal pad:
+            lib_add_footprint_fills(component_name="QFN-64_9x9", fills=[
+                {"x1": x - 24.6063, "y1": y - 24.6063,
+                 "x2": x + 24.6063, "y2": y + 24.6063, "layer": "TopPaste"}
+                for x in (-70.866, 0, 70.866) for y in (-70.866, 0, 70.866)
+            ])
+
+        Returns:
+            Dict with ``added``, ``failed``, ``total``, ``failures``
+            (item and reason), ``unknown_layers``, ``keepout_requested``,
+            ``keepout_applied``, ``footprint`` and ``pending_save``.
+            ``skipped`` lists fills refused here before sending.
+        """
+        payload, skipped = _fills_payload(fills)
+        if not payload:
+            return {"ok": False,
+                    "reason": "No valid fills to send",
+                    "added": 0, "total": len(fills), "skipped": skipped}
+        params: dict[str, Any] = {"fills": payload}
+        if component_name:
+            params["component_name"] = component_name
+        if library_path:
+            params["library_path"] = library_path
+        bridge = get_bridge()
+        result = await bridge.send_command_async(
+            "library.add_footprint_fills", params)
+        if isinstance(result, dict) and skipped:
+            result["skipped"] = skipped
+        return result
+
+    @mcp.tool()
+    async def lib_add_footprint_regions(
+        regions: list[dict[str, Any]],
+        component_name: Optional[str] = None,
+        library_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Add polygonal regions on ANY layer of a footprint, in ONE call.
+
+        The shapes a rectangle cannot make: a plus-shaped keep-out between
+        a crystal's pads, an L-shaped mask opening, a chamfered paste
+        aperture, a polygon-pour cutout under an RF pad. Inside the
+        footprint they travel with the part to every board.
+
+        NOT ``pcb_place_region``, which acts on a BOARD.
+
+        Args:
+            regions: List of region dicts, each with:
+                - vertices: list of [x, y] points in mils (decimals kept),
+                  relative to the footprint origin, at least 3. Do not
+                  repeat the first point at the end; a repeat is dropped.
+                - layer (str): e.g. "TopLayer", "TopPaste", "TopSolder",
+                  "KeepOutLayer", "Mechanical13". Required, except for
+                  kind "keepout", which defaults to "KeepOutLayer".
+                - kind (str, default "copper"):
+                  "copper"  a solid region on the layer (on a paste or
+                            mask layer that is the aperture or opening);
+                  "cutout"  a polygon-pour cutout on a copper layer;
+                  "keepout" a keep-out. On "KeepOutLayer" it blocks all
+                            layers; on a named copper layer it blocks that
+                            layer only, which is NOT yet verified live:
+                            read ``keepout_applied``.
+            component_name: Footprint to add to, for the whole batch. It
+                is made the library's current footprint, and the switch
+                is checked. Defaults to the current footprint.
+            library_path: Optional .PcbLib to focus first.
+
+        Example, a plus-shaped top-layer keep-out between four pads:
+            lib_add_footprint_regions(component_name="OSC_2016", regions=[
+                {"kind": "keepout", "layer": "TopLayer", "vertices": [
+                    [-3.543, -40.354], [3.543, -40.354],
+                    [3.543, 40.354], [-3.543, 40.354]]},
+                {"kind": "keepout", "layer": "TopLayer", "vertices": [
+                    [-33.071, -16.732], [33.071, -16.732],
+                    [33.071, 16.732], [-33.071, 16.732]]},
+            ])
+
+        Returns:
+            Dict with ``added``, ``failed``, ``total``, ``vertices``,
+            ``failures`` (item and reason), ``unknown_layers``,
+            ``kind_requested`` / ``kind_applied``, ``keepout_requested`` /
+            ``keepout_applied``, ``footprint`` and ``pending_save``.
+            ``skipped`` lists regions refused here before sending.
+        """
+        payload, skipped = _regions_payload(regions)
+        if not payload:
+            return {"ok": False,
+                    "reason": "No valid regions to send",
+                    "added": 0, "total": len(regions), "skipped": skipped}
+        params: dict[str, Any] = {"regions": payload}
+        if component_name:
+            params["component_name"] = component_name
+        if library_path:
+            params["library_path"] = library_path
+        bridge = get_bridge()
+        result = await bridge.send_command_async(
+            "library.add_footprint_regions", params)
+        if isinstance(result, dict) and skipped:
+            result["skipped"] = skipped
+        return result
+
+    @mcp.tool()
+    async def lib_set_current_footprint(
+        component_name: str,
+        library_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Make a named footprint the current one in a PCB library.
+
+        The PcbLib twin of ``lib_set_current_component``, which only knows
+        SchLibs. Every footprint add tool writes into the current
+        footprint unless it is given ``component_name``, and until this
+        the only way to choose one was to stamp a text on it.
+
+        The switch is read back, and a name that cannot be selected is
+        refused rather than left pointing at the previous footprint.
+
+        Args:
+            component_name: The footprint to make current.
+            library_path: Optional .PcbLib to focus first. Defaults to the
+                active document.
+
+        Returns:
+            Dict with ``success``, ``footprint``, and ``origin_x_mils`` /
+            ``origin_y_mils``: the footprint's origin AFTER the switch,
+            which can move it, in the board frame the library uses.
+        """
+        if not component_name or not component_name.strip():
+            return {"ok": False,
+                    "reason": "component_name is required: the footprint "
+                              "to make current"}
+        params: dict[str, Any] = {"component_name": component_name.strip()}
+        if library_path:
+            params["library_path"] = library_path
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.set_current_footprint", params)
 
     @mcp.tool()
     async def lib_extract_intlib(

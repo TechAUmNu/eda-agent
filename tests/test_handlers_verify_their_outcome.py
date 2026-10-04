@@ -192,11 +192,14 @@ def test_footprint_primitives_are_placed_relative_to_the_footprint():
     text = _src("Library.pas")
     for func in ("Lib_AddFootprintPad", "Lib_AddFootprintPads",
                  "Lib_AddFootprintTrack", "Lib_AddFootprintTracks",
-                 "Lib_AddFootprintArc", "Lib_AddFootprintText"):
+                 "Lib_AddFootprintArc", "Lib_AddFootprintText",
+                 "Lib_AddFootprintFills", "Lib_AddFootprintRegions"):
         body = _decommented(_body(text, func))
-        writes = re.findall(r"(?:Pad|Track|Arc|Text)\.\w*"
+        writes = re.findall(r"(?:Pad|Track|Arc|Text|Fill|Contour)\.\w*"
                             r"(?:X|Y|X1|Y1|X2|Y2|XCenter|YCenter|"
-                            r"XLocation|YLocation)\s*:=\s*([^;]+);", body)
+                            r"XLocation|YLocation|X1Location|Y1Location|"
+                            r"X2Location|Y2Location)(?:\[\w+\])?"
+                            r"\s*:=\s*([^;]+);", body)
         placement = [w for w in writes if "MilsToCoord" in w]
         assert placement, f"{func}: no coordinate writes found to check"
         for w in placement:

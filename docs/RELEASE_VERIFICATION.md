@@ -1,4 +1,4 @@
-# Release verification: 2026.10.04.2
+# Release verification: 2026.10.04.3
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -41,6 +41,12 @@ works elsewhere cannot be an undeclared identifier:
 | 23, pad editing | `SetState_StackShapeOnLayer` | yes, `Library.pas` | medium: the through-hole fix hands the method top, bottom and inner layers it was never given before |
 | 23, pad editing | `HoleType` | yes, `Lib_AddFootprintPads` | low: `eRoundHole` is a new value for it |
 | 23, pad editing | `Description` | yes, `Lib_CreateFootprint` | low: written on an existing footprint for the first time |
+| 24, footprint keep-out | `IsKeepout` | no, nowhere | high, and it can stop the loop |
+| 24, region kind in a footprint | `Kind` | only by step 16, itself unverified | high, shared with step 16 |
+| 24, region outline in a footprint | `SetOutlineContour` | yes, `PCB_PlaceRegion` | medium, first use in a library |
+| 24, fill in a footprint | `X1Location` | yes, `PCB_PlaceFill` | low |
+| 24, choosing the footprint | `CurrentComponent` | yes, `Lib_SetDesignator` | low |
+| 24, delete from the library board | `RemovePCBObject` | yes, `PCBGeneric.pas` on boards | medium, first use on a library board |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -221,7 +227,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.04.2`, `version_match` =
+Expect `altium_script_version` = `2026.10.04.3`, `version_match` =
 `true`, and `mcp_server_version` = `0.6.1`.
 
 Those are two different versions and they fail differently.
@@ -1360,6 +1366,74 @@ On a scratch .PcbLib only:
 7. `lib_set_footprint_description` once with `footprint_name` and once with
    `descriptions` for two footprints. Save, reload, `lib_get_footprints`: the
    new text must be on disk.
+
+---
+
+## 24. Footprint fills, regions, sub-mil tracks, and the doubled text
+
+Six handlers changed and three are new: `lib_add_footprint_fills`,
+`lib_add_footprint_regions` and `lib_set_current_footprint`. Every
+footprint add tool, the two pad tools included, now takes
+`component_name` and `library_path`, made
+current through `ResolveLibFootprint`, which READS THE SWITCH BACK and
+refuses when it did not take. Work on a scratch .PcbLib, take an
+`app_checkpoint` first, and run the riskiest row first.
+
+`IsKeepout` is the one identifier nothing else writes. It is read in
+PCB.pas and PCBGeneric.pas, so the name resolves, and Altium's SDK
+assembly declares a SetState_IsKeepout dispatch member on IPCB_Primitive,
+but no shipped code has assigned it. Only a keep-out on a copper layer
+reaches it; a keep-out on KeepOutLayer does not:
+
+    lib_set_current_footprint  component_name <scratch fp>
+    lib_add_footprint_regions  regions [{kind keepout, layer KeepOutLayer,
+                               vertices [[0,0],[20,0],[20,20],[0,20]]}]
+    lib_add_footprint_regions  regions [{kind keepout, layer TopLayer,
+                               vertices [[0,0],[20,0],[20,20],[0,20]]}]
+
+The first must report `added: 1` and `keepout_requested: 0`. The second
+must report `keepout_requested: 1` and `keepout_applied: 1`. If the
+polling loop stops on the second, the write is the cause: refuse
+kind=keepout on non-KeepOut layers in `_regions_payload` and drop
+`keepout` from `_fills_payload` until another spelling is proven.
+
+The outline write is PCB_PlaceRegion's, used for the first time inside a
+library. `vertices` in the reply must equal the points sent, and a region
+whose contour did not take is reported under `failures` and never kept.
+Then a cutout, whose `Kind` write is step 16's:
+
+    lib_add_footprint_regions  regions [{kind cutout, layer TopLayer,
+                               vertices [[0,0],[20,0],[20,20],[0,20]]}]
+
+`kind_applied` must be 1. Fills on TopPaste and TopSolder, then
+`app_save_all`, `lib_reload_library`, and `lib_probe_footprint` with the
+same footprint: every fill and region must still be there, once.
+
+THE DOUBLED TEXT. Measured 2026-10-03: one `lib_add_footprint_text`
+call, two identical texts. Add one text to a scratch footprint and read
+the reply: `new_objects` must be 1, `group_yields` 1 or 2,
+`duplicates_found` 0. Then `app_save_all`, `lib_reload_library`, and
+`lib_probe_footprint`: the string must appear exactly once. If it
+appears twice with `duplicates_found` 0, the copy is made at save time,
+not in the session; repeat on a fresh footprint with
+`registration="footprint"` and again with `registration="board"`, and
+make whichever persists once the default in `RegisterLibPrimitive`'s
+caller.
+
+Then the delete. `lib_delete_footprint_primitives` now removes from the
+library board as well as the footprint. Delete the text just added,
+`app_save_all`, `lib_reload_library`, probe: it must be gone without a
+second delete. Record the result beside steps 22 and 23: the 3D
+`replace` and `lib_delete_footprint_pads` still remove from the
+footprint only, on purpose, until this run shows whether the second
+removal is needed and safe. If it is, give them the same footprint-first,
+board-second removal; if the bridge stops here instead, drop the board
+removal from `Lib_DeleteFootprintPrimitives` and `RemoveLibTextByAddress`.
+
+Sub-mil: `lib_add_footprint_tracks` with `x1: 12.5`, and
+`lib_add_footprint_arc` with `radius: 12.5`, must read back 12.5 through
+`obj_query` or the saved file, not 12 or 13, and not the 100 mil
+default the old integer parse returned for any decimal.
 
 ---
 
