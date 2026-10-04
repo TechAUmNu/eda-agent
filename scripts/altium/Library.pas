@@ -3882,6 +3882,446 @@ Begin
         Result := BuildErrorResponse(RequestId, 'LINK_FAILED', 'Failed to link footprint');
 End;
 
+{..............................................................................}
+{ 3D BODIES: helpers shared by Lib_Link3DModel, Lib_GetFootprintBodies and    }
+{ PCB_Place3DBody. PCB.pas builds after this file, so it can call them; they  }
+{ live here because the footprint handlers below need them first.             }
+{                                                                              }
+{ WHAT IS PROVEN AND WHAT IS NOT.                                             }
+{                                                                              }
+{ Every IPCB_ComponentBody member used here is already used by shipped code:  }
+{ the factory, ModelFactory_FromFilename, SetState_FromModel, the Model       }
+{ write, AddPCBObject, MoveByXY, StandoffHeight, OverallHeight, Layer and     }
+{ BoundingRectangle (LmComponentsSection reads the last four on a body).      }
+{ Body.Model is READ here for the first time. The script binding declares it  }
+{ Read GetModel Write SetModel, and the write is what Lib_Link3DModel has     }
+{ always done, so the identifier exists; only the read is new.                }
+{                                                                              }
+{ The IPCB_Model members are NOT exercised by any shipped code: SetState,     }
+{ GetState, ModelType, FileName and Rotation. They are attested three ways,   }
+{ read 2026-10-04 from the installed AD26 (26.10.1.5):                        }
+{   * ScriptingSystem.dll carries IPCB_Model's script method list,            }
+{     GetFileName, GetState, SetState, GetEmbed, SetEmbed, ..., with the      }
+{     signature RotX, RotY, RotZ : Double and Dz : Integer for both, every    }
+{     GetState parameter flagged OUT;                                         }
+{   * its property table lists FileName (GetFileName, read only), ModelType   }
+{     (T3DModelType), Origin (TCoordPoint) and Rotation (TAngle);             }
+{   * Altium.SDK.Interfaces.dll declares the same IPCB_Model member for       }
+{     member, GetState(ref RotX, ref RotY, ref RotZ, ref Dz).                 }
+{ The PcbLib file stores exactly these fields per body as MODEL.3D.ROTX,      }
+{ ROTY, ROTZ and DZ, beside MODEL.2D.X, 2D.Y and 2D.ROTATION (Origin and      }
+{ Rotation), and MODEL.MODELTYPE 0 = extruded, 2 = cylinder in a real IPC     }
+{ generated library, matching the enum order Extruded, Generic, Cylinder,     }
+{ Sphere.                                                                     }
+{                                                                              }
+{ That makes an undeclared identifier unlikely, not impossible, and it cannot }
+{ be caught. So each unproven member sits in a function of its own and is     }
+{ reached only when the caller asked for what it gives: a plain link with no  }
+{ rotation, and a body list with model_state=false, touch none of them.       }
+{                                                                              }
+{ Body.x and Body.y are deliberately NOT used. Neither IPCB_ComponentBody nor }
+{ its ancestors IPCB_Region and IPCB_Primitive declare a position in the AD26 }
+{ SDK. Position comes from BoundingRectangle, which IPCB_Primitive declares.  }
+{..............................................................................}
+
+{ Four corners as x1, y1, x2, y2 plus width and height, in mils measured from }
+{ (OrgX, OrgY). Plain coordinates rather than a TCoordRect parameter, because }
+{ nothing here passes a record to a script function and this is not the place }
+{ to find out whether it works.                                               }
+Function Body3D_RectJson(X1 : TCoord; Y1 : TCoord; X2 : TCoord; Y2 : TCoord;
+                         OrgX : TCoord; OrgY : TCoord) : String;
+Begin
+    Result := JsonObj(
+        JsonFloat('x1', CoordToMilsF(X1 - OrgX)) + ',' +
+        JsonFloat('y1', CoordToMilsF(Y1 - OrgY)) + ',' +
+        JsonFloat('x2', CoordToMilsF(X2 - OrgX)) + ',' +
+        JsonFloat('y2', CoordToMilsF(Y2 - OrgY)) + ',' +
+        JsonFloat('width', CoordToMilsF(X2 - X1)) + ',' +
+        JsonFloat('height', CoordToMilsF(Y2 - Y1)));
+End;
+
+{ A body's bounding rectangle in board coordinates. Ok is false when the read }
+{ raised or the rectangle is empty, which is what a body with no geometry     }
+{ reports, and an empty box is no basis for aligning anything.                }
+{                                                                              }
+{ The whole record is assigned before any field is read: reading or writing a }
+{ field of a never-assigned TCoordRect local is an undeclared-identifier      }
+{ fault (see PCB_CreateRoom).                                                 }
+Procedure Body3D_ReadRect(Body : IPCB_ComponentBody; Var X1 : TCoord;
+                          Var Y1 : TCoord; Var X2 : TCoord; Var Y2 : TCoord;
+                          Var Ok : Boolean);
+Var
+    BR : TCoordRect;
+Begin
+    Ok := False;
+    X1 := 0;
+    Y1 := 0;
+    X2 := 0;
+    Y2 := 0;
+    If Body = Nil Then Exit;
+    Try
+        BR := Body.BoundingRectangle;
+        X1 := BR.X1;
+        Y1 := BR.Y1;
+        X2 := BR.X2;
+        Y2 := BR.Y2;
+        Ok := (X2 > X1) Or (Y2 > Y1);
+    Except
+        Ok := False;
+    End;
+End;
+
+{ The extent of every pad on a footprint, in board coordinates. This is the   }
+{ cross-check for the frame: a body box and a pad box reported in the same    }
+{ frame show at once whether the model sits on its land, without opening the  }
+{ 3D view. Duplicate yields of one pad do not change a min/max, so no dedupe. }
+Procedure Body3D_PadsRect(Footprint : IPCB_LibComponent; Var X1 : TCoord;
+                          Var Y1 : TCoord; Var X2 : TCoord; Var Y2 : TCoord;
+                          Var Count : Integer);
+Var
+    GrpIter : IPCB_GroupIterator;
+    Prim : IPCB_Primitive;
+    BR : TCoordRect;
+Begin
+    Count := 0;
+    X1 := 0;
+    Y1 := 0;
+    X2 := 0;
+    Y2 := 0;
+    If Footprint = Nil Then Exit;
+    GrpIter := Footprint.GroupIterator_Create;
+    Try
+        GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+        Prim := GrpIter.FirstPCBObject;
+        While Prim <> Nil Do
+        Begin
+            Try
+                BR := Prim.BoundingRectangle;
+                If Count = 0 Then
+                Begin
+                    X1 := BR.X1;
+                    Y1 := BR.Y1;
+                    X2 := BR.X2;
+                    Y2 := BR.Y2;
+                End
+                Else
+                Begin
+                    If BR.X1 < X1 Then X1 := BR.X1;
+                    If BR.Y1 < Y1 Then Y1 := BR.Y1;
+                    If BR.X2 > X2 Then X2 := BR.X2;
+                    If BR.Y2 > Y2 Then Y2 := BR.Y2;
+                End;
+                Count := Count + 1;
+            Except End;
+            Prim := GrpIter.NextPCBObject;
+        End;
+    Finally
+        Footprint.GroupIterator_Destroy(GrpIter);
+    End;
+End;
+
+{ Distinct 3D bodies on a footprint. Deduplicated by object address: a        }
+{ primitive added this session is registered with the footprint AND the       }
+{ library board, and until a reload the group iterator yields it twice (the   }
+{ measured pad_count 6 for three pads, see Lib_GetFootprintPads).             }
+Function Body3D_CountBodies(Footprint : IPCB_LibComponent) : Integer;
+Var
+    GrpIter : IPCB_GroupIterator;
+    Prim : IPCB_Primitive;
+    Seen : TStringList;
+    Addr : String;
+Begin
+    Result := 0;
+    If Footprint = Nil Then Exit;
+    Seen := TStringList.Create;
+    GrpIter := Footprint.GroupIterator_Create;
+    Try
+        GrpIter.AddFilter_ObjectSet(MkSet(eComponentBodyObject));
+        Prim := GrpIter.FirstPCBObject;
+        While Prim <> Nil Do
+        Begin
+            Addr := '';
+            Try Addr := IntToStr(Prim.I_ObjectAddress); Except End;
+            If (Addr = '') Or (Seen.IndexOf(Addr) < 0) Then
+            Begin
+                If Addr <> '' Then Seen.Add(Addr);
+                Result := Result + 1;
+            End;
+            Prim := GrpIter.NextPCBObject;
+        End;
+    Finally
+        Footprint.GroupIterator_Destroy(GrpIter);
+        Try Seen.Free; Except End;
+    End;
+End;
+
+{ The layer of the first 3D body on a footprint, or eNoLayer when it has none. }
+{ replace=true puts the new model where the placeholder was: the IPC          }
+{ generator draws its bodies on a mechanical layer of its choosing, and a      }
+{ model left on the factory default would not follow the footprint's layer    }
+{ pairing when the part is flipped to the bottom.                             }
+Function Body3D_FirstBodyLayer(Footprint : IPCB_LibComponent) : TLayer;
+Var
+    GrpIter : IPCB_GroupIterator;
+    Prim : IPCB_Primitive;
+Begin
+    Result := eNoLayer;
+    If Footprint = Nil Then Exit;
+    GrpIter := Footprint.GroupIterator_Create;
+    Try
+        GrpIter.AddFilter_ObjectSet(MkSet(eComponentBodyObject));
+        Prim := GrpIter.FirstPCBObject;
+        If Prim <> Nil Then
+        Begin
+            Try Result := Prim.Layer; Except Result := eNoLayer; End;
+        End;
+    Finally
+        Footprint.GroupIterator_Destroy(GrpIter);
+    End;
+End;
+
+{ Take every 3D body off one footprint: the IPC generator's extruded          }
+{ placeholders, or a previous STEP that is being replaced.                    }
+{                                                                              }
+{ THE MEASURED SHAPE OF Lib_DeleteFootprintPrimitives, NOT AN IMPROVEMENT ON  }
+{ IT. One match per pass from a fresh iterator; the match is removed while    }
+{ that iterator is still open, and NextPCBObject is never called on it again. }
+{ Collecting into a TInterfaceList first faulted the engine, and destroying   }
+{ the iterator before removing left the primitive dangling and took the       }
+{ scripting system down. Both are recorded there.                             }
+{                                                                              }
+{ The caller owns PreProcess and PostProcess. This only brackets the footprint }
+{ with BeginModify and EndModify, as the delete handler does.                 }
+{                                                                              }
+{ A body added this session can be listed twice (see Body3D_CountBodies), and }
+{ each listing needs its own removal, so the same address may be removed     }
+{ twice in a row. A third sighting means RemovePCBObject is silently refusing }
+{ it, and the loop stops there rather than spinning to its bound.             }
+{                                                                              }
+{ Returns the number of RemovePCBObject calls that returned; Distinct is the  }
+{ number of different bodies they removed.                                    }
+Function Body3D_RemoveAll(Footprint : IPCB_LibComponent;
+                          Var Distinct : Integer) : Integer;
+Var
+    GrpIter : IPCB_GroupIterator;
+    Prim : IPCB_Primitive;
+    Seen : TStringList;
+    Addr, LastAddr : String;
+    Found : Boolean;
+    I, SameRun : Integer;
+Begin
+    Result := 0;
+    Distinct := 0;
+    If Footprint = Nil Then Exit;
+    Seen := TStringList.Create;
+    LastAddr := '';
+    SameRun := 0;
+    Try
+        PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
+            c_Broadcast, PCBM_BeginModify, c_NoEventData);
+        For I := 1 To 200 Do
+        Begin
+            Found := False;
+            GrpIter := Footprint.GroupIterator_Create;
+            Try
+                GrpIter.AddFilter_ObjectSet(MkSet(eComponentBodyObject));
+                Prim := GrpIter.FirstPCBObject;
+                If Prim <> Nil Then
+                Begin
+                    Addr := '';
+                    Try Addr := IntToStr(Prim.I_ObjectAddress); Except End;
+                    If Addr = LastAddr Then SameRun := SameRun + 1
+                    Else SameRun := 1;
+                    LastAddr := Addr;
+                    If SameRun <= 2 Then
+                    Begin
+                        Try
+                            Footprint.RemovePCBObject(Prim);
+                            Result := Result + 1;
+                            Found := True;
+                            If (Addr <> '') And (Seen.IndexOf(Addr) < 0) Then
+                                Seen.Add(Addr);
+                        Except
+                            Found := False;
+                        End;
+                    End;
+                End;
+            Finally
+                Footprint.GroupIterator_Destroy(GrpIter);
+            End;
+            If Not Found Then Break;
+        End;
+        PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
+            c_Broadcast, PCBM_EndModify, c_NoEventData);
+    Finally
+        Distinct := Seen.Count;
+        Try Seen.Free; Except End;
+    End;
+End;
+
+{ The model behind a body. The first READ of Body.Model in this codebase; the }
+{ identifier is the one every placement here already writes.                  }
+Function Body3D_GetModel(Body : IPCB_ComponentBody) : IPCB_Model;
+Begin
+    Result := Nil;
+    If Body = Nil Then Exit;
+    Try
+        Result := Body.Model;
+    Except
+        Result := Nil;
+    End;
+End;
+
+{ THE ROTATION, written on the MODEL. UNVERIFIED: see the block comment above }
+{ for what attests SetState.                                                  }
+{                                                                              }
+{ The arguments are RotX, RotY, RotZ in degrees and Dz in internal units:     }
+{ the names come from the script binding's own signature for this method, and }
+{ they are the MODEL.3D.ROTX, ROTY, ROTZ and DZ a saved PcbLib stores per     }
+{ body. Dz is left at 0 because the Z offset goes through StandoffHeight,     }
+{ which is confirmed live; writing both could lift the model twice.           }
+{                                                                              }
+{ Called BEFORE the body is added and before SetState_FromModel, so the body  }
+{ derives its outline from the rotated model. AutoSTEPplacer.pas sets the     }
+{ model state before the model is attached, and a setter reaching for state   }
+{ an owning board provides is what crashed ADVPCB.DLL in PCB_Place3DBody;     }
+{ this writes the model, not the body, so it does not need an owner.          }
+Function Body3D_ApplyRotation(Model : IPCB_Model; RotX : Double;
+                              RotY : Double; RotZ : Double) : Boolean;
+Begin
+    Result := False;
+    If Model = Nil Then Exit;
+    Try
+        Model.SetState(RotX, RotY, RotZ, 0);
+        Result := True;
+    Except
+        Result := False;
+    End;
+End;
+
+{ The model's kind, as the T3DModelType ordinal, or -1. UNVERIFIED read. The  }
+{ ordinals are not guessed: the binding's enum lists Extruded, Generic,       }
+{ Cylinder, Sphere in that order, and an IPC generated PcbLib stores          }
+{ MODEL.MODELTYPE=0 beside EXTRUDED.MINZ/MAXZ and 2 beside CYLINDER.RADIUS.   }
+{ Compared as numbers so no enum identifier is needed at all.                 }
+Function Body3D_ModelTypeId(Model : IPCB_Model) : Integer;
+Begin
+    Result := -1;
+    If Model = Nil Then Exit;
+    Try
+        Result := Model.ModelType;
+    Except
+        Result := -1;
+    End;
+End;
+
+{ "generic" is Altium's word for an imported model file: STEP, Parasolid or   }
+{ SolidWorks. It is the kind lib_link_3d_model creates.                       }
+Function Body3D_ModelTypeName(TypeId : Integer) : String;
+Begin
+    If TypeId = 0 Then Result := 'extruded'
+    Else If TypeId = 1 Then Result := 'generic'
+    Else If TypeId = 2 Then Result := 'cylinder'
+    Else If TypeId = 3 Then Result := 'sphere'
+    Else Result := 'unknown';
+End;
+
+{ Kind, source file and planar rotation of a model, as JSON fields without    }
+{ braces. UNVERIFIED reads (ModelType, FileName, Rotation).                   }
+{                                                                              }
+{ planar_rotation is the model's own Rotation property, which the binding     }
+{ pairs with Origin: on the evidence of the file layout it is                  }
+{ MODEL.2D.ROTATION, a different number from the 3D rotation about Z. It is   }
+{ reported so a live read can show which of the two a rotation landed in.     }
+Function Body3D_ModelInfoJson(Model : IPCB_Model) : String;
+Var
+    TypeId : Integer;
+    FileStr : String;
+    Planar : Double;
+Begin
+    TypeId := Body3D_ModelTypeId(Model);
+    FileStr := '';
+    Planar := 0;
+    If Model <> Nil Then
+    Begin
+        Try FileStr := Model.FileName; Except FileStr := ''; End;
+        Try Planar := Model.Rotation; Except Planar := 0; End;
+    End;
+    Result := JsonStr('type', Body3D_ModelTypeName(TypeId)) + ',' +
+              JsonInt('type_id', TypeId) + ',' +
+              JsonStr('file', FileStr) + ',' +
+              JsonFloat('planar_rotation', Planar);
+End;
+
+{ The model's 3D rotation and Z offset READ BACK, as a JSON object, or 'null' }
+{ with Ok false. UNVERIFIED: GetState's four parameters are OUT parameters,   }
+{ and no shipped code here passes a variable by reference to an Altium        }
+{ method. Altium's own scripts do it with ChooseLocation, whose parameters    }
+{ are VAR, so the mechanism exists; whether an OUT Double comes back through  }
+{ it is what the first live call settles.                                     }
+{                                                                              }
+{ Read into locals first and copied out, rather than handing the caller's VAR }
+{ parameters straight to GetState, so the by-reference path is one level deep. }
+Function Body3D_ModelStateJson(Model : IPCB_Model; Var RotX : Double;
+                               Var RotY : Double; Var RotZ : Double;
+                               Var Ok : Boolean) : String;
+Var
+    RX, RY, RZ : Double;
+    DzC : Integer;
+Begin
+    Result := 'null';
+    Ok := False;
+    RotX := 0;
+    RotY := 0;
+    RotZ := 0;
+    If Model = Nil Then Exit;
+    RX := 0;
+    RY := 0;
+    RZ := 0;
+    DzC := 0;
+    Try
+        Model.GetState(RX, RY, RZ, DzC);
+        Ok := True;
+    Except
+        Ok := False;
+    End;
+    If Not Ok Then Exit;
+    RotX := RX;
+    RotY := RY;
+    RotZ := RZ;
+    Result := JsonObj(
+        JsonFloat('x', RX) + ',' +
+        JsonFloat('y', RY) + ',' +
+        JsonFloat('z', RZ) + ',' +
+        JsonFloat('dz_mils', CoordToMilsF(DzC)));
+End;
+
+{ The proven half of a body's description, as JSON fields without braces:     }
+{ layer, standoff, overall height and bounding box in mils from (OrgX, OrgY). }
+Function Body3D_BodyFieldsJson(Body : IPCB_ComponentBody; Board : IPCB_Board;
+                               OrgX : TCoord; OrgY : TCoord) : String;
+Var
+    X1, Y1, X2, Y2, Standoff, Overall : TCoord;
+    HaveRect : Boolean;
+    LayerName : String;
+Begin
+    Standoff := 0;
+    Overall := 0;
+    LayerName := '';
+    Try Standoff := Body.StandoffHeight; Except Standoff := 0; End;
+    Try Overall := Body.OverallHeight; Except Overall := 0; End;
+    Try LayerName := ResolveLayerName(Board, Body.Layer); Except LayerName := ''; End;
+    Body3D_ReadRect(Body, X1, Y1, X2, Y2, HaveRect);
+    Result := JsonStr('layer', LayerName) + ',' +
+        JsonFloat('standoff_height_mils', CoordToMilsF(Standoff)) + ',' +
+        JsonFloat('overall_height_mils', CoordToMilsF(Overall)) + ',';
+    If HaveRect Then
+        Result := Result + JsonRaw('bbox',
+            Body3D_RectJson(X1, Y1, X2, Y2, OrgX, OrgY))
+    Else
+        Result := Result + JsonNull('bbox');
+End;
+
 { Lib_Link3DModel - attach a 3D STEP model to a PcbLib FOOTPRINT.              }
 {                                                                              }
 { A 3D model in Altium is geometry that lives on the footprint as an          }
@@ -3892,41 +4332,75 @@ End;
 { 'PCB3DModel' implementation -- a wrong ModelType (the constant is           }
 { 'PCB3DLib') -- and passed the path to AddDataFileLink, which blocks on AD26.}
 {                                                                              }
-{ Params: component_name (footprint name; empty = current footprint),         }
-{         model_path (.step/.stp file). offset_*/rotation_* are accepted but  }
-{         not applied (Altium ignores them on import; set in the editor).     }
+{ Params: component_name (footprint; empty = current footprint),              }
+{         model_path (.step/.stp file), library_path (optional .PcbLib to     }
+{         focus first, checked after the open), offset_x/offset_y/offset_z    }
+{         (mils), rotation_x/rotation_y/rotation_z (degrees, on the MODEL),   }
+{         replace ('true' removes the footprint's existing bodies first),     }
+{         align ('none' | 'center' | 'pads'), layer (optional; with replace  }
+{         and no layer the new body takes the replaced body's layer).         }
+{                                                                              }
+{ align: 'none' moves the body by (offset_x, offset_y) from wherever the      }
+{ factory put it, which is the old behaviour. 'center' puts the centre of the }
+{ body's bounding box on the footprint origin plus the offsets, 'pads' on the }
+{ centre of the pads plus the offsets. The move is computed from the box READ }
+{ AFTER the add, so it works whatever origin the STEP was authored about.     }
+{                                                                              }
+{ EVERYTHING IS READ BACK. The reply carries the body's box, standoff and     }
+{ overall height in the footprint's own frame, the pads' box in the same      }
+{ frame, the box the move should have produced, and, when a rotation was      }
+{ asked for, the rotation the model reports holding. A box that did not       }
+{ change across a move is flagged bbox_readback_stale: BoundingRectangle is   }
+{ CACHED on texts and nothing yet says whether a body's is.                   }
 Function Lib_Link3DModel(Params : String; RequestId : String) : String;
 Var
-    ModelPath, ComponentName, FpName, AppliedJson : String;
-    OffX, OffY, OffZ : Integer;
-    RotZ : Double;
-    DidStandoff, DidRotation, DidMove : Boolean;
+    ModelPath, ComponentName, FpName, LibPath, FocusedPath, AlignStr : String;
+    LayerStr, LayerSource : String;
+    Failure, FailCode, StateJson, PadsJson, ExpectJson, MatchJson : String;
+    AppliedJson, ReplacedJson, FrameJson, RotReqJson, MoveJson : String;
+    OffX, OffY, OffZ, RotX, RotY, RotZ, ReadX, ReadY, ReadZ : Double;
+    WantRotation, DidRotation, DidStandoff, DidMove, Replace : Boolean;
+    HaveRect, HaveNewRect, Stale, StateOk, Aligned, DidLayer : Boolean;
+    WantLayer : TLayer;
+    Workspace : IWorkspace;
+    Doc : IDocument;
     PcbLib : IPCB_Library;
     Footprint : IPCB_LibComponent;
     Iter : IPCB_LibraryIterator;
     Body : IPCB_ComponentBody;
     Model : IPCB_Model;
+    OrgX, OrgY, DX, DY : TCoord;
+    X1, Y1, X2, Y2, NX1, NY1, NX2, NY2, PX1, PY1, PX2, PY2 : TCoord;
+    PadCount, Removed, RemovedDistinct, Remaining : Integer;
 Begin
     ModelPath := ExtractJsonValue(Params, 'model_path');
     ComponentName := ExtractJsonValue(Params, 'component_name');
-    { Mils and degrees, matching the tool's documented units.             }
-    { rotation_x / rotation_y are deliberately NOT read: the body exposes }
-    { StandoffHeight and a PLANAR Rotation, and the PCB API reference     }
-    { gives the model no X or Y tilt, so reading them would imply a       }
-    { capability that does not exist.                                      }
-    { Parse as FLOAT then round. These three are declared `float` on the    }
-    { Python side, so pydantic turns an argument of 25 into 25.0 and the    }
-    { wire carries "25.0". StrToIntDef cannot read that and returns its     }
-    { default, so EVERY offset arrived as 0, the `If Off <> 0` guards below }
-    { skipped the assignment, and `applied` reported false. That false read }
-    { as "Altium refused the adjustment" when the value had simply never    }
-    { arrived, which is the worst version of this bug: the tool looked      }
-    { honest while silently discarding the caller's numbers. MilsToCoord    }
-    { takes an Integer, hence the Round rather than widening the locals.    }
-    OffX := Round(StrToFloatDef(ExtractJsonValue(Params, 'offset_x'), 0.0));
-    OffY := Round(StrToFloatDef(ExtractJsonValue(Params, 'offset_y'), 0.0));
-    OffZ := Round(StrToFloatDef(ExtractJsonValue(Params, 'offset_z'), 0.0));
+    LibPath := Trim(ExtractJsonValue(Params, 'library_path'));
+    Replace := (LowerCase(ExtractJsonValue(Params, 'replace')) = 'true');
+    AlignStr := LowerCase(Trim(ExtractJsonValue(Params, 'align')));
+    If AlignStr = '' Then AlignStr := 'none';
+    LayerStr := Trim(ExtractJsonValue(Params, 'layer'));
+    { Parse as FLOAT. These are declared `float` on the Python side, so       }
+    { pydantic turns an argument of 25 into 25.0 and the wire carries "25.0". }
+    { StrToIntDef cannot read that and returned its default, which once made  }
+    { every offset arrive as 0 while the reply looked honest.                 }
+    OffX := StrToFloatDef(ExtractJsonValue(Params, 'offset_x'), 0.0);
+    OffY := StrToFloatDef(ExtractJsonValue(Params, 'offset_y'), 0.0);
+    OffZ := StrToFloatDef(ExtractJsonValue(Params, 'offset_z'), 0.0);
+    RotX := StrToFloatDef(ExtractJsonValue(Params, 'rotation_x'), 0.0);
+    RotY := StrToFloatDef(ExtractJsonValue(Params, 'rotation_y'), 0.0);
     RotZ := StrToFloatDef(ExtractJsonValue(Params, 'rotation_z'), 0.0);
+    WantRotation := (RotX <> 0) Or (RotY <> 0) Or (RotZ <> 0);
+
+    { Refused before anything is touched, so a typo cannot half-apply. }
+    If (AlignStr <> 'none') And (AlignStr <> 'center') And (AlignStr <> 'pads') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_ALIGN',
+            'align must be "none" (move by the offsets from where the body '
+            + 'lands), "center" (box centre on the footprint origin) or '
+            + '"pads" (box centre on the pads). Got: ' + AlignStr);
+        Exit;
+    End;
 
     If (ModelPath = '') Or (Not FileExists(ModelPath)) Then
     Begin
@@ -3935,12 +4409,64 @@ Begin
         Exit;
     End;
 
+    { The library by PATH when one is named, and CHECKED after the open, the }
+    { way Lib_DeleteFootprintPrimitives does: an edit aimed at a library     }
+    { that never came to the front lands in whichever one did.              }
+    If LibPath <> '' Then
+    Begin
+        Workspace := GetWorkspace;
+        If Workspace = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+            Exit;
+        End;
+        FocusedPath := '';
+        Doc := Workspace.DM_FocusedDocument;
+        If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+        If UpperCase(FocusedPath) <> UpperCase(LibPath) Then
+        Begin
+            ResetParameters;
+            AddStringParameter('ObjectKind', 'Document');
+            AddStringParameter('FileName', LibPath);
+            RunProcess('WorkspaceManager:OpenObject');
+            FocusedPath := '';
+            Doc := Workspace.DM_FocusedDocument;
+            If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+        End;
+        If UpperCase(FocusedPath) <> UpperCase(LibPath) Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'WRONG_DOCUMENT_FOCUSED',
+                'Asked for ' + LibPath + ' but the focused document is "'
+                + FocusedPath + '". Nothing was changed.');
+            Exit;
+        End;
+    End;
+
     PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
-            'No PCB library is active (a 3D body attaches to a PcbLib footprint)');
+            'No PCB library is active (a 3D body attaches to a PcbLib footprint). '
+            + 'Pass library_path, or use pcb_place_3d_body for a board.');
         Exit;
+    End;
+
+    { A named layer is resolved against the library's own stack before    }
+    { anything is created. GetLayerFromString answers TopLayer for every   }
+    { name it does not know, and a 3D body put on copper is a quiet wrong. }
+    WantLayer := eNoLayer;
+    LayerSource := 'default';
+    If LayerStr <> '' Then
+    Begin
+        WantLayer := ResolveLayerId(PcbLib.Board, LayerStr);
+        If WantLayer = eNoLayer Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'UNKNOWN_LAYER',
+                'Unknown layer name: ' + LayerStr + '. '
+                + BoardLayerNamesHint(PcbLib.Board));
+            Exit;
+        End;
+        LayerSource := 'argument';
     End;
 
     { Select the footprint by name, otherwise use the current one. }
@@ -3978,92 +4504,514 @@ Begin
     FpName := '';
     Try FpName := Footprint.Name; Except End;
 
+    { The frame every coordinate in the reply is measured in. Read AFTER the }
+    { footprint is made current: making a component current relocates it,   }
+    { and an origin read before that is stale (see Lib_SetDesignators).     }
+    OrgX := FootprintOriginX(Footprint);
+    OrgY := FootprintOriginY(Footprint);
+
+    Failure := '';
+    FailCode := '';
+    DidRotation := False;
+    DidStandoff := False;
+    DidMove := False;
+    Aligned := False;
+    DidLayer := False;
+    HaveRect := False;
+    Removed := 0;
+    RemovedDistinct := 0;
+    Remaining := 0;
+    PadCount := 0;
+    DX := 0;
+    DY := 0;
+    X1 := 0;
+    Y1 := 0;
+    X2 := 0;
+    Y2 := 0;
+    PX1 := 0;
+    PY1 := 0;
+    PX2 := 0;
+    PY2 := 0;
+    Body := Nil;
+    Model := Nil;
+
+    { NO Exit BETWEEN PreProcess AND PostProcess. A failure is recorded and  }
+    { the remaining steps are skipped, so the Finally always closes the      }
+    { transaction; an open one blocks every later PCB save until restart.    }
     PCBServer.PreProcess;
     Try
         Body := PCBServer.PCBObjectFactory(eComponentBodyObject, eNoDimension, eCreate_Default);
         If Body = Nil Then
-            Result := BuildErrorResponse(RequestId, 'CREATE_FAILED',
-                'PCBObjectFactory returned Nil for eComponentBodyObject')
-        Else
         Begin
-            { Load the STEP geometry, then bind + add (AutoSTEPplacer order). }
+            FailCode := 'CREATE_FAILED';
+            Failure := 'PCBObjectFactory returned Nil for eComponentBodyObject';
+        End;
+
+        If Failure = '' Then
+        Begin
             Model := Body.ModelFactory_FromFilename(ModelPath, False);
             If Model = Nil Then
-                Result := BuildErrorResponse(RequestId, 'MODEL_LOAD_FAILED',
-                    'Could not load 3D model from ' + ModelPath)
-            Else
             Begin
-                Body.SetState_FromModel;
-                Body.Model := Model;
-                Footprint.AddPCBObject(Body);
-                { Same registration the pad, track, arc and text paths
-                  need. Without it the body lives in the working copy
-                  only: the call reports success, the model loads, and
-                  the save throws it away, which is exactly how this
-                  read as a tool that does nothing at all.
+                FailCode := 'MODEL_LOAD_FAILED';
+                Failure := 'Could not load a 3D model from ' + ModelPath
+                    + '. Nothing was removed or added.';
+            End;
+        End;
 
-                  Missed when the other five were fixed, because that
-                  audit was scoped to handlers named Lib_AddFootprint*
-                  and this one attaches a primitive under a different
-                  name. Audit by the AddPCBObject call, not by what the
-                  handler is called. }
-                PcbLib.Board.AddPCBObject(Body);
-                PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
-                    c_Broadcast, PCBM_BoardRegisteration, Body.I_ObjectAddress);
-                PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress,
-                    c_Broadcast, PCBM_BoardRegisteration, Body.I_ObjectAddress);
+        If Failure = '' Then
+        Begin
+            { ROTATION FIRST, on the MODEL, and only when one was asked for. }
+            { A link with no rotation runs exactly the sequence that has    }
+            { always run: factory, load, SetState_FromModel, assign, add.   }
+            If WantRotation Then
+                DidRotation := Body3D_ApplyRotation(Model, RotX, RotY, RotZ);
+            Body.SetState_FromModel;
+            Body.Model := Model;
 
-                { Placement adjustments. Each is guarded AND REPORTED,     }
-                { because a blanket success here would hide which of them  }
-                { actually took.                                           }
-                {                                                          }
-                { Body.Rotation USED TO BE ASSIGNED HERE AND MUST NOT BE.  }
-                { IPCB_ComponentBody exposes no Rotation on AD26 26.9.1.9. }
-                { Measured: the assignment raised "Undeclared identifier:  }
-                { Rotation", and an undeclared identifier is NOT catchable }
-                { in DelphiScript, so the Try around it did nothing and    }
-                { the modal killed the polling loop. The whole bridge went }
-                { down and had to be restarted by hand. The guard read as  }
-                { careful and could never have fired.                      }
-                {                                                          }
-                { The rotation IS reachable, but on the MODEL rather than  }
-                { the body, and BEFORE Body.Model is assigned:             }
-                { AutoSTEPplacer.pas calls Model.SetState(90,0,0,0). The   }
-                { meaning of those four arguments is not documented        }
-                { anywhere this project can verify, so guessing them would }
-                { repeat the mistake this comment exists to record.        }
-                { rotation_z therefore reports false, like rotation_x and  }
-                { rotation_y, until the signature is measured.             }
-                DidStandoff := False;
-                DidRotation := False;
-                DidMove := False;
-                If OffZ <> 0 Then
-                    Try
-                        Body.StandoffHeight := MilsToCoord(OffZ);
-                        DidStandoff := True;
-                    Except End;
-                If (OffX <> 0) Or (OffY <> 0) Then
-                    Try
-                        Body.MoveByXY(MilsToCoord(OffX), MilsToCoord(OffY));
-                        DidMove := True;
-                    Except End;
+            { REPLACE ONLY NOW THAT THE NEW MODEL HAS LOADED. Removing the   }
+            { placeholders first would leave a footprint with no body at    }
+            { all whenever the STEP turned out unreadable.                  }
+            If Replace Then
+            Begin
+                If WantLayer = eNoLayer Then
+                Begin
+                    WantLayer := Body3D_FirstBodyLayer(Footprint);
+                    If WantLayer <> eNoLayer Then LayerSource := 'replaced body';
+                End;
+                Removed := Body3D_RemoveAll(Footprint, RemovedDistinct);
+                Remaining := Body3D_CountBodies(Footprint);
+            End;
 
-                AppliedJson := JsonBool('standoff_height', DidStandoff) + ','
-                    + JsonBool('rotation_z', DidRotation) + ','
-                    + JsonBool('offset_xy', DidMove);
+            Footprint.AddPCBObject(Body);
+            { Same registration the pad, track, arc and text paths need.   }
+            { Without it the body lives in the working copy only, and the  }
+            { save throws it away. Audit by the AddPCBObject call, not by  }
+            { what the handler is called.                                  }
+            PcbLib.Board.AddPCBObject(Body);
+            PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
+                c_Broadcast, PCBM_BoardRegisteration, Body.I_ObjectAddress);
+            PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress,
+                c_Broadcast, PCBM_BoardRegisteration, Body.I_ObjectAddress);
 
-                Result := BuildSuccessResponse(RequestId, JsonObj(
-                    JsonBool('success', True) + ','
-                    + JsonStr('footprint', FpName) + ','
-                    + JsonStr('model', ExtractFileName(ModelPath)) + ','
-                    + JsonRaw('applied', JsonObj(AppliedJson))));
+            { Layer after the add: a setter on an unowned body is what crashed }
+            { ADVPCB.DLL in PCB_Place3DBody.                                    }
+            If WantLayer <> eNoLayer Then
+            Begin
+                Try
+                    Body.Layer := WantLayer;
+                    DidLayer := True;
+                Except End;
+            End;
+
+            { Standoff is confirmed live. MilsToCoordF keeps sub-mil values. }
+            If OffZ <> 0 Then
+            Begin
+                Try
+                    Body.StandoffHeight := MilsToCoordF(OffZ);
+                    DidStandoff := True;
+                Except End;
+            End;
+
+            { The move, from the box as it stands after the add. }
+            Body3D_ReadRect(Body, X1, Y1, X2, Y2, HaveRect);
+            If AlignStr = 'none' Then
+            Begin
+                DX := MilsToCoordF(OffX);
+                DY := MilsToCoordF(OffY);
+                Aligned := True;
+            End
+            Else If HaveRect Then
+            Begin
+                If AlignStr = 'center' Then
+                Begin
+                    DX := OrgX + MilsToCoordF(OffX) - (X1 + (X2 - X1) Div 2);
+                    DY := OrgY + MilsToCoordF(OffY) - (Y1 + (Y2 - Y1) Div 2);
+                    Aligned := True;
+                End
+                Else
+                Begin
+                    Body3D_PadsRect(Footprint, PX1, PY1, PX2, PY2, PadCount);
+                    If PadCount > 0 Then
+                    Begin
+                        DX := (PX1 + (PX2 - PX1) Div 2) + MilsToCoordF(OffX)
+                            - (X1 + (X2 - X1) Div 2);
+                        DY := (PY1 + (PY2 - PY1) Div 2) + MilsToCoordF(OffY)
+                            - (Y1 + (Y2 - Y1) Div 2);
+                        Aligned := True;
+                    End;
+                End;
+            End;
+
+            If (DX <> 0) Or (DY <> 0) Then
+            Begin
+                Try
+                    Body.MoveByXY(DX, DY);
+                    DidMove := True;
+                Except End;
             End;
         End;
     Finally
         PCBServer.PostProcess;
     End;
 
+    If Failure <> '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, FailCode, Failure);
+        Exit;
+    End;
+
+    { READ IT ALL BACK. }
+    Body3D_ReadRect(Body, NX1, NY1, NX2, NY2, HaveNewRect);
+    Stale := DidMove And HaveRect And HaveNewRect
+        And (NX1 = X1) And (NY1 = Y1) And (NX2 = X2) And (NY2 = Y2);
+    If HaveRect Then
+        ExpectJson := Body3D_RectJson(X1 + DX, Y1 + DY, X2 + DX, Y2 + DY, OrgX, OrgY)
+    Else
+        ExpectJson := 'null';
+
+    Body3D_PadsRect(Footprint, PX1, PY1, PX2, PY2, PadCount);
+    If PadCount > 0 Then
+        PadsJson := Body3D_RectJson(PX1, PY1, PX2, PY2, OrgX, OrgY)
+    Else
+        PadsJson := 'null';
+
+    StateJson := 'null';
+    MatchJson := 'null';
+    StateOk := False;
+    ReadX := 0;
+    ReadY := 0;
+    ReadZ := 0;
+    If WantRotation Then
+    Begin
+        StateJson := Body3D_ModelStateJson(Model, ReadX, ReadY, ReadZ, StateOk);
+        If StateOk Then
+            MatchJson := BoolToJsonStr((Abs(ReadX - RotX) < 0.001)
+                And (Abs(ReadY - RotY) < 0.001) And (Abs(ReadZ - RotZ) < 0.001));
+    End;
+
+    AppliedJson := JsonBool('standoff_height', DidStandoff) + ','
+        + JsonBool('rotation', DidRotation) + ','
+        + JsonBool('rotation_z', DidRotation And (RotZ <> 0)) + ','
+        + JsonBool('offset_xy', DidMove) + ','
+        + JsonStr('align', AlignStr) + ','
+        + JsonBool('aligned', Aligned) + ','
+        + JsonBool('layer', DidLayer) + ','
+        + JsonStr('layer_source', LayerSource);
+    RotReqJson := JsonObj(JsonFloat('x', RotX) + ',' + JsonFloat('y', RotY) + ','
+        + JsonFloat('z', RotZ));
+    ReplacedJson := JsonObj(JsonBool('requested', Replace) + ','
+        + JsonInt('removed_bodies', RemovedDistinct) + ','
+        + JsonInt('remove_calls', Removed) + ','
+        + JsonInt('remaining_before_add', Remaining));
+    FrameJson := JsonObj(JsonFloat('origin_x_mils', CoordToMilsF(OrgX)) + ','
+        + JsonFloat('origin_y_mils', CoordToMilsF(OrgY)) + ','
+        + JsonRaw('pads_bbox', PadsJson));
+    MoveJson := JsonObj(JsonFloat('dx', CoordToMilsF(DX)) + ','
+        + JsonFloat('dy', CoordToMilsF(DY)));
+
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonBool('success', True) + ','
+        + JsonStr('footprint', FpName) + ','
+        + JsonStr('model', ExtractFileName(ModelPath)) + ','
+        + JsonStr('units', 'mils') + ','
+        + JsonRaw('applied', JsonObj(AppliedJson)) + ','
+        + JsonRaw('rotation_requested', RotReqJson) + ','
+        + JsonRaw('model_state', StateJson) + ','
+        + JsonRaw('rotation_readback_matches', MatchJson) + ','
+        + JsonRaw('replaced', ReplacedJson) + ','
+        + JsonRaw('frame', FrameJson) + ','
+        + JsonRaw('body', JsonObj(Body3D_BodyFieldsJson(Body, PcbLib.Board, OrgX, OrgY))) + ','
+        + JsonRaw('bbox_expected', ExpectJson) + ','
+        + JsonBool('bbox_readback_stale', Stale) + ','
+        + JsonRaw('move_mils', MoveJson)));
+
     MarkDocDirtyByPath(PcbLib.Board.FileName);
+    NoteNextStep('The PcbLib is changed in memory only; app_save_all writes it. '
+        + 'Compare body.bbox with frame.pads_bbox (same frame, mils) before '
+        + 'trusting the placement, then look at it with obj_switch_view 3d. '
+        + 'lib_get_footprint_bodies lists every body on the footprint.');
+End;
+
+{ Lib_GetFootprintBodies - READ-ONLY list of the 3D bodies on a footprint.    }
+{                                                                              }
+{ WHY IT EXISTS. lib_link_3d_model added bodies and nothing could list them:  }
+{ the policy dump reports a COUNT, so telling an IPC generator's extruded    }
+{ placeholder from a linked STEP, or seeing where a model actually landed,    }
+{ meant opening the 3D view and guessing.                                    }
+{                                                                              }
+{ Two shapes, chosen by footprint_name:                                       }
+{   * one footprint: every body with layer, standoff, overall height and      }
+{     bounding box in the footprint's own frame (mils), the pads' box in the  }
+{     same frame as the cross-check, and with model_state the model's kind,  }
+{     source file, planar rotation and 3D rotation read back;                 }
+{   * empty: the whole library, paged by offset/limit, one line per footprint }
+{     with its body count and, with model_state, the count of each kind. The  }
+{     question it answers is "which footprints still carry placeholders".    }
+{                                                                              }
+{ The single-footprint form makes the footprint current so its frame is the  }
+{ one lib_link_3d_model measures in, and puts the previous current footprint  }
+{ back afterwards. The dispatcher restores the focused DOCUMENT.              }
+{                                                                              }
+{ model_state=false skips every unproven IPCB_Model read (see the 3D block    }
+{ comment above). If a live call with it on ever faults, that is the switch   }
+{ that still answers while the read is fixed.                                 }
+{                                                                              }
+{ Params: footprint_name (empty = sweep), library_path (optional),           }
+{         model_state ('false' to skip model reads), offset, limit (sweep).  }
+Function Lib_GetFootprintBodies(Params : String; RequestId : String) : String;
+Var
+    LibPath, FocusedPath, FpWanted, FpName, Addr : String;
+    ItemsJson, BodyJson, ModelJson, StateJson, PadsJson, FpsJson, CountsJson : String;
+    WantModel, StateOk : Boolean;
+    Workspace : IWorkspace;
+    Doc : IDocument;
+    PcbLib : IPCB_Library;
+    Iter : IPCB_LibraryIterator;
+    Footprint, Target, SavedCurrent : IPCB_LibComponent;
+    GrpIter : IPCB_GroupIterator;
+    Body : IPCB_ComponentBody;
+    Model : IPCB_Model;
+    Seen : TStringList;
+    OrgX, OrgY, PX1, PY1, PX2, PY2 : TCoord;
+    ReadX, ReadY, ReadZ : Double;
+    BodyN, PadCount, Offset, Limit, Total, Emitted, TypeId : Integer;
+    NExtruded, NGeneric, NCylinder, NSphere, NUnknown : Integer;
+Begin
+    LibPath := Trim(ExtractJsonValue(Params, 'library_path'));
+    FpWanted := Trim(ExtractJsonValue(Params, 'footprint_name'));
+    WantModel := (LowerCase(ExtractJsonValue(Params, 'model_state')) <> 'false');
+    Offset := StrToIntDef(ExtractJsonValue(Params, 'offset'), 0);
+    Limit := StrToIntDef(ExtractJsonValue(Params, 'limit'), 250);
+    If Offset < 0 Then Offset := 0;
+    If Limit <= 0 Then Limit := 250;
+
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+        Exit;
+    End;
+    FocusedPath := '';
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+    If LibPath = '' Then LibPath := FocusedPath;
+    If LibPath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_LIBRARY',
+            'No library is active and library_path was not supplied');
+        Exit;
+    End;
+    If UpperCase(FocusedPath) <> UpperCase(LibPath) Then
+    Begin
+        ResetParameters;
+        AddStringParameter('ObjectKind', 'Document');
+        AddStringParameter('FileName', LibPath);
+        RunProcess('WorkspaceManager:OpenObject');
+        FocusedPath := '';
+        Doc := Workspace.DM_FocusedDocument;
+        If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+    End;
+    { A read that answered about a library nobody asked for is the answer  }
+    { that looks right: a sweep once returned twenty one identical replies, }
+    { every one read off the same focused file.                             }
+    If UpperCase(FocusedPath) <> UpperCase(LibPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'WRONG_DOCUMENT_FOCUSED',
+            'Asked for ' + LibPath + ' but the focused document is "'
+            + FocusedPath + '".');
+        Exit;
+    End;
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    If PcbLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
+            LibPath + ' is not a PCB library. Bodies on a board are read with '
+            + 'obj_query object_type=eComponentBodyObject.');
+        Exit;
+    End;
+
+    { ---- the whole library, one line per footprint ---- }
+    If FpWanted = '' Then
+    Begin
+        FpsJson := '';
+        Total := 0;
+        Emitted := 0;
+        Iter := PcbLib.LibraryIterator_Create;
+        Try
+            Footprint := Iter.FirstPCBObject;
+            While Footprint <> Nil Do
+            Begin
+                If (Total >= Offset) And (Emitted < Limit) Then
+                Begin
+                    FpName := '';
+                    Try FpName := Footprint.Name; Except End;
+                    BodyN := 0;
+                    NExtruded := 0;
+                    NGeneric := 0;
+                    NCylinder := 0;
+                    NSphere := 0;
+                    NUnknown := 0;
+                    Seen := TStringList.Create;
+                    Try
+                        GrpIter := Footprint.GroupIterator_Create;
+                        Try
+                            GrpIter.AddFilter_ObjectSet(MkSet(eComponentBodyObject));
+                            Body := GrpIter.FirstPCBObject;
+                            While Body <> Nil Do
+                            Begin
+                                Addr := '';
+                                Try Addr := IntToStr(Body.I_ObjectAddress); Except End;
+                                If (Addr = '') Or (Seen.IndexOf(Addr) < 0) Then
+                                Begin
+                                    If Addr <> '' Then Seen.Add(Addr);
+                                    BodyN := BodyN + 1;
+                                    If WantModel Then
+                                    Begin
+                                        TypeId := Body3D_ModelTypeId(Body3D_GetModel(Body));
+                                        If TypeId = 0 Then NExtruded := NExtruded + 1
+                                        Else If TypeId = 1 Then NGeneric := NGeneric + 1
+                                        Else If TypeId = 2 Then NCylinder := NCylinder + 1
+                                        Else If TypeId = 3 Then NSphere := NSphere + 1
+                                        Else NUnknown := NUnknown + 1;
+                                    End;
+                                End;
+                                Body := GrpIter.NextPCBObject;
+                            End;
+                        Finally
+                            Footprint.GroupIterator_Destroy(GrpIter);
+                        End;
+                    Except End;
+                    Try Seen.Free; Except End;
+
+                    CountsJson := '';
+                    If WantModel Then
+                        CountsJson := ',' + JsonInt('extruded', NExtruded)
+                            + ',' + JsonInt('generic', NGeneric)
+                            + ',' + JsonInt('cylinder', NCylinder)
+                            + ',' + JsonInt('sphere', NSphere)
+                            + ',' + JsonInt('unknown', NUnknown);
+                    If Emitted > 0 Then FpsJson := FpsJson + ',';
+                    FpsJson := FpsJson + JsonObj(JsonStr('name', FpName) + ','
+                        + JsonInt('bodies', BodyN) + CountsJson);
+                    Emitted := Emitted + 1;
+                End;
+                Total := Total + 1;
+                Footprint := Iter.NextPCBObject;
+            End;
+        Finally
+            PcbLib.LibraryIterator_Destroy(Iter);
+        End;
+
+        Result := BuildSuccessResponse(RequestId, JsonObj(
+            JsonStr('library_path', LibPath) + ','
+            + JsonInt('total', Total) + ','
+            + JsonInt('offset', Offset) + ','
+            + JsonInt('count', Emitted) + ','
+            + JsonBool('model_state', WantModel) + ','
+            + JsonRaw('footprints', '[' + FpsJson + ']')));
+        Exit;
+    End;
+
+    { ---- one footprint, every body ---- }
+    Target := Nil;
+    Iter := PcbLib.LibraryIterator_Create;
+    Try
+        Footprint := Iter.FirstPCBObject;
+        While Footprint <> Nil Do
+        Begin
+            FpName := '';
+            Try FpName := Footprint.Name; Except End;
+            If UpperCase(FpName) = UpperCase(FpWanted) Then
+            Begin
+                Target := Footprint;
+                Break;
+            End;
+            Footprint := Iter.NextPCBObject;
+        End;
+    Finally
+        PcbLib.LibraryIterator_Destroy(Iter);
+    End;
+    If Target = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_FOOTPRINT',
+            'Footprint not found in ' + LibPath + ': ' + FpWanted);
+        Exit;
+    End;
+
+    { The frame lib_link_3d_model measures in: current first, origin after. }
+    SavedCurrent := Nil;
+    Try SavedCurrent := PcbLib.CurrentComponent; Except SavedCurrent := Nil; End;
+    Try PcbLib.SetState_CurrentComponent(Target); Except End;
+    OrgX := FootprintOriginX(Target);
+    OrgY := FootprintOriginY(Target);
+    FpName := '';
+    Try FpName := Target.Name; Except End;
+
+    ItemsJson := '';
+    BodyN := 0;
+    Seen := TStringList.Create;
+    GrpIter := Target.GroupIterator_Create;
+    Try
+        GrpIter.AddFilter_ObjectSet(MkSet(eComponentBodyObject));
+        Body := GrpIter.FirstPCBObject;
+        While Body <> Nil Do
+        Begin
+            Addr := '';
+            Try Addr := IntToStr(Body.I_ObjectAddress); Except End;
+            If (Addr <> '') And (Seen.IndexOf(Addr) >= 0) Then
+            Begin
+                Body := GrpIter.NextPCBObject;
+                Continue;
+            End;
+            If Addr <> '' Then Seen.Add(Addr);
+            BodyJson := JsonInt('index', BodyN) + ','
+                + Body3D_BodyFieldsJson(Body, PcbLib.Board, OrgX, OrgY);
+            If WantModel Then
+            Begin
+                Model := Body3D_GetModel(Body);
+                If Model <> Nil Then
+                Begin
+                    StateJson := Body3D_ModelStateJson(Model, ReadX, ReadY,
+                        ReadZ, StateOk);
+                    ModelJson := JsonObj(Body3D_ModelInfoJson(Model) + ','
+                        + JsonRaw('rotation', StateJson));
+                End
+                Else
+                    ModelJson := 'null';
+                BodyJson := BodyJson + ',' + JsonRaw('model', ModelJson);
+            End;
+            If BodyN > 0 Then ItemsJson := ItemsJson + ',';
+            ItemsJson := ItemsJson + JsonObj(BodyJson);
+            BodyN := BodyN + 1;
+            Body := GrpIter.NextPCBObject;
+        End;
+    Finally
+        Target.GroupIterator_Destroy(GrpIter);
+        Try Seen.Free; Except End;
+    End;
+
+    Body3D_PadsRect(Target, PX1, PY1, PX2, PY2, PadCount);
+    If PadCount > 0 Then
+        PadsJson := Body3D_RectJson(PX1, PY1, PX2, PY2, OrgX, OrgY)
+    Else
+        PadsJson := 'null';
+
+    If SavedCurrent <> Nil Then
+    Begin
+        Try PcbLib.CurrentComponent := SavedCurrent; Except End;
+    End;
+
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonStr('library_path', LibPath) + ','
+        + JsonStr('footprint', FpName) + ','
+        + JsonStr('units', 'mils') + ','
+        + JsonRaw('frame', JsonObj(
+            JsonFloat('origin_x_mils', CoordToMilsF(OrgX)) + ','
+            + JsonFloat('origin_y_mils', CoordToMilsF(OrgY)) + ','
+            + JsonRaw('pads_bbox', PadsJson))) + ','
+        + JsonInt('body_count', BodyN) + ','
+        + JsonBool('model_state', WantModel) + ','
+        + JsonRaw('bodies', '[' + ItemsJson + ']')));
 End;
 
 Function Lib_GetComponents(Params : String; RequestId : String) : String;
@@ -10809,6 +11757,7 @@ Begin
            Or (Action = 'get_library_geometry')
            Or (Action = 'get_component_details')
            Or (Action = 'get_pad_geometry')
+           Or (Action = 'get_footprint_bodies')
            Or (Action = 'probe_footprint')
            Or (Action = 'probe_designator')
            Or (Action = 'audit_styles')
@@ -10981,6 +11930,7 @@ Begin
         'extract_intlib':       Result := Lib_ExtractIntLib(Params, RequestId);
         'link_footprint':       Result := Lib_LinkFootprint(Params, RequestId);
         'link_3d_model':        Result := Lib_Link3DModel(Params, RequestId);
+        'get_footprint_bodies': Result := Lib_GetFootprintBodies(Params, RequestId);
         'set_mech_layers':      Result := Lib_SetMechLayers(Params, RequestId);
         'get_components':       Result := Lib_GetComponents(Params, RequestId);
         'search':               Result := Lib_Search(Params, RequestId);

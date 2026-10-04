@@ -3,6 +3,7 @@
 """Library management tools for Altium Designer MCP Server."""
 
 import asyncio
+import math
 import re
 from pathlib import Path
 from typing import Any, Optional
@@ -86,6 +87,30 @@ _STRAY_MILS = 5000
 # geometry change revealed (a resized text has a new bounding box). Convergence
 # is fast -- ~90% in the first pass -- so this is a runaway guard, not a budget.
 _MAX_PASSES = 6
+
+
+#: Where lib_link_3d_model may put a body in X and Y. "none" keeps the
+#: original behaviour (offsets are a move from wherever the body lands);
+#: the other two are computed from the box read back after the add.
+_FOOTPRINT_3D_ALIGN = ("none", "center", "pads")
+
+
+def _non_finite(values: dict) -> list:
+    """Names whose value is not a finite number.
+
+    NaN and the infinities pass a ``float`` annotation, and json writes
+    them as NaN / Infinity, which is not JSON. A value that did reach
+    the Pascal unparsed would come out of StrToFloatDef as its default
+    0, so a rotation of NaN would be reported as no rotation at all.
+    """
+    bad = []
+    for name, value in values.items():
+        try:
+            if not math.isfinite(float(value)):
+                bad.append(name)
+        except (TypeError, ValueError):
+            bad.append(name)
+    return bad
 
 
 def _batch_encoding() -> str:
@@ -2032,99 +2057,287 @@ def register_library_tools(mcp):
         rotation_x: float = 0,
         rotation_y: float = 0,
         rotation_z: float = 0,
+        replace: bool = False,
+        align: str = "none",
+        library_path: str = "",
+        layer: str = "",
     ) -> dict[str, Any]:
         """Link a 3D STEP model to a PcbLib footprint.
 
         Loads the STEP geometry into the footprint as an IPCB_ComponentBody
         (the real 3D body that drives the 3D view and the height/placement
-        DRC), so the **active document must be the .PcbLib** that contains the
-        footprint. ``component_name`` selects the footprint by name (empty uses
-        the library's current footprint).
+        DRC). ``component_name`` selects the footprint by name (empty uses
+        the library's current footprint). The library is ``library_path``
+        when given, otherwise the active document, which must then be the
+        .PcbLib.
+
+        TO SWAP AN IPC GENERATOR PLACEHOLDER FOR A MANUFACTURER STEP, pass
+        ``replace=True``: every 3D body already on the footprint (the
+        generator's extruded box and pin cylinders, or an earlier STEP) is
+        removed first. The removal runs only after the new model has
+        loaded, so an unreadable file never leaves the footprint bare.
 
         Args:
-            component_name: Name of the footprint in the active PcbLib
-            model_path: Path to the 3D model file (.step, .stp); must exist
-            offset_x: X offset in mils, applied via the body's MoveByXY
-            offset_y: Y offset in mils, applied with offset_x
-            offset_z: Z offset in mils, sets the body's StandoffHeight.
-                This is the common adjustment: lifting a connector body
-                off the board so it sits on its pads rather than through
-                them.
-            rotation_x: NOT APPLIED, accepted for signature stability.
-                Set it in the library editor after linking.
-            rotation_y: NOT APPLIED, same reason as rotation_x.
-            rotation_z: NOT APPLIED. This one used to assign
-                ``Body.Rotation``, and IPCB_ComponentBody has no such
-                property on AD26 26.9.1.9. MEASURED: it raised
-                "Undeclared identifier: Rotation", which DelphiScript
-                cannot catch, so the Try around it never fired and the
-                resulting modal took the whole polling loop down with
-                it. Passing a rotation used to cost you the bridge.
-                The rotation lives on the MODEL, not the body, and has
-                to be set before the model is attached
-                (``Model.SetState`` in AutoSTEPplacer.pas). Its four
-                arguments are undocumented, so they are not guessed at
-                here. Rotate in the library editor for now.
+            component_name: Name of the footprint in the PcbLib.
+            model_path: Path to the 3D model file (.step, .stp); must exist.
+            offset_x: X offset in mils. What it is measured from depends
+                on ``align``.
+            offset_y: Y offset in mils, with offset_x.
+            offset_z: Z offset in mils, sets the body's StandoffHeight
+                (confirmed live). The common adjustment: lifting a
+                connector body so it sits on its pads rather than
+                through them.
+            rotation_x: rotation about X in degrees. Written on the MODEL
+                (``Model.SetState``) before the body derives its outline,
+                because the model is where a 3D body's rotation lives:
+                assigning ``Body.Rotation`` raised an uncatchable
+                "Undeclared identifier" on AD26 and took the polling loop
+                down with it. A STEP authored Y-up usually needs
+                rotation_x=90 to stand on the board.
+            rotation_y: rotation about Y in degrees, the same route.
+            rotation_z: rotation about Z in degrees, the same route.
+            replace: remove the footprint's existing 3D bodies first.
+            align: where the body goes in X and Y.
+                ``"none"`` (default, the previous behaviour) moves it by
+                (offset_x, offset_y) from wherever Altium put it, which is
+                wherever the STEP's own origin lands.
+                ``"center"`` puts the centre of the body's bounding box on
+                the footprint origin, plus the offsets.
+                ``"pads"`` puts it on the centre of the pads, plus the
+                offsets.
+                The move is computed from the box read back after the
+                body is added, so it works whatever origin the STEP was
+                authored about. ``"center"`` suits a centred footprint,
+                which an IPC generated one is.
+            library_path: optional .PcbLib to focus first. Checked after
+                the open, and refused when a different document ends up in
+                front, so the body never lands in a library you did not
+                name.
+            layer: the layer to put the body on, by name as the library
+                spells it (e.g. a mechanical layer). Empty leaves Altium's
+                default, EXCEPT with ``replace=True``, where the new body
+                takes the layer of the body it replaces, so a STEP swapped
+                in for an IPC placeholder keeps the placeholder's layer and
+                its flip pairing. An unknown name is refused before
+                anything is touched. lib_get_footprint_bodies shows each
+                body's layer.
+
+        NOT YET RUN AGAINST A LIVE SESSION (2026-10-04): the rotation is
+        written with IPCB_Model.SetState and read back with GetState. The
+        AD26 script binding declares both, with exactly these parameters,
+        but no earlier call here exercised them. They run only when a
+        rotation is non-zero, so a link without one runs the sequence that
+        has always worked. Try one rotated link on a scratch footprint
+        first and read ``model_state``.
 
         Returns:
-            Dict with ``success``, ``footprint``, ``model``, and
-            ``applied`` -- which adjustments were actually written to
-            the body (``standoff_height``, ``rotation_z``,
-            ``offset_xy``). Check it rather than assuming: each
-            assignment is individually guarded, so one failing does not
-            fail the call. ``rotation_z`` is now ALWAYS false, see
-            above. ``standoff_height`` is confirmed live;
-            ``offset_xy`` is not yet.
+            ``success``, ``footprint``, ``model``, ``units`` ("mils"), and:
 
-            A ``false`` means the adjustment did not happen, which
-            covers both a rejected assignment and an argument left at
-            its default of 0: the handler skips a zero rather than
-            writing it. ``offset_xy`` covers ``offset_x`` and
-            ``offset_y`` together and is true if either is non-zero.
+            ``applied``: what was actually written. ``standoff_height``;
+            ``rotation`` (SetState returned without raising);
+            ``rotation_z`` (kept for older callers: rotation applied and
+            rotation_z non-zero); ``offset_xy`` (a move happened);
+            ``align``; ``aligned`` (false when the box or the pads could
+            not be read, so nothing was aligned); ``layer`` (a layer was
+            written) and ``layer_source`` (``argument``, ``replaced body``
+            or ``default``). A false covers both a refused write and an
+            argument left at its default.
+
+            ``rotation_requested`` and ``model_state``: what was asked for
+            and, when a rotation was, what the model reports holding
+            (``{x, y, z, dz_mils}``, null when nothing could be read).
+            ``rotation_readback_matches`` compares the two (null when no
+            rotation was asked for or none could be read).
+
+            ``replaced``: ``requested``, ``removed_bodies``,
+            ``remove_calls`` and ``remaining_before_add`` (0 when the
+            replace worked).
+
+            ``frame``: ``origin_x_mils`` / ``origin_y_mils`` (the
+            footprint origin in library-board coordinates) and
+            ``pads_bbox``, the pads' box in the same frame as the body.
+
+            ``body``: ``layer``, ``standoff_height_mils``,
+            ``overall_height_mils`` and ``bbox`` (``x1, y1, x2, y2,
+            width, height``, mils from the footprint origin), all read
+            back from the placed body.
+
+            ``bbox_expected``: the box the move should have produced.
+            ``bbox_readback_stale``: true when the read box did not change
+            across a move, i.e. a cached BoundingRectangle; trust
+            ``bbox_expected`` then, or save and lib_reload_library.
+            ``move_mils``: the move applied, ``{dx, dy}``.
+
+            Nothing is saved: app_save_all writes the library.
+            lib_get_footprint_bodies lists every body on the footprint
+            afterwards.
         """
+        numbers = {
+            "offset_x": offset_x, "offset_y": offset_y, "offset_z": offset_z,
+            "rotation_x": rotation_x, "rotation_y": rotation_y,
+            "rotation_z": rotation_z,
+        }
+        bad = _non_finite(numbers)
+        if bad:
+            return {"ok": False, "reason": (
+                f"not a finite number: {', '.join(bad)}. The handler reads "
+                f"each with a parser that turns what it cannot read into 0, "
+                f"so the value would arrive as no offset or no rotation "
+                f"and be reported as one you did not ask for.")}
+        align = (align or "none").strip().lower()
+        if align not in _FOOTPRINT_3D_ALIGN:
+            return {"ok": False, "reason": (
+                f"align must be one of {', '.join(_FOOTPRINT_3D_ALIGN)}; "
+                f"got {align!r}.")}
+
+        params: dict[str, Any] = {
+            "component_name": component_name,
+            "model_path": model_path,
+            "offset_x": float(offset_x),
+            "offset_y": float(offset_y),
+            "offset_z": float(offset_z),
+            "rotation_x": float(rotation_x),
+            "rotation_y": float(rotation_y),
+            "rotation_z": float(rotation_z),
+            "replace": "true" if replace else "false",
+            "align": align,
+        }
+        if library_path:
+            params["library_path"] = library_path
+        if layer:
+            params["layer"] = layer
         bridge = get_bridge()
-        result = await bridge.send_command_async(
-            "library.link_3d_model",
-            {
-                "component_name": component_name,
-                "model_path": model_path,
-                "offset_x": offset_x,
-                "offset_y": offset_y,
-                "offset_z": offset_z,
-                "rotation_x": rotation_x,
-                "rotation_y": rotation_y,
-                "rotation_z": rotation_z,
-            },
-        )
-        return result
+        return await bridge.send_command_async("library.link_3d_model", params)
+
+    @mcp.tool()
+    async def lib_get_footprint_bodies(
+        footprint_name: str = "",
+        library_path: str = "",
+        model_state: bool = True,
+        offset: int = 0,
+        limit: int = 250,
+    ) -> dict[str, Any]:
+        """List the 3D bodies on a PcbLib footprint, or count them per footprint.
+
+        Read-only. The question it answers is the one lib_link_3d_model
+        could not: what is actually on this footprint, and where. Until
+        now the only body information was a COUNT in the policy dump, so
+        telling an IPC generator's extruded placeholder from a linked
+        STEP, or seeing where a model landed, meant opening the 3D view.
+
+        With ``footprint_name``: every body on that footprint, each with
+        its ``layer``, ``standoff_height_mils``, ``overall_height_mils``
+        and ``bbox`` (``x1, y1, x2, y2, width, height`` in mils from the
+        footprint origin), plus the pads' box in the same frame
+        (``frame.pads_bbox``) so a model sitting off its land is visible
+        in the numbers. With ``model_state`` each body also carries
+        ``model``: ``type`` (``extruded``, ``generic`` = an imported STEP
+        or other model file, ``cylinder``, ``sphere``), ``type_id``,
+        ``file``, ``planar_rotation`` and ``rotation`` (``{x, y, z,
+        dz_mils}`` read back from the model, null when unreadable).
+
+        With ``footprint_name`` empty: the whole library, one line per
+        footprint with ``bodies`` and, with ``model_state``, how many of
+        each type. Paged by ``offset`` / ``limit``; ``total`` is the
+        library size. Use it to find every footprint still carrying a
+        placeholder: an ``extruded`` count above 0 and ``generic`` at 0.
+
+        The single-footprint form makes the footprint current so its frame
+        is the one lib_link_3d_model measures in, then puts the previous
+        current footprint back. The focused document is restored too.
+
+        Args:
+            footprint_name: footprint to list; empty sweeps the library.
+            library_path: optional .PcbLib; defaults to the focused one.
+                Refused when a different document ends up in front.
+            model_state: read the model behind each body (type, file,
+                rotation). These reads use IPCB_Model members the AD26
+                script binding declares but no earlier call here
+                exercised; if a live call with this on ever stops the
+                bridge, ``model_state=False`` still answers with
+                everything else.
+            offset: first footprint of the sweep page.
+            limit: footprints per sweep page.
+
+        Returns:
+            One footprint: ``{library_path, footprint, units, frame:
+            {origin_x_mils, origin_y_mils, pads_bbox}, body_count,
+            model_state, bodies: [{index, layer, standoff_height_mils,
+            overall_height_mils, bbox, model?}]}``.
+            Sweep: ``{library_path, total, offset, count, model_state,
+            footprints: [{name, bodies, extruded?, generic?, cylinder?,
+            sphere?, unknown?}]}``.
+
+            A bbox read after an edit in the same session can be stale
+            (BoundingRectangle is cached on texts, and nothing yet says a
+            body's is not). Save and lib_reload_library before trusting
+            one that disagrees with lib_link_3d_model's
+            ``bbox_expected``.
+        """
+        try:
+            offset = max(0, int(offset))
+            limit = int(limit)
+        except (TypeError, ValueError):
+            return {"ok": False,
+                    "reason": "offset and limit must be whole numbers"}
+        if limit <= 0:
+            limit = 250
+        params: dict[str, Any] = {
+            "footprint_name": footprint_name,
+            "library_path": library_path,
+            "model_state": "true" if model_state else "false",
+            "offset": offset,
+            "limit": limit,
+        }
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.get_footprint_bodies", params, timeout=_GEOMETRY_TIMEOUT)
 
     @mcp.tool()
     async def lib_auto_link_3d_models(
         model_dir: str,
         library_path: Optional[str] = None,
+        replace: bool = False,
+        align: str = "none",
     ) -> dict[str, Any]:
         """Batch-link STEP models to footprints by matching file names.
 
         Enumerates every footprint in the PcbLib, scans `model_dir` for
         .step/.stp files, and links each footprint whose name matches a model
-        file's stem (case-insensitive). Builds on lib_link_3d_model so the
-        same caveat applies: offsets/rotations are not set, adjust in the
-        library if a model needs repositioning.
+        file's stem (case-insensitive). Builds on lib_link_3d_model, with no
+        offsets or rotations: adjust a model that needs it with a single
+        lib_link_3d_model call afterwards.
 
         Args:
             model_dir: Folder containing .step/.stp model files.
             library_path: Optional .PcbLib to focus first; uses the focused
                 document otherwise.
+            replace: remove each matched footprint's existing 3D bodies
+                first, which swaps a library's IPC generator placeholders
+                for real models in one call. See lib_link_3d_model.
+            align: passed to every link: ``"none"``, ``"center"`` or
+                ``"pads"``. See lib_link_3d_model.
 
         Returns:
-            {"linked": [{footprint, model}], "unmatched_footprints": [...],
-             "unused_models": [...]}.
+            {"linked": [{footprint, model, applied, replaced, bbox}],
+             "failed": [{footprint, model, error, code}],
+             "unmatched_footprints": [...], "unused_models": [...]}.
+            A link that Altium refused is listed under ``failed`` rather
+            than ``linked``; before this every attempted link was
+            reported as linked whatever came back.
         """
         from pathlib import Path
+
+        from ..bridge.exceptions import AltiumNotRunningError, AltiumTimeoutError
 
         d = Path(model_dir)
         if not d.is_dir():
             return {"success": False, "error": f"not a directory: {model_dir}"}
+        align = (align or "none").strip().lower()
+        if align not in _FOOTPRINT_3D_ALIGN:
+            return {"ok": False, "reason": (
+                f"align must be one of {', '.join(_FOOTPRINT_3D_ALIGN)}; "
+                f"got {align!r}.")}
 
         models: dict[str, str] = {}
         for f in d.iterdir():
@@ -2138,30 +2351,54 @@ def register_library_tools(mcp):
         fp_data = await bridge.send_command_async("library.get_footprints", params)
         footprints = fp_data.get("footprints", []) if isinstance(fp_data, dict) else []
 
-        linked: list[dict[str, str]] = []
+        linked: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
         unmatched: list[str] = []
         used: set[str] = set()
         for fp in footprints:
             fname = str(fp.get("name", "")).strip()
             key = fname.lower()
-            if key in models:
-                await bridge.send_command_async(
+            if key not in models:
+                unmatched.append(fname)
+                continue
+            used.add(key)
+            try:
+                res = await bridge.send_command_async(
                     "library.link_3d_model",
                     {
                         "component_name": fname,
                         "model_path": models[key],
                         "offset_x": 0, "offset_y": 0, "offset_z": 0,
                         "rotation_x": 0, "rotation_y": 0, "rotation_z": 0,
+                        "replace": "true" if replace else "false",
+                        "align": align,
                     },
                 )
-                linked.append({"footprint": fname, "model": models[key]})
-                used.add(key)
-            else:
-                unmatched.append(fname)
+            except (AltiumNotRunningError, AltiumTimeoutError) as e:
+                # The bridge itself is gone: every later link would fail
+                # the same way, so stop and say where it stopped.
+                failed.append({"footprint": fname, "model": models[key],
+                               "error": str(e),
+                               "code": getattr(e, "code", "")})
+                break
+            except Exception as e:
+                failed.append({"footprint": fname, "model": models[key],
+                               "error": str(e),
+                               "code": getattr(e, "code", "")})
+                continue
+            res = res if isinstance(res, dict) else {}
+            linked.append({
+                "footprint": fname,
+                "model": models[key],
+                "applied": res.get("applied"),
+                "replaced": res.get("replaced"),
+                "bbox": (res.get("body") or {}).get("bbox"),
+            })
 
         return {
-            "success": True,
+            "success": not failed,
             "linked": linked,
+            "failed": failed,
             "unmatched_footprints": unmatched,
             "unused_models": [models[k] for k in models if k not in used],
         }

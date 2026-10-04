@@ -20,9 +20,12 @@ Same family as the ``ObjectIDToObjectName`` fault: an identifier nobody
 verified, dormant for as long as its branch went unexercised.
 
 The rotation is reachable, but on the MODEL and before it is attached
-(``Model.SetState`` in AutoSTEPplacer.pas). Its four arguments are
-undocumented, so implementing it means measuring them first, not
-guessing.
+(``Model.SetState`` in AutoSTEPplacer.pas). Its four arguments were
+undocumented here until the AD26 script binding itself was read:
+ScriptingSystem.dll declares ``SetState(RotX, RotY, RotZ : Double;
+Dz : Integer)`` on IPCB_Model, and Altium.SDK.Interfaces.dll agrees.
+It is applied now, through Body3D_ApplyRotation, and the guards for
+that route live in tests/test_3d_bodies_contract.py.
 """
 
 from __future__ import annotations
@@ -55,18 +58,21 @@ def test_no_pascal_assigns_rotation_on_a_component_body():
         + "\n".join(offenders))
 
 
-def test_the_tool_does_not_promise_a_rotation_it_cannot_apply():
-    """The docstring told callers rotation_z 'sets the body's Rotation'.
+def test_the_tool_promises_rotation_only_through_the_model():
+    """The docstring once told callers rotation_z 'sets the body's Rotation'.
 
-    A caller who believed it paid with the bridge. Tested in the
-    opposite direction from the Pascal guard: the code being gone is
-    not the same as the contract saying so.
+    A caller who believed it paid with the bridge. The rotation is
+    applied now, and the contract has to say WHERE: on the model, never
+    on the body. Tested in the opposite direction from the Pascal guard:
+    the code being right is not the same as the contract saying so.
     """
     text = LIBRARY_PY.read_text(encoding="utf-8")
     start = text.index("def lib_link_3d_model")
-    doc = text[start:start + 4000]
+    doc = text[start:start + 6000]
 
-    assert "rotation_z: NOT APPLIED" in doc, (
-        "lib_link_3d_model must state that rotation_z is not applied")
+    assert "Model.SetState" in doc, (
+        "lib_link_3d_model must say the rotation is written on the model")
     assert "sets the body's Rotation" not in doc, (
-        "the docstring still promises the assignment that was fatal")
+        "the docstring promises the body assignment that was fatal")
+    assert "rotation_z: NOT APPLIED" not in doc, (
+        "the docstring still says rotation is not applied; it is now")

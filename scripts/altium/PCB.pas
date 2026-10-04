@@ -4590,26 +4590,36 @@ End;
 { active document, and reasonably concluded the API could not do it. Altium    }
 { can: Place > 3D Body > Generic STEP Model is a free body on the document.    }
 {                                                                              }
-{ The call sequence is the one Lib_Link3DModel already uses, minus the         }
-{ footprint binding: factory, load the model, SetState_FromModel, assign,      }
-{ add to the board, register. Every identifier here is exercised there, which  }
-{ is the whole reason to copy the shape rather than improve on it.             }
+{ The call sequence is the one Lib_Link3DModel uses, minus the footprint       }
+{ binding: factory, load the model, the optional rotation on the model,        }
+{ SetState_FromModel, assign, add to the board, register, then adjust. The     }
+{ rotation and the read-backs are the Body3D_ helpers in Library.pas, so the   }
+{ board and the library cannot drift apart on how a model is turned.           }
 {                                                                              }
-{ ROTATION IS NOT ACCEPTED, and that is deliberate. IPCB_ComponentBody exposes }
-{ no Rotation on AD26 26.9.1.9: assigning it raised "Undeclared identifier",   }
-{ which DelphiScript cannot catch, and it took the polling loop down. The      }
-{ rotation lives on the MODEL via SetState(90,0,0,0), whose four arguments are }
-{ documented nowhere this project can verify. Guessing them would repeat that. }
+{ ROTATION goes through Body3D_ApplyRotation, on the MODEL. IPCB_ComponentBody }
+{ exposes no Rotation on AD26 26.9.1.9: assigning one raised "Undeclared       }
+{ identifier", which DelphiScript cannot catch, and it took the polling loop   }
+{ down. The model's state is the rotation that exists; see the 3D block        }
+{ comment in Library.pas for what attests it and why it is still unverified.   }
 {                                                                              }
-{ NO identifier PARAMETER EITHER, for the same reason and caught the same    }
-{ way. IPCB_ComponentBody declares                                            }
+{ POSITION IS A BOX, NOT AN ORIGIN, and that is a change. The first version    }
+{ read Body.x and Body.y to compute the move. Neither IPCB_ComponentBody nor   }
+{ its ancestors declare a position in the AD26 SDK, so that read was an        }
+{ undeclared identifier waiting for its first live call. x and y now place     }
+{ the centre of the body's bounding box (align='center', the default), or      }
+{ move the body by x and y from wherever the factory put it (align='none').    }
+{ Both are computed from BoundingRectangle, which IPCB_Primitive declares.     }
+{                                                                              }
+{ NO identifier PARAMETER, for the same reason and caught the same way:        }
+{ IPCB_ComponentBody declares                                                 }
 {   Property Identifier : TPCBString Read GetState_Identifier;                }
-{ with no Write accessor, so naming the body from here is not on offer. It    }
-{ was written and removed before shipping, on the strength of reading the     }
-{ declaration rather than assuming the property was symmetric.                }
-{                                                                             }
-{ Params: model_path (required), x, y (mils), layer (default TopLayer),       }
-{         standoff_height (mils).                                             }
+{ with no Write accessor in the script binding, so naming the body from here   }
+{ is not on offer.                                                             }
+{                                                                              }
+{ Params: model_path (required), x, y (mils, absolute board coordinates like   }
+{         every other board placement here), layer (default TopLayer),         }
+{         standoff_height (mils), rotation_x/rotation_y/rotation_z (degrees),  }
+{         align ('center' | 'none').                                           }
 {..............................................................................}
 
 Function PCB_Place3DBody(Params : String; RequestId : String) : String;
@@ -4617,10 +4627,14 @@ Var
     Board : IPCB_Board;
     Body : IPCB_ComponentBody;
     Model : IPCB_Model;
-    ModelPath, LayerStr, Why : String;
-    BodyX, BodyY, Standoff, CurX, CurY : Integer;
-    DidStandoff, DidMove : Boolean;
-    ReadBackX, ReadBackY : Integer;
+    ModelPath, LayerStr, Why, AlignStr, Failure, FailCode : String;
+    StateJson, MatchJson, ExpectJson, BboxJson : String;
+    BodyX, BodyY, Standoff, RotX, RotY, RotZ, ReadX, ReadY, ReadZ : Double;
+    CentreX, CentreY : Double;
+    Lyr : TLayer;
+    WantRotation, DidRotation, DidStandoff, DidMove, DidLayer : Boolean;
+    HaveRect, HaveNewRect, Stale, StateOk : Boolean;
+    X1, Y1, X2, Y2, NX1, NY1, NX2, NY2, DX, DY, Overall : TCoord;
 Begin
     ModelPath := ExtractJsonValue(Params, 'model_path');
     If ModelPath = '' Then
@@ -4640,6 +4654,17 @@ Begin
         Exit;
     End;
 
+    AlignStr := LowerCase(Trim(ExtractJsonValue(Params, 'align')));
+    If AlignStr = '' Then AlignStr := 'center';
+    If (AlignStr <> 'center') And (AlignStr <> 'none') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_ALIGN',
+            'align must be "center" (x, y is where the centre of the body''s '
+            + 'box goes) or "none" (move the body by x, y from where it '
+            + 'lands). Got: ' + AlignStr);
+        Exit;
+    End;
+
     Board := GetPCBBoardForMutation(Why);
     If Board = Nil Then
     Begin
@@ -4647,121 +4672,202 @@ Begin
         Exit;
     End;
 
-    BodyX := StrToIntDef(ExtractJsonValue(Params, 'x'), 0);
-    BodyY := StrToIntDef(ExtractJsonValue(Params, 'y'), 0);
-    Standoff := Round(StrToFloatDef(ExtractJsonValue(Params, 'standoff_height'), 0));
+    { Floats, so a sub-mil position survives, the way pcb_place_via reads. }
+    BodyX := StrToFloatDef(ExtractJsonValue(Params, 'x'), 0);
+    BodyY := StrToFloatDef(ExtractJsonValue(Params, 'y'), 0);
+    Standoff := StrToFloatDef(ExtractJsonValue(Params, 'standoff_height'), 0);
+    RotX := StrToFloatDef(ExtractJsonValue(Params, 'rotation_x'), 0);
+    RotY := StrToFloatDef(ExtractJsonValue(Params, 'rotation_y'), 0);
+    RotZ := StrToFloatDef(ExtractJsonValue(Params, 'rotation_z'), 0);
+    WantRotation := (RotX <> 0) Or (RotY <> 0) Or (RotZ <> 0);
+
+    { RESOLVED BEFORE ANYTHING IS CREATED. GetLayerFromString answers         }
+    { TopLayer for every name it does not know, so a mistyped layer used to  }
+    { put the body on the top side and report the name as given. The board's }
+    { own stack decides now, and an unknown name ends the call untouched.    }
     LayerStr := ExtractJsonValue(Params, 'layer');
     If LayerStr = '' Then LayerStr := 'TopLayer';
+    Lyr := ResolveLayerId(Board, LayerStr);
+    If Lyr = eNoLayer Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'UNKNOWN_LAYER',
+            'Unknown layer name: ' + LayerStr + '. ' + BoardLayerNamesHint(Board));
+        Exit;
+    End;
 
+    Failure := '';
+    FailCode := '';
+    DidRotation := False;
     DidStandoff := False;
     DidMove := False;
+    DidLayer := False;
+    HaveRect := False;
+    DX := 0;
+    DY := 0;
+    X1 := 0;
+    Y1 := 0;
+    X2 := 0;
+    Y2 := 0;
+    Body := Nil;
+    Model := Nil;
 
+    { NO Exit BETWEEN PreProcess AND PostProcess: a failure is recorded and    }
+    { the rest skipped, so the Finally always closes the transaction.          }
     PCBServer.PreProcess;
     Try
         Body := PCBServer.PCBObjectFactory(eComponentBodyObject, eNoDimension,
             eCreate_Default);
         If Body = Nil Then
         Begin
-            Result := BuildErrorResponse(RequestId, 'CREATE_FAILED',
-                'PCBObjectFactory returned Nil for eComponentBodyObject');
-            Exit;
+            FailCode := 'CREATE_FAILED';
+            Failure := 'PCBObjectFactory returned Nil for eComponentBodyObject';
         End;
 
-        Model := Body.ModelFactory_FromFilename(ModelPath, False);
-        If Model = Nil Then
+        If Failure = '' Then
         Begin
-            Result := BuildErrorResponse(RequestId, 'MODEL_LOAD_FAILED',
-                'Could not load a 3D model from ' + ModelPath
-                + '. The file exists, so it is the format Altium refused.');
-            Exit;
+            Model := Body.ModelFactory_FromFilename(ModelPath, False);
+            If Model = Nil Then
+            Begin
+                FailCode := 'MODEL_LOAD_FAILED';
+                Failure := 'Could not load a 3D model from ' + ModelPath
+                    + '. The file exists, so it is the format Altium refused.';
+            End;
         End;
 
-        Body.SetState_FromModel;
-        Body.Model := Model;
+        If Failure = '' Then
+        Begin
+            If WantRotation Then
+                DidRotation := Body3D_ApplyRotation(Model, RotX, RotY, RotZ);
+            Body.SetState_FromModel;
+            Body.Model := Model;
 
-        { ADD IT TO THE BOARD BEFORE TOUCHING ANY PROPERTY.
-          MEASURED, by crashing Altium: an earlier version of this set
-          Layer, x, y and StandoffHeight on the body while it still
-          belonged to nothing, and the PCB engine went down with
-          "Access violation ... Read of address 0x20" inside ADVPCB.DLL.
-          A null dereference at a small field offset is a setter reaching
-          into state an owning board is supposed to provide.
+            { ADD IT TO THE BOARD BEFORE TOUCHING ANY BODY PROPERTY.
+              MEASURED, by crashing Altium: an earlier version set Layer, x,
+              y and StandoffHeight on the body while it still belonged to
+              nothing, and the PCB engine went down with "Access violation
+              ... Read of address 0x20" inside ADVPCB.DLL. }
+            Board.AddPCBObject(Body);
+            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                PCBM_BoardRegisteration, Body.I_ObjectAddress);
 
-          The reference does it in this order and so does
-          Lib_Link3DModel: factory, load, SetState_FromModel, assign the
-          model, ADD, register, and only then adjust. This handler's own
-          comment claimed to copy that sequence and did not. }
-        Board.AddPCBObject(Body);
-        PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
-            PCBM_BoardRegisteration, Body.I_ObjectAddress);
+            Try
+                Body.Layer := Lyr;
+                DidLayer := True;
+            Except End;
 
-        Try Body.Layer := GetLayerFromString(LayerStr); Except End;
+            { The move, from the box as it stands after the add. }
+            Body3D_ReadRect(Body, X1, Y1, X2, Y2, HaveRect);
+            If AlignStr = 'none' Then
+            Begin
+                DX := MilsToCoordF(BodyX);
+                DY := MilsToCoordF(BodyY);
+            End
+            Else If HaveRect Then
+            Begin
+                DX := MilsToCoordF(BodyX) - (X1 + (X2 - X1) Div 2);
+                DY := MilsToCoordF(BodyY) - (Y1 + (Y2 - Y1) Div 2);
+            End;
+            If (DX <> 0) Or (DY <> 0) Then
+            Begin
+                Try
+                    Body.MoveByXY(DX, DY);
+                    DidMove := True;
+                Except End;
+            End;
 
-        { MOVED, NOT ASSIGNED. Lib_Link3DModel positions a body with
-          MoveByXY, which is inherited from IPCB_Primitive and already
-          called by PCB_ReplicateLayout, so it cannot be an undeclared
-          identifier. Writing x and y directly on a body is not something
-          this codebase has ever done successfully, and it was the other
-          half of the crash.
-
-          The delta is computed from where the factory actually put the
-          body rather than assuming it starts at the origin. }
-        Try
-            CurX := CoordToMils(Body.x);
-            CurY := CoordToMils(Body.y);
-        Except
-            CurX := 0;
-            CurY := 0;
+            If Standoff <> 0 Then
+            Begin
+                Try
+                    Body.StandoffHeight := MilsToCoordF(Standoff);
+                    DidStandoff := True;
+                Except End;
+            End;
         End;
-        If (BodyX <> CurX) Or (BodyY <> CurY) Then
-            Try
-                Body.MoveByXY(MilsToCoord(BodyX - CurX),
-                              MilsToCoord(BodyY - CurY));
-                DidMove := True;
-            Except End;
-
-        If Standoff <> 0 Then
-            Try
-                Body.StandoffHeight := MilsToCoord(Standoff);
-                DidStandoff := True;
-            Except End;
     Finally
         PCBServer.PostProcess;
     End;
 
-    { READ THE POSITION BACK. The placement is the one thing a caller cannot
-      check without opening the 3D view, and this tool exists because a
-      session spent a long time unable to see whether anything had landed. }
-    ReadBackX := BodyX;
-    ReadBackY := BodyY;
-    Try
-        ReadBackX := CoordToMils(Body.x);
-        ReadBackY := CoordToMils(Body.y);
-    Except End;
+    If Failure <> '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, FailCode, Failure);
+        Exit;
+    End;
+
+    { READ IT BACK. The placement is the one thing a caller cannot check
+      without opening the 3D view, and this tool exists because a session
+      spent a long time unable to see whether anything had landed. }
+    Body3D_ReadRect(Body, NX1, NY1, NX2, NY2, HaveNewRect);
+    Stale := DidMove And HaveRect And HaveNewRect
+        And (NX1 = X1) And (NY1 = Y1) And (NX2 = X2) And (NY2 = Y2);
+    If HaveNewRect And (Not Stale) Then
+    Begin
+        CentreX := CoordToMilsF(NX1 + (NX2 - NX1) Div 2);
+        CentreY := CoordToMilsF(NY1 + (NY2 - NY1) Div 2);
+        BboxJson := Body3D_RectJson(NX1, NY1, NX2, NY2, 0, 0);
+    End
+    Else If HaveRect Then
+    Begin
+        CentreX := CoordToMilsF(X1 + DX + (X2 - X1) Div 2);
+        CentreY := CoordToMilsF(Y1 + DY + (Y2 - Y1) Div 2);
+        BboxJson := 'null';
+        If HaveNewRect Then BboxJson := Body3D_RectJson(NX1, NY1, NX2, NY2, 0, 0);
+    End
+    Else
+    Begin
+        CentreX := BodyX;
+        CentreY := BodyY;
+        BboxJson := 'null';
+    End;
+    If HaveRect Then
+        ExpectJson := Body3D_RectJson(X1 + DX, Y1 + DY, X2 + DX, Y2 + DY, 0, 0)
+    Else
+        ExpectJson := 'null';
+
+    Overall := 0;
+    Try Overall := Body.OverallHeight; Except Overall := 0; End;
+
+    StateJson := 'null';
+    MatchJson := 'null';
+    StateOk := False;
+    ReadX := 0;
+    ReadY := 0;
+    ReadZ := 0;
+    If WantRotation Then
+    Begin
+        StateJson := Body3D_ModelStateJson(Model, ReadX, ReadY, ReadZ, StateOk);
+        If StateOk Then
+            MatchJson := BoolToJsonStr((Abs(ReadX - RotX) < 0.001)
+                And (Abs(ReadY - RotY) < 0.001) And (Abs(ReadZ - RotZ) < 0.001));
+    End;
 
     MarkDocDirtyByPath(Board.FileName);
 
-    { The one thing a caller cannot check from here. }
     NoteNextStep('Look at it before trusting the placement: obj_switch_view '
-        + '3d. The body sits at the model''s own origin, so where it lands '
-        + 'depends on how the STEP was authored. obj_modify on '
-        + 'eComponentBodyObject moves it, and obj_delete removes it.');
+        + '3d. x and y in the reply are the centre of the body''s box READ '
+        + 'BACK; check bbox_readback_stale before relying on bbox. '
+        + 'obj_modify on eComponentBodyObject moves it, obj_delete removes it.');
 
     Result := BuildSuccessResponse(RequestId,
         JsonObj(
             JsonBool('success', True) + ',' +
             JsonStr('model_path', ModelPath) + ',' +
-            JsonInt('x', ReadBackX) + ',' +
-            JsonInt('y', ReadBackY) + ',' +
+            JsonStr('align', AlignStr) + ',' +
+            JsonFloat('x', CentreX) + ',' +
+            JsonFloat('y', CentreY) + ',' +
             JsonStr('layer', LayerStr) + ',' +
-            JsonInt('standoff_height', Standoff) + ',' +
+            JsonBool('layer_applied', DidLayer) + ',' +
+            JsonFloat('standoff_height', Standoff) + ',' +
             JsonBool('standoff_applied', DidStandoff) + ',' +
+            JsonFloat('overall_height_mils', CoordToMilsF(Overall)) + ',' +
             JsonBool('moved', DidMove) + ',' +
-            JsonBool('rotation_applied', False) + ',' +
-            JsonStr('note', 'rotation is not settable from here: '
-                + 'IPCB_ComponentBody exposes no Rotation, and the model-level '
-                + 'SetState signature is undocumented. Rotate in the editor if '
-                + 'the orientation is wrong.')
+            JsonBool('rotation_applied', DidRotation) + ',' +
+            JsonRaw('rotation_requested', JsonObj(JsonFloat('x', RotX) + ','
+                + JsonFloat('y', RotY) + ',' + JsonFloat('z', RotZ))) + ',' +
+            JsonRaw('model_state', StateJson) + ',' +
+            JsonRaw('rotation_readback_matches', MatchJson) + ',' +
+            JsonRaw('bbox', BboxJson) + ',' +
+            JsonRaw('bbox_expected', ExpectJson) + ',' +
+            JsonBool('bbox_readback_stale', Stale)
         ));
 End;
 

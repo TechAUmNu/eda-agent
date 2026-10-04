@@ -7,6 +7,7 @@ component placement, trace lengths, layer stackup, board outline, etc.
 """
 
 import json
+import math
 from typing import Any, Optional, Union
 
 from pydantic import ValidationError
@@ -318,6 +319,28 @@ _TERMINATION_DEFAULTS = {
     "driver_impedance_ohms": 0.0,
     "dielectric_height_mils": 0.0,
 }
+
+
+
+#: Where pcb_place_3d_body puts a body: "center" places the centre of its
+#: bounding box at (x, y); "none" moves it by (x, y) from where it lands.
+_BOARD_3D_ALIGN = ("center", "none")
+
+
+def _non_finite(values: dict) -> list:
+    """Names whose value is not a finite number.
+
+    The same guard lib_link_3d_model applies, for the same reason: NaN
+    is not JSON, and an unparsable value reaches the handler as 0.
+    """
+    bad = []
+    for name, value in values.items():
+        try:
+            if not math.isfinite(float(value)):
+                bad.append(name)
+        except (TypeError, ValueError):
+            bad.append(name)
+    return bad
 
 
 def register_pcb_tools(mcp):
@@ -5217,6 +5240,10 @@ def register_pcb_tools(mcp):
         y: float = 0,
         layer: str = "TopLayer",
         standoff_height: float = 0,
+        rotation_x: float = 0,
+        rotation_y: float = 0,
+        rotation_z: float = 0,
+        align: str = "center",
     ) -> dict[str, Any]:
         """Place a STEP model directly on the open PCB, as a free 3D body.
 
@@ -5231,38 +5258,71 @@ def register_pcb_tools(mcp):
         then deleting all of that again. Reach for it only when the model
         genuinely belongs to a component in a library.
 
-        Rotation cannot be set from here. ``IPCB_ComponentBody`` exposes
-        no ``Rotation``, and the rotation that does exist lives on the
-        model behind an undocumented four-argument call, so the reply
-        reports ``rotation_applied: false`` rather than guessing. Rotate
-        in the editor if the orientation is wrong.
+        Rotation is written on the MODEL (``Model.SetState``), the same
+        route and the same helper lib_link_3d_model uses, because
+        ``IPCB_ComponentBody`` has no ``Rotation`` of its own: assigning
+        one stopped the polling loop on AD26. Not yet run against a live
+        session (2026-10-04); it runs only when a rotation is non-zero,
+        and ``model_state`` in the reply shows what the model holds.
 
         Args:
             model_path: absolute path to the .step / .stp file.
-            x: body origin X in mils. This is the model's own origin, so
-                where it lands depends on how the STEP was authored;
-                check it against a known feature such as a silkscreen
-                outline rather than assuming it is centred.
-            y: body origin Y in mils.
-            layer: board layer to attach it to. Default TopLayer.
+            x: X in mils, absolute board coordinates like every other
+                board placement here. With ``align="center"`` it is where
+                the CENTRE OF THE BODY'S BOUNDING BOX goes; with
+                ``"none"`` the body is moved by x from wherever Altium
+                put it, which is the STEP's own origin.
+            y: Y in mils, as x.
+            layer: board layer to attach it to. Default TopLayer. An
+                unknown name is refused before anything is created; it
+                used to be quietly treated as TopLayer.
             standoff_height: height in mils of the body's underside above
                 the board. 0 sits it on the surface.
+            rotation_x: rotation about X in degrees, on the model.
+            rotation_y: rotation about Y in degrees, on the model.
+            rotation_z: rotation about Z in degrees, on the model.
+            align: ``"center"`` (default) or ``"none"``, see x.
+
+        The position used to be the model's origin, computed from the
+        body's x and y. The body declares no x or y in the AD26 SDK, so
+        that read was an undeclared identifier waiting for its first live
+        call; the box is what can be read, so the box is what is placed.
 
         Returns:
-            ``{"success": true, "model_path": ..., "x": N, "y": N,
-            "layer": ..., "standoff_height": N, "standoff_applied": bool,
-            "rotation_applied": false, "note": ...}``. The x and y are
-            READ BACK from the placed body, not echoed, because the
-            position is the one thing that cannot be checked without
-            opening the 3D view.
+            ``{"success": true, "model_path", "align", "x", "y", "layer",
+            "layer_applied", "standoff_height", "standoff_applied",
+            "overall_height_mils", "moved", "rotation_applied",
+            "rotation_requested", "model_state",
+            "rotation_readback_matches", "bbox", "bbox_expected",
+            "bbox_readback_stale"}``. ``x`` and ``y`` are the centre of
+            the body's box READ BACK, not echoed (from ``bbox_expected``
+            when the read box is stale). ``bbox`` is in absolute board
+            mils.
         """
+        bad = _non_finite({
+            "x": x, "y": y, "standoff_height": standoff_height,
+            "rotation_x": rotation_x, "rotation_y": rotation_y,
+            "rotation_z": rotation_z,
+        })
+        if bad:
+            return {"ok": False, "reason": (
+                f"not a finite number: {', '.join(bad)}")}
+        align = (align or "center").strip().lower()
+        if align not in _BOARD_3D_ALIGN:
+            return {"ok": False, "reason": (
+                f"align must be one of {', '.join(_BOARD_3D_ALIGN)}; "
+                f"got {align!r}.")}
         bridge = get_bridge()
         params: dict[str, Any] = {
             "model_path": model_path,
-            "x": str(int(round(x))),
-            "y": str(int(round(y))),
+            "x": str(float(x)),
+            "y": str(float(y)),
             "layer": layer,
-            "standoff_height": str(standoff_height),
+            "standoff_height": str(float(standoff_height)),
+            "rotation_x": str(float(rotation_x)),
+            "rotation_y": str(float(rotation_y)),
+            "rotation_z": str(float(rotation_z)),
+            "align": align,
         }
         return await bridge.send_command_async("pcb.place_3d_body", params)
 

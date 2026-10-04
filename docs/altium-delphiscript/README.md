@@ -92,7 +92,7 @@ signature has additional optional parameters not used here, the entry notes
 |---|------|--------|
 | 1 | [`01-servers.md`](01-servers.md) | The global servers: `SchServer`, `PCBServer`, `Client`, `GetWorkspace`, `IntegratedLibraryManager`: their methods and what they return. |
 | 2 | [`02-schematic-interfaces.md`](02-schematic-interfaces.md) | `ISch_Document` / `ISch_Lib`, `ISch_Component`, `ISch_Pin`, `ISch_Parameter`, the primitive interfaces, and `ISch_Iterator`. |
-| 3 | [`03-pcb-interfaces.md`](03-pcb-interfaces.md) | `IPCB_Board`, `IPCB_Primitive` and the board objects (`Pad`/`Track`/`Via`/`Arc`/`Text`/`Polygon`/`Region`/`Net`/`Rule`), `IPCB_Library` / `IPCB_LibComponent`, the iterators, layer stack. |
+| 3 | [`03-pcb-interfaces.md`](03-pcb-interfaces.md) | `IPCB_Board`, `IPCB_Primitive` and the board objects (`Pad`/`Track`/`Via`/`Arc`/`Text`/`Polygon`/`Region`/`Net`/`Rule`), `IPCB_Library` / `IPCB_LibComponent`, the iterators, layer stack, 3D bodies (`IPCB_ComponentBody` / `IPCB_Model`). |
 | 4 | [`04-workspace-project-documents.md`](04-workspace-project-documents.md) | `IWorkspace`, `IProject`, `IProjectVariant`, `IDocument` (the `DM_*` flattened netlist), `IServerDocument`, `IComponent`. |
 | 5 | [`05-enums.md`](05-enums.md) | The `eXxx` vocabulary grouped by domain: ObjectIds, layers, electrical pin types, rotations, pad shapes, power-object styles. |
 | 6 | [`06-types-and-coordinates.md`](06-types-and-coordinates.md) | `TLocation`, `TCoord`, `TLayer`, the internal-unit system, `MilsToCoord` / `CoordToMils`. |

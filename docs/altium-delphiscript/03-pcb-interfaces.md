@@ -709,3 +709,77 @@ Whether a primitive lies inside the board outline: the test behind a
 
 **`Validate` / `Invalidate` / `Rebuild`**
 Mark the outline valid / dirty / rebuild it after editing vertices.
+
+---
+
+## 3.11 3D bodies (`IPCB_ComponentBody` / `IPCB_Model`)
+
+A 3D body is a primitive in its own right (`eComponentBodyObject`): on a
+footprint it is what `lib_link_3d_model` adds, on a board a free body is
+what `pcb_place_3d_body` adds. In the AD26 SDK `IPCB_ComponentBody`
+descends from `IPCB_Region` and `IPCB_Primitive`, so the base members of
+§3.2 (`Layer`, `BoundingRectangle`, `MoveByXY`, `I_ObjectAddress`) apply.
+It declares **no `x`/`y` and no `Rotation`**: assigning `Body.Rotation`
+raised "Undeclared identifier" on 26.9.1.9 and stopped the polling loop.
+A position is read from `BoundingRectangle`; the rotation lives on the
+model.
+
+```pascal
+// Load, rotate the MODEL, derive, attach, add, register (Lib_Link3DModel).
+Body := PCBServer.PCBObjectFactory(eComponentBodyObject, eNoDimension, eCreate_Default);
+Model := Body.ModelFactory_FromFilename(Path, False);
+Model.SetState(90, 0, 0, 0);          // RotX, RotY, RotZ degrees; Dz TCoord
+Body.SetState_FromModel;
+Body.Model := Model;
+Footprint.AddPCBObject(Body);
+PcbLib.Board.AddPCBObject(Body);      // + PCBM_BoardRegisteration to both
+```
+
+### `IPCB_ComponentBody`
+
+**`ModelFactory_FromFilename(FileName : String; WatchDirectory : Boolean) : IPCB_Model`**
+Loads a model file (STEP) for this body; `Nil` when the file cannot be
+read. Check the file exists first: a `Nil` load leaves an orphan body.
+
+**`SetState_FromModel`**
+Derives the body's outline and heights from its model. Called after any
+model rotation, so the outline follows the turned model.
+
+**`Model : IPCB_Model`**  *(property)*
+The model behind the body. Written by every placement here; read by
+`Body3D_GetModel` (new 2026-10-04, unverified live).
+
+**`StandoffHeight : TCoord`** / **`OverallHeight : TCoord`**  *(properties)*
+The body's underside and top above the board. `StandoffHeight` is
+written by `lib_link_3d_model` (confirmed live); both are read by the
+footprint height sweep and the layout model.
+
+### `IPCB_Model`: UNVERIFIED on a live session
+
+None of these is exercised by a call that has run live yet. Each is
+declared by the AD26 script binding (ScriptingSystem.dll method list and
+property table, read 2026-10-04 from 26.10.1.5) and by
+Altium.SDK.Interfaces.dll, and each is reached through one small
+`Body3D_` helper in Library.pas so a fault fails only the call that
+asked for it. `docs/RELEASE_VERIFICATION.md` step 5 is the measurement.
+
+**`SetState(RotX, RotY, RotZ : Double; Dz : Integer)`**
+The model's 3D rotation in degrees and its Z offset in internal units:
+the `MODEL.3D.ROTX/ROTY/ROTZ/DZ` fields a saved PcbLib stores per body.
+
+**`GetState(out RotX, RotY, RotZ : Double; out Dz : Integer)`**
+The same four, read back. OUT parameters: pass plain locals.
+
+**`ModelType : T3DModelType`**  *(property)*
+`0` extruded, `1` generic (an imported model file such as STEP), `2`
+cylinder, `3` sphere: the enum order in the binding, and the
+`MODEL.MODELTYPE` values an IPC generated PcbLib stores. Compared as
+numbers here, so no enum identifier is needed.
+
+**`FileName : String`**  *(property, read only)*
+The model's source file name.
+
+**`Rotation : TAngle`**  *(property)*
+The model's planar rotation, paired with `Origin : TCoordPoint` in the
+binding: on the file layout, `MODEL.2D.ROTATION` and `MODEL.2D.X/Y`, a
+different number from the 3D rotation about Z.

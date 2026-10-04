@@ -60,16 +60,12 @@ PY_DIR = REPO / "src" / "eda_agent"
 
 #: Keys the handler deliberately does not read, with the reason. An
 #: entry here is a decision, not an exemption to be added casually.
-INTENTIONALLY_UNREAD: dict[tuple[str, str], str] = {
-    ("library.link_3d_model", "rotation_x"):
-        "Accepted and deliberately not applied: IPCB_ComponentBody "
-        "exposes a planar Rotation only, so there is no X tilt to set. "
-        "The reply reports which assignments the board accepted rather "
-        "than claiming success, and the parameter stays in the schema "
-        "so a caller is not silently rejected.",
-    ("library.link_3d_model", "rotation_y"):
-        "Same as rotation_x: no Y tilt property exists on the body.",
-}
+#:
+#: Empty. The last two entries were link_3d_model's rotation_x and
+#: rotation_y, sent and never read while no rotation could be applied.
+#: All three rotations are now written on the model (Model.SetState in
+#: Body3D_ApplyRotation), so the handler reads every key it is sent.
+INTENTIONALLY_UNREAD: dict[tuple[str, str], str] = {}
 
 _CASE_FN = re.compile(r"'([a-z_0-9]+)'\s*:\s*Result\s*:=\s*(\w+)\(")
 _ROUTE = re.compile(r"'(\w+)':\s*Result\s*:=\s*(Handle\w+Command)")

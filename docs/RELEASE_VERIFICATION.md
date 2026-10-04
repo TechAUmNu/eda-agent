@@ -1,4 +1,4 @@
-# Release verification: 2026.10.01.1
+# Release verification: 2026.10.04.1
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -18,7 +18,7 @@ works elsewhere cannot be an undeclared identifier:
 | Step | Property | Written elsewhere? | Risk |
 |---|---|---|---|
 | 5, 3D placement | `StandoffHeight` | only by step 15, itself unverified | highest |
-| 5, 3D placement | `Rotation` on a body | other object types only | high |
+| 5, 3D placement | `SetState` on a model | no, nowhere | highest, and it can stop the loop |
 | 2, pin edges | `Symbol_OuterEdge`, `Symbol_InnerEdge` | no, nowhere | high, and can stop the loop |
 | 7, enum words | `StrToPinElectrical` | yes, `Lib_AddPins` | medium |
 | 4, DNP paste | `PasteMaskExpansion` | yes, `PCB_MakePasteGrid` | low, but it edits the board |
@@ -29,6 +29,8 @@ works elsewhere cannot be an undeclared identifier:
 | 13, sheet symbol filename | `Text` on a sheet symbol's sub-object | yes, on other objects | medium |
 | 14, polygon pour options | `RemoveDead`, `RemoveNarrowNecks`, `RemoveIslandsByArea` | new here, and in two places at once | high, and it can stop the loop |
 | 15, 3D body on a board | `StandoffHeight` on a free body | only by step 5, itself unverified | highest, shared with step 5 |
+| 15, 3D body on a board | `SetState` on a model | only by step 5, itself unverified | highest, shared with step 5 |
+| 22, replace placeholders | `RemovePCBObject` on a footprint | yes, `Lib_DeleteFootprintPrimitives` | low, but it deletes bodies |
 | 16, region kind | `Kind` on a region | read by four reference scripts, written by none | high, and it can stop the loop |
 | 17, component UniqueId | `UniqueId` on a placed component | no, nowhere | highest, and a wrong id costs the next Update PCB |
 | 18, pin owner part | `OwnerPartId` | yes, by two independent reference scripts | medium, behavioural not declarative |
@@ -44,10 +46,14 @@ Step 5 appears three times because its properties do not share a risk.
 `MoveByXY` is inherited from `IPCB_Primitive` and `PCB_ReplicateLayout`
 already calls it, so it cannot be an undeclared identifier and a failure
 there would be behavioural: whether moving a group moves its children.
-`Rotation` is written on pads, texts, fills and components but never on
-a body, and DelphiScript resolves a property against the object in hand,
-so another interface accepting it proves nothing here. Only
-`StandoffHeight` is entirely unexercised.
+`SetState` is the 3D rotation, written on the MODEL because the body has
+no `Rotation` (assigning one stopped the loop on 26.9.1.9). No shipped
+code calls it. It is attested by the AD26 script binding itself
+(ScriptingSystem.dll declares `SetState(RotX, RotY, RotZ : Double;
+Dz : Integer)` and `GetState` with the same four parameters as OUT) and
+by Altium.SDK.Interfaces.dll, which is why it is ranked as an
+unexercised identifier rather than a guessed one. It runs only when a
+rotation is non-zero, so every other 3D step stays clear of it.
 
 Two steps now write `StandoffHeight` and neither has run, so they do not
 vouch for each other: steps 5 and 15 share one unproven identifier. Run
@@ -197,6 +203,7 @@ for mid-session.
 | 5 | a PcbLib with a footprint, plus a `.step` file |
 | 6 | a PcbLib, plus a KiCad `.kicad_mod` carrying `B.SilkS` text |
 | 7 | a SchLib for the pins, and a schematic sheet for the power ports |
+| 22 | a COPY of a PcbLib built by the IPC generator, plus a maker STEP for one of its footprints |
 
 Steps 4 and 5 write to the design. Take an `app_checkpoint` first, or
 work on a copy. Everything else either reads or builds new library
@@ -210,7 +217,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.01.1`, `version_match` =
+Expect `altium_script_version` = `2026.10.04.1`, `version_match` =
 `true`, and `mcp_server_version` = `0.6.1`.
 
 Those are two different versions and they fail differently.
@@ -405,35 +412,54 @@ sides.
 
 ## 5. 3D model placement (task #27)
 
-The highest-risk item. All three properties are documented on
-`IPCB_ComponentBody`, but only `MoveByXY` has ever been exercised here,
-and on a different object type. See the note under the risk table for
-which of the three is actually unproven.
+The highest-risk item, and the one that can stop the loop: `SetState`
+and its read-back `GetState` are IPCB_Model members no earlier call
+here exercised. Take an `app_checkpoint`, use a scratch footprint, and
+run the rotated call FIRST so that if it faults, nothing else in the
+session is lost with it.
 
 ```
 lib_link_3d_model(component_name="<fp>", model_path="<...>.step",
                   offset_z=40, rotation_z=90, offset_x=10)
 ```
 
-Read the `applied` object in the reply first: `standoff_height`,
-`rotation_z`, `offset_xy`. Each assignment is individually guarded, so
-one property failing does not fail the call.
+If the bridge stops here, the dialog names the identifier. `SetState` or
+`GetState` means the binding differs from what ScriptingSystem.dll
+declares on this build: record which. A link with no rotation still
+works, because neither is reached without one.
 
-All three must read `true` for the call above. They mean "this was
-applied", not "this was accepted": the handler skips a property whose
-value is 0, so a `false` is either a rejection or a value you did not
-pass. Keep every argument non-zero while verifying, or the two cases
-are indistinguishable. `offset_xy` covers `offset_x` and `offset_y`
-together and reads `true` if either is non-zero.
+Read the reply in this order:
+
+1. `applied`: `standoff_height`, `rotation`, `rotation_z`, `offset_xy`
+   must all be `true` for the call above. They mean "this was applied",
+   not "this was accepted": the handler skips a value of 0, so keep every
+   argument non-zero while verifying.
+2. `model_state`: the rotation the MODEL reports holding. `{x: 0, y: 0,
+   z: 90}` and `rotation_readback_matches: true` is the result that
+   settles `SetState`. A `null` there with `applied.rotation: true` means
+   the write returned but the OUT-parameter read did not come back; a
+   rotation of 0 means the write went somewhere else. `dz_mils` shows
+   whether `offset_z` also landed in the model's own Z offset.
+3. `body.bbox` against `bbox_expected`: equal means BoundingRectangle is
+   live on a body; `bbox_readback_stale: true` means it is cached, as it
+   is on texts, and the stale flag is doing its job.
+4. `body.bbox` against `frame.pads_bbox`: the model's box beside the
+   land, in the same frame. For a 90 degree turn of a non-square part,
+   width and height must have swapped against an unrotated link of the
+   same file; if they did not, the body's outline was derived before the
+   rotation took and the order needs revisiting.
 
 Then open the 3D view: the body should be lifted, turned and nudged.
+Save, `lib_reload_library`, and `lib_get_footprint_bodies` on the same
+footprint: `model.rotation` must still read 90 after the round trip. The
+saved file is the final word and needs no Altium at all: the body's
+record in the .PcbLib carries `MODEL.3D.ROTZ=90.000` as plain text.
 
-**Units:** the tool documents mils and applies `MilsToCoord`. A body
+Repeat with `rotation_x=90` and no other rotation. A Y-up STEP should
+now stand on the board; `model_state.x` must read 90.
+
+**Units:** the tool documents mils and applies `MilsToCoordF`. A body
 that moves 25.4x too far means the property wanted different units.
-
-`rotation_x` / `rotation_y` are accepted and deliberately not applied,
-because the API gives the body a planar rotation only. If a live session
-finds an X/Y tilt property, revisit the docstring then.
 
 ---
 
@@ -871,9 +897,20 @@ On a scratch board, with any `.step` to hand:
     obj_switch_view    3d
 
 The reply's `x` and `y` are READ BACK from the placed body rather than
-echoed. Confirm `standoff_applied` is true, then look: the body must be
-visible and sitting 100 mils proud. `rotation_applied` is always false
-and says why in `note`.
+echoed, and they are now the CENTRE OF THE BODY'S BOX: the first build
+computed the move from `Body.x`, which the AD26 SDK does not declare on
+a body, so that read would have stopped the loop on its first live call.
+`x` and `y` must come back as 1000, 1000 (or `bbox_readback_stale` must
+say why not). Confirm `standoff_applied` is true, then look: the body
+must be visible, centred on 1000, 1000 and sitting 100 mils proud.
+
+Then the rotation, after step 5 has settled `SetState`:
+
+    pcb_place_3d_body  model_path <path>  x 1000  y 1000  rotation_z 90
+
+`rotation_applied` true, `model_state.z` 90. And `layer` with a name the
+board does not have must now answer `UNKNOWN_LAYER` and place nothing;
+it used to put the body on the top layer and echo the bad name.
 
 Then the refusals, which cost nothing:
 
@@ -1225,6 +1262,56 @@ On scratch documents only:
 
 ---
 
+## 22. Replacing placeholders, aligning a body, and the body list
+
+Three additions to the 3D tools, none of which touches an identifier
+step 5 does not already cover: `replace` removes bodies with the
+footprint's `RemovePCBObject`, exactly as `lib_delete_footprint_primitives`
+does; `align` moves with `MoveByXY` from the box `BoundingRectangle`
+reports; and `lib_get_footprint_bodies` only reads. Its `model_state`
+reads (`ModelType`, `FileName`, `Rotation`, `GetState`) are as unproven
+as step 5's, so run step 5 first, and use `model_state=false` if one of
+them stops the loop.
+
+On a copy of a library whose footprints came from the IPC generator:
+
+    lib_get_footprint_bodies  library_path <copy.PcbLib>
+
+Every IPC footprint must show `extruded` above 0 and `generic` 0. Then
+one footprint in detail:
+
+    lib_get_footprint_bodies  library_path <copy.PcbLib>  footprint_name <fp>
+
+The generator's body is centred on the land, so its `bbox` and
+`frame.pads_bbox` must be roughly concentric about 0, 0. If both are far
+from 0 the frame is wrong (the footprint origin read off a component that
+was not current), which is the fault `fpcheck.py` found in
+`lib_get_pad_geometry`; write down the numbers.
+
+Then the swap:
+
+    lib_link_3d_model  library_path <copy.PcbLib>  component_name <fp>
+                       model_path <the maker's STEP>  replace true
+                       align center
+
+`replaced.removed_bodies` must equal the body count read above,
+`replaced.remaining_before_add` must be 0, and `body.bbox` must now be
+centred on the origin. Save, `lib_reload_library`, list the footprint
+again: one `generic` body and no `extruded` one. If the placeholder is
+back after the reload, the footprint-side removal is not enough on this
+build and the library board needs the same `RemovePCBObject`; record it.
+
+Run `align pads` on a footprint whose land is NOT centred on its origin
+(a connector), and confirm `body.bbox` centres on `frame.pads_bbox`
+instead.
+
+Finally the refusals: `align middle` answers `BAD_ALIGN` before anything
+is touched, and a `.txt` file as `model_path` with `replace true` answers
+`MODEL_LOAD_FAILED` and leaves the placeholders where they were (list
+the footprint to check).
+
+---
+
 ## Still open, and not blocking
 
 * **#23** font size: the importer places symbol text but not its height.
@@ -1242,7 +1329,7 @@ names and sheet file names, the types whose interface declares it; `Text` is
 refused on the types whose interface has none, wires among them. Repeat
 steps 3 to 7 on AD 26 with the wire included.
 
-Verified on AD 26.10.1.6 with script 2026.10.01.1: the three reads return
+Verified on AD 26.10.1.6 with the 2026-10-01 script build: the three reads return
 empty fields listed under `properties.unreadable`, `IsHidden=true` on a wire
 is refused under `properties.unknown`, `IsHidden` reads and writes on
 parameters, and the bridge answered `app_ping` after each call.
