@@ -359,8 +359,13 @@ def test_delete_needs_confirm_before_anything_is_sent(monkeypatch):
     assert out["ok"] is False and bridge.calls == []
     asyncio.run(tool(footprint_name="FP", pads=[{"designator": "1"}],
                      confirm=True))
-    assert bridge.calls[0][0] == "library.delete_footprint_pads"
-    assert bridge.calls[0][1]["confirm"] == "true"
+    # Without library_path the focused document is read first (reload_first
+    # resolves the focused .PcbLib); then the delete itself.
+    sent = [c for c in bridge.calls if c[0] == "library.delete_footprint_pads"]
+    assert sent and sent[0][1]["confirm"] == "true"
+    assert all(c[0] in ("application.get_active_document",
+                        "library.delete_footprint_pads")
+               for c in bridge.calls), bridge.calls
 
 
 @pytest.mark.parametrize("kwargs,fragment", [

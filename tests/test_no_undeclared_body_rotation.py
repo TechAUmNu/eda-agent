@@ -24,7 +24,7 @@ The rotation is reachable, but on the MODEL and before it is attached
 undocumented here until the AD26 script binding itself was read:
 ScriptingSystem.dll declares ``SetState(RotX, RotY, RotZ : Double;
 Dz : Integer)`` on IPCB_Model, and Altium.SDK.Interfaces.dll agrees.
-It is applied now, through Body3D_ApplyRotation, and the guards for
+It is applied now, through Body3D_ApplyModelState, and the guards for
 that route live in tests/test_3d_bodies_contract.py.
 """
 

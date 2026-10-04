@@ -5250,9 +5250,25 @@ def register_pcb_tools(mcp):
         Rotation is written on the MODEL (``Model.SetState``), the same
         route and the same helper lib_link_3d_model uses, because
         ``IPCB_ComponentBody`` has no ``Rotation`` of its own: assigning
-        one stopped the polling loop on AD26. Not yet run against a live
-        session (2026-10-04); it runs only when a rotation is non-zero,
-        and ``model_state`` in the reply shows what the model holds.
+        one stopped the polling loop on AD26. MEASURED through
+        lib_link_3d_model (2026-10-04): SetState lands and persists (the
+        saved record read ROTX 90 / ROTZ 45). It CANNOT BE READ BACK:
+        IPCB_Model.GetState returned zeros beside that file, so
+        ``model_state`` and ``rotation_readback_matches`` are always null
+        and ``rotation_readback`` says why. Check the rotation by eye
+        (obj_switch_view 3d) or in the saved board. SetState runs only
+        when a rotation is non-zero.
+
+        Z IS ``standoff_height``, AND WHETHER IT LIFTS A STEP MODEL ON A
+        BOARD IS UNMEASURED. In a LIBRARY the same field was measured
+        (2026-10-04) to store STANDOFFHEIGHT without moving the model:
+        Altium places a generic STEP body in Z by the model's
+        MODEL.3D.DZ, which lib_link_3d_model's offset_z now writes. This
+        tool still passes Dz 0 and writes StandoffHeight, the route that
+        has run here; read ``overall_height_mils`` and look at the board
+        in 3D before relying on a non-zero standoff. Follow-up: measure
+        it, then route standoff_height through the model's Dz if it does
+        not lift (docs/RELEASE_VERIFICATION.md step 31).
 
         Args:
             model_path: absolute path to the .step / .stp file.
@@ -5266,7 +5282,10 @@ def register_pcb_tools(mcp):
                 unknown name is refused before anything is created; it
                 used to be quietly treated as TopLayer.
             standoff_height: height in mils of the body's underside above
-                the board. 0 sits it on the surface.
+                the board, written as the body's StandoffHeight. 0 sits
+                it on the surface. Whether a non-zero value lifts a STEP
+                model on a board is UNMEASURED (see above: in a library
+                it did not).
             rotation_x: rotation about X in degrees, on the model.
             rotation_y: rotation about Y in degrees, on the model.
             rotation_z: rotation about Z in degrees, on the model.
@@ -5281,9 +5300,10 @@ def register_pcb_tools(mcp):
             ``{"success": true, "model_path", "align", "x", "y", "layer",
             "layer_applied", "standoff_height", "standoff_applied",
             "overall_height_mils", "moved", "rotation_applied",
-            "rotation_requested", "model_state",
-            "rotation_readback_matches", "bbox", "bbox_expected",
-            "bbox_readback_stale"}``. ``x`` and ``y`` are the centre of
+            "rotation_requested", "model_state" (null),
+            "rotation_readback_matches" (null), "rotation_readback"
+            ({available: false, reason, verify_with}), "bbox",
+            "bbox_expected", "bbox_readback_stale"}``. ``x`` and ``y`` are the centre of
             the body's box READ BACK, not echoed (from ``bbox_expected``
             when the read box is stale). ``bbox`` is in absolute board
             mils.

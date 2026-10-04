@@ -42,6 +42,14 @@ it. Coordinates are int32 in 1/10000 mil, RELATIVE TO THE FOOTPRINT ORIGIN.
                    latin-1 ``|KEY=value|`` string; then uint32 vertex count
                    and that many (x, y) doubles
 
+UNKNOWN RECORD TYPES STOP THE PARSE. The block count is known only for the
+eight kinds above (types 1-6, 11, 12). Guessing "one block" for any other
+type would read every later record from the wrong offset if the guess were
+wrong, which can silently drop or invent pads in the one tool meant to
+prove what the file holds. So the first unknown type ends that footprint's
+parse: ``complete`` is False and ``parse_error`` names the type and byte
+offset, and the records before it are kept.
+
 The pad layout follows the Altium pad record as decoded by KiCad's importer
 and was checked against the carrier library (hardware/tools/fpcheck.py in
 the multiviewer repository, which this generalises). The track, fill, text,
@@ -51,8 +59,11 @@ Layer bytes: 1 TopLayer, 2-31 MidLayer1-30, 32 BottomLayer, 33/34 Top/Bottom
 Overlay, 35/36 Top/Bottom Paste, 37/38 Top/Bottom Solder, 39-54
 InternalPlane1-16, 55 DrillGuide, 56 KeepOut, 57-72 Mechanical1-16, 73
 DrillDrawing, 74 MultiLayer. Mechanical layers above 16 do not fit a byte;
-regions and bodies carry their layer by NAME (``V7_LAYER``), which is used
-when present. An unmapped byte is reported as ``Layer<n>``, not guessed.
+regions and bodies carry their layer by NAME (``V7_LAYER``, e.g.
+``TOPSOLDER``, ``MECHANICAL13``), which is used when present and mapped to
+the same spelling the byte names use (``TopSolder``, ``Mechanical13``), so
+a layer compares equal across kinds; the stored name is kept as
+``layer_v7``. An unmapped byte is reported as ``Layer<n>``, not guessed.
 """
 
 from __future__ import annotations
@@ -67,6 +78,9 @@ _HOLE = {0: "round", 1: "square", 2: "slot"}
 _MODEL_TYPE = {0: "extruded", 1: "generic", 2: "cylinder", 3: "sphere"}
 _RECORD_NAME = {1: "arc", 2: "pad", 3: "via", 4: "track", 5: "text",
                 6: "fill", 11: "region", 12: "component_body"}
+#: Blocks per record, for the kinds whose layout is known. Any other type
+#: stops the parse (see the module docstring).
+_BLOCKS = {1: 1, 2: 6, 3: 1, 4: 1, 5: 2, 6: 1, 11: 1, 12: 1}
 _UNITS = 1e4                    # file integers are 1/10000 mil
 
 
@@ -85,6 +99,44 @@ def layer_name(code: int) -> str:
     if 57 <= code <= 72:
         return f"Mechanical{code - 56}"
     return f"Layer{code}"
+
+
+#: V7_LAYER names that do not follow the TOP/BOTTOM + suffix pattern.
+_V7_FIXED = {"KEEPOUT": "KeepOut", "MULTILAYER": "MultiLayer",
+             "DRILLGUIDE": "DrillGuide", "DRILLDRAWING": "DrillDrawing",
+             "TOP": "TopLayer", "BOTTOM": "BottomLayer",
+             "TOPLAYER": "TopLayer", "BOTTOMLAYER": "BottomLayer"}
+_V7_SUFFIX = {"OVERLAY": "Overlay", "PASTE": "Paste", "SOLDER": "Solder",
+              "LAYER": "Layer"}
+
+
+def v7_layer_name(raw: Optional[str]) -> Optional[str]:
+    """A region's or body's ``V7_LAYER`` in the byte names' spelling.
+
+    ``TOPSOLDER`` -> ``TopSolder``, ``MECHANICAL13`` -> ``Mechanical13``,
+    ``KEEPOUT`` -> ``KeepOut``, ``MULTILAYER`` -> ``MultiLayer``,
+    ``MID1`` -> ``MidLayer1``, ``PLANE2`` -> ``InternalPlane2``. A name
+    that fits none of those is returned as stored rather than guessed.
+    """
+    if raw is None:
+        return None
+    name = raw.strip().upper()
+    if not name:
+        return None
+    if name in _V7_FIXED:
+        return _V7_FIXED[name]
+    for prefix, word in (("MECHANICAL", "Mechanical"),
+                         ("INTERNALPLANE", "InternalPlane"),
+                         ("PLANE", "InternalPlane"),
+                         ("MIDLAYER", "MidLayer"), ("MID", "MidLayer")):
+        tail = name[len(prefix):]
+        if name.startswith(prefix) and tail.isdigit():
+            return f"{word}{int(tail)}"
+    for side, word in (("TOP", "Top"), ("BOTTOM", "Bottom")):
+        tail = name[len(side):]
+        if name.startswith(side) and tail in _V7_SUFFIX:
+            return word + _V7_SUFFIX[tail]
+    return raw.strip()
 
 
 def _mil(raw: int) -> float:
@@ -145,8 +197,10 @@ def _float(value: Optional[str]) -> Optional[float]:
 def records(data: bytes) -> tuple[list[tuple[int, list[bytes]]], Optional[str]]:
     """Split one footprint's Data stream into ``(type, blocks)`` records.
 
-    Returns the records and, when the stream ends mid-record or a length
-    runs past the end, an error string (the records before it are kept).
+    Returns the records and, when the stream ends mid-record, a length
+    runs past the end, or a record type whose block count is not known
+    appears, an error string (the records before it are kept, nothing
+    after it is read).
     """
     out: list[tuple[int, list[bytes]]] = []
     if len(data) < 4:
@@ -157,8 +211,13 @@ def records(data: bytes) -> tuple[list[tuple[int, list[bytes]]], Optional[str]]:
         return out, "header length runs past the end of the Data stream"
     while i < len(data):
         kind = data[i]
+        count = _BLOCKS.get(kind)
+        if count is None:
+            return out, (f"unknown record type {kind} at byte {i}; the records "
+                         f"after it were not parsed (its block count is not "
+                         f"known, and a guess would read everything after it "
+                         f"from the wrong offset)")
         i += 1
-        count = 6 if kind == 2 else (2 if kind == 5 else 1)
         blocks: list[bytes] = []
         for _ in range(count):
             if i + 4 > len(data):
@@ -280,9 +339,17 @@ def _bbox(vertices: list[tuple[float, float]]) -> Optional[dict[str, float]]:
             "x2": round(max(xs), 4), "y2": round(max(ys), 4)}
 
 
+def _prop_layer(props: dict[str, str], b: bytes) -> Optional[str]:
+    named = v7_layer_name(props.get("V7_LAYER"))
+    if named:
+        return named
+    return layer_name(b[0]) if b else None
+
+
 def parse_region(b: bytes) -> dict[str, Any]:
     props, vertices = _property_block(b)
-    return {"layer": props.get("V7_LAYER") or (layer_name(b[0]) if b else None),
+    return {"layer": _prop_layer(props, b),
+            "layer_v7": props.get("V7_LAYER"),
             "kind": props.get("KIND"),
             "is_keepout": props.get("ISKEEPOUT", "").upper() == "TRUE",
             "vertex_count": len(vertices),
@@ -298,7 +365,8 @@ def parse_body(b: bytes) -> dict[str, Any]:
         pass
     embed = props.get("MODEL.EMBED")
     return {
-        "layer": props.get("V7_LAYER") or (layer_name(b[0]) if b else None),
+        "layer": _prop_layer(props, b),
+        "layer_v7": props.get("V7_LAYER"),
         "standoff_height_mils": _length_mils(props.get("STANDOFFHEIGHT")),
         "overall_height_mils": _length_mils(props.get("OVERALLHEIGHT")),
         "outline_bbox_mils": _bbox(vertices),
@@ -343,9 +411,10 @@ def parse_footprint(data: bytes) -> dict[str, Any]:
             out["regions"].append(parse_region(first))
         elif kind == 12:
             out["bodies"].append(parse_body(first))
-        else:
+        else:                    # unreachable: records() stops on these
             key = str(kind)
             out["other_records"][key] = out["other_records"].get(key, 0) + 1
+    out["complete"] = error is None
     if error:
         out["parse_error"] = error
     return out
@@ -409,6 +478,7 @@ def read_pcblib(path: str | Path, footprint_name: str = "", offset: int = 0,
                 data = ole.openstream([storage, "Data"]).read()
             except OSError as exc:
                 footprints.append({"name": name, "storage": storage,
+                                   "complete": False,
                                    "parse_error": f"no Data stream: {exc}"})
                 continue
             entry = {"name": name, "storage": storage}
@@ -418,6 +488,8 @@ def read_pcblib(path: str | Path, footprint_name: str = "", offset: int = 0,
                                 "texts", "regions", "bodies")}
             footprints.append(entry)
         result["footprints"] = footprints
+        result["incomplete"] = [f["name"] for f in footprints
+                                if not f.get("complete")]
         return result
     finally:
         ole.close()

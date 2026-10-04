@@ -314,3 +314,40 @@ def test_the_flow_hands_the_target_library_to_the_dialog_driver():
     assert "library_path=library_path" in source, (
         "drive_one must be told the target library, or the path caption "
         "can never be confirmed")
+
+
+def test_a_relative_target_is_compared_as_an_absolute_path(monkeypatch,
+                                                           tmp_path):
+    """Mutation: compare without os.path.abspath. A relative library_path
+    used to be refused as 'names a different library'."""
+    lib = tmp_path / "lib" / "carrier.PcbLib"
+    lib.parent.mkdir()
+    monkeypatch.chdir(tmp_path)
+    options = [("Generate all footprints in " + str(lib), "radiobutton")]
+    out = dlg.destination_choice(_described(options),
+                                 str(lib.relative_to(tmp_path)))
+    assert out["ok"] is True and out["match"] == "path"
+
+
+@pytest.mark.parametrize("elided", [
+    r"H:\git\...\carrier.PcbLib",
+    r"H:\git\multiviewer" + chr(0x2026) + "carrier.PcbLib",
+])
+def test_an_elided_caption_is_refused_as_unconfirmable(elided):
+    """Mutation: refuse it as 'a different library' (misleading) or accept
+    it. A shortened path cannot be confirmed either way."""
+    options = [("Generate all footprints in " + elided, "radiobutton")]
+    out = dlg.destination_choice(_described(options), _TARGET)
+    assert out["ok"] is False and out["found"] is None
+    assert "elided" in out["reason"]
+    assert "different library" not in out["reason"]
+
+
+def test_the_flow_and_the_dialog_share_one_path_rule():
+    """Mutation: keep two _same_path helpers with different rules."""
+    from eda_agent.tools import ipc_batch_flow as flow
+
+    assert flow._same_path(_TARGET.lower(), _TARGET.replace("\\", "/"))
+    assert dlg.same_library_path(_TARGET, _TARGET + ".")
+    assert not flow._same_path("", _TARGET)
+    assert not dlg.same_library_path(_TARGET, r"H:\other\carrier.PcbLib")

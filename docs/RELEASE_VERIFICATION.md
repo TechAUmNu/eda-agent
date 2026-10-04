@@ -1,4 +1,4 @@
-# Release verification: 2026.10.04.10
+# Release verification: 2026.10.04.11
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -266,7 +266,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.04.10`, `version_match` =
+Expect `altium_script_version` = `2026.10.04.11`, `version_match` =
 `true`, and `mcp_server_version` = `0.6.1`.
 
 Those are two different versions and they fail differently.
@@ -1668,8 +1668,28 @@ olefile and no Altium, so every check below reads disk, not memory.
 Pascal risk is low: the only Altium call that is new anywhere is
 `Model.SetState` with a NON-ZERO fourth argument (`Dz`), the same member
 and signature that ran live with 0; `LibBoardStillListsCount` is the
-read-only board walk `LibBoardRemoveEntries` ran live; `GetState` is no
-longer called at all.
+read-only board walk `LibBoardRemoveEntries` ran live, now run only while
+the footprint is current; `LibParkCurrentElsewhere` is a LibraryIterator
+walk (ResolveLibFootprint's) plus `LibMakeCurrentVerified`, both shipped;
+`GetState` is no longer called at all.
+
+A review of the first version of these fixes added three things the
+steps below check:
+
+* **Two theories for bug A.** The evidence fits "a session-created
+  primitive's board copy survives" AND "the save rebuilds the CURRENT
+  footprint from the board". `reload_first` (save + reopen) answers the
+  first only; the deletes now also PARK the footprint (make another one
+  current) after the reopen when it came back current, and item 3b
+  separates the theories.
+* **One call settles it.** `board_still_listed` is 0 by construction for
+  a footprint that is not current, so it is now NULL then, and the
+  deletes save again and read the FILE themselves (`verify_on_disk`,
+  `persisted`), with `ok`/`success` false when a removed primitive is
+  still on disk.
+* **A stale box read is not a placement failure.** `placement.basis`
+  says which box was measured; a stale read measures the expected box
+  and reports `ok: null` (unverified) when that is on the footprint.
 
 What was measured, so the read-backs below can be judged:
 
@@ -1701,7 +1721,7 @@ Run in this order on a scratch footprint (`<lib>` = the carrier library
 or a scratch copy, `<fp>` = a new throwaway footprint). Confirm `app_ping`
 answers after each call.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.04.10`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.04.11`.
 
 2. **The reader on its own.** `lib_read_pcblib_file(<lib>, <fp>)` before
    anything else (after creating `<fp>` and one `lib_save_library`):
@@ -1718,15 +1738,28 @@ answers after each call.
                              pads=[{designator:"3"}], confirm=true)
    ```
 
-   (`reload_first` is on by default.) Expect `reload_first: {ran: true,
-   saved: true, reloaded: true}`, `removed: 1`, `still_listed: 0`,
-   `board_still_listed: 0`, `marked_modified: true`; RECORD
-   `target_was_current`. Then `lib_save_library(<lib>)`: expect
-   `was_modified: true`. Then `lib_read_pcblib_file(<lib>, <fp>)`: pad
-   `3` must be ABSENT and pad `1` present. That one sequence settles it.
-   If pad 3 is still in the file, record `target_was_current` and
-   `board_still_listed`: true / above 0 points at the current-footprint
-   board copy surviving even a disk-loaded removal.
+   (`reload_first` and `verify_on_disk` are on by default.) Expect
+   `precheck.selected: {"3": 1}`, `reload_first: {ran: true, saved: true,
+   reloaded: true}`, `removed: 1`, `still_listed: 0`, `marked_modified:
+   true`, and `persisted: {checked: true, saved: true, absent: ["3"],
+   still_present: [], ok: true}`. RECORD `target_was_current`,
+   `parked_elsewhere`, `target_current_during_removal` and
+   `board_still_listed` (null whenever the footprint was not current
+   during the removal: the board then holds none of its pads, so there
+   is nothing to count; a number means it WAS current). That one call
+   settles the default path; `lib_read_pcblib_file(<lib>, <fp>)` shows
+   the same thing by hand.
+
+   3b. **Which theory (disk-loaded AND current).** Add pad `5`, then
+   `lib_save_library(<lib>)`, `lib_reload_library(<lib>)`,
+   `lib_set_current_component(<fp>)`, and delete it with
+   `reload_first=false` (no reopen, no park, no on-disk check of its
+   own). Expect `target_was_current: true`,
+   `target_current_during_removal: true` and an integer
+   `board_still_listed`. Save, then `lib_read_pcblib_file(<lib>, <fp>)`.
+   Pad `5` ABSENT: disk-loaded is enough, current or not. Pad `5`
+   PRESENT: the save rebuilds the current footprint from the board, and
+   parking is what makes item 3 pass. Record which.
 
 4. **The old path still reproduces (optional, diagnostic).** Add pad `4`,
    then delete it with `reload_first=false`. RECORD `board_still_listed`
@@ -1734,42 +1767,69 @@ answers after each call.
    file with `board_still_listed` above 0 confirms the board copy is the
    carrier of the bug.
 
-5. **Primitives delete and 3D replace use the same rule.**
+5. **Primitives delete uses the same rule.**
    `lib_add_footprint_track` on `<fp>`, then
    `lib_delete_footprint_primitives(footprint_name=<fp>,
    library_path=<lib>, object_type="track", confirm=true)`: expect
-   `reload_first.reloaded: true`, `board_still_listed: 0`; save; the
-   file lists no track on `<fp>`. (`lib_link_3d_model` with
-   `replace=true` and `library_path` must show `reload_first` in its
-   reply too.)
+   `reload_first.reloaded: true`, `persisted: {checked: true, ok: true,
+   still_present: 0}` with `by_kind.tracks.after` one less than
+   `.before`. `board_still_listed` follows item 3's rule.
 
-6. **The STEP origin lands on the footprint origin (bug B).**
+   5b. **The 3D replace, on disk.** With a body already on `<fp>`:
+   `lib_link_3d_model(component_name=<fp>, library_path=<lib>,
+   model_path=<step>, replace=true)`. Expect `reload_first.ran: true`,
+   `replaced.route: "delete_then_link"`, `replaced.removed_bodies` = the
+   bodies there before, `replaced.parked_elsewhere` recorded,
+   `applied.layer_source: "replaced body"`, and `persisted: {ok: true,
+   bodies_after: <bodies before - removed + 1>}`. Then
+   `lib_read_pcblib_file(<lib>, <fp>)` lists exactly that many bodies
+   (one, when one was replaced).
+
+6. **The STEP origin lands on the footprint origin (bug B), and Dz lifts
+   it.** First a CONTROL, Dz 0:
 
    ```
    lib_link_3d_model(component_name=<fp>, library_path=<lib>,
        model_path=<Crystal_SMD_2520-4Pin_2.5x2.0mm.step>,
        rotation_x=90, rotation_z=45, offset_x=10.5, offset_y=-20,
-       offset_z=3)
+       replace=true)
    ```
+
+   RECORD `persisted.matching_bodies[0]` `standoff_height_mils` and
+   `overall_height_mils` (the 2026-10-04 run suggests about -39.37 /
+   39.37 once Altium derives them). Then the same call with
+   `offset_z=3`.
 
    Expect `applied.rotation: true`, `applied.z_offset: true`,
    `applied.standoff_height: false`, `placement.ok: true` with
-   `placement.gap_mils` 0 (overlapping the pads) or small,
-   `placement_ok: true`, and `body.bbox` within a few hundred mil of the
-   origin (NOT near -50000). `expected_in_file`: `model_2d_x_mils 10.5`,
-   `model_2d_y_mils -20`, `model_3d_rotx 90`, `model_3d_rotz 45`,
-   `model_3d_dz_mils 3`. Save, then `lib_read_pcblib_file(<lib>, <fp>)`:
-   the body's `model.x_mils` = 10.5, `model.y_mils` = -20, `rot_x` 90,
-   `rot_z` 45, `dz_mils` = 3, and `outline_bbox_mils` near the pads.
-   If `dz_mils` reads 0, the Dz argument is ignored by this build:
-   record `standoff_height_mils` / `overall_height_mils` and report it.
+   `placement.basis: "bbox_readback"` and `placement.gap_mils` 0
+   (overlapping the pads) or small, `placement_ok: true`, and
+   `body.bbox` within a few hundred mil of the origin (NOT near -50000).
+   `expected_in_file`: `model_2d_x_mils 10.5`, `model_2d_y_mils -20`,
+   `model_3d_rotx 90`, `model_3d_rotz 45`, `model_3d_dz_mils 3`; with
+   replace, `persisted.ok: true` checks those against the SAVED file
+   (`lib_read_pcblib_file(<lib>, <fp>)` shows them by hand: `model.x_mils`
+   10.5, `model.y_mils` -20, `rot_x` 90, `rot_z` 45, `dz_mils` 3).
+
+   THE LIFT: both heights must read about 3 mil higher than the control
+   (about -36.37 / 42.37), in the reply's `body` and in the file.
+   `dz_mils` 3 alone proves the value was STORED, not that the model
+   moved. If the file has DZ 3 but the heights equal the control, report
+   the body's heights as inconsistent with its model (Altium did not
+   build Dz into them). If `dz_mils` reads 0, the Dz argument is ignored
+   by this build: record both heights and report it.
 
 7. **The placement check fails a misplaced body.** Link the same model
-   with `offset_x=5000` (far from any pad): expect `ok: false`,
-   `placement_ok: false`, and a `reason` naming the gap. Undo it with
-   `lib_delete_footprint_primitives(object_type="componentbody",
-   confirm=true, library_path=<lib>)` and confirm the file has no body
-   left from it.
+   with `offset_x=5000` (far from any pad), NO replace: expect `ok:
+   false`, `success: false`, `placement_ok: false`, `placement.basis`
+   recorded, and a `reason` naming the gap. Undo it with
+   `lib_delete_footprint_primitives(footprint_name=<fp>,
+   object_type="componentbody", confirm=true, library_path=<lib>)`.
+   NOTE: that removes EVERY body on `<fp>`, including item 6's, and its
+   `reload_first` save writes the misplaced body to disk before the
+   delete removes it. Expect `persisted.ok: true` and ZERO bodies in
+   `lib_read_pcblib_file(<lib>, <fp>)` afterwards; re-run item 6 before
+   item 8.
 
 8. **center and pads still work.** Link with `align="center"` and then
    `align="pads"`, `replace=true`: `placement.ok: true`, and the body's
@@ -1791,6 +1851,18 @@ answers after each call.
 
 Record every read-back named above in this section once run, the way
 steps 22 to 24 record theirs.
+
+FOLLOW-UPS RECORDED HERE, not fixed by this change:
+
+* `lib_add_footprint_text`'s duplicate cleanup (`RemoveLibTextByAddress`)
+  removes a session-created text from the CURRENT footprint, the case
+  item 3 is about, without saving, reopening or parking first. A
+  `duplicates_removed` above 0 may not survive the save; its docstring
+  says so. Settle it the way item 3 does once item 3b has run.
+* `pcb_place_3d_body` still writes Z as the body's StandoffHeight (Dz 0).
+  Whether that lifts a STEP model on a BOARD is unmeasured; in a library
+  it did not. Measure it (place with `standoff_height=50`, look in 3D,
+  save the board), then route it through the model's Dz if it does not.
 
 ---
 

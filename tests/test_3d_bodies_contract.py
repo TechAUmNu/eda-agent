@@ -195,8 +195,11 @@ def test_the_model_state_is_written_only_when_asked_for(handlers):
                      r"\s*0\)", board)
     for body in (link, board):
         assert body.count("Body3D_ApplyModelState(") == 1
-        assert "Body3D_RotationReadbackJson(0)" in body, (
-            "the reply must say the rotation read-back is unavailable")
+    assert "Body3D_RotationReadbackJson(False)" in link, (
+        "the reply must say the rotation read-back is unavailable")
+    assert "Body3D_RotationReadbackJson(True)" in board, (
+        "the board reply must say so too, with a hint a board can follow "
+        "(lib_read_pcblib_file reads only a .PcbLib)")
 
 
 def test_offset_z_no_longer_writes_the_standoff(handlers):
@@ -241,10 +244,34 @@ def test_the_placement_is_checked_against_the_footprint(handlers):
         "the check must measure the box read back AFTER the move")
     assert "RX1 := OrgX;" in body[check:gap], (
         "with no pads the reference is the footprint origin")
-    assert "NX2" in body[check:gap] and "RX2" in body[check:gap], (
+    assert "BX1 := NX1;" in body[check:gap], (
+        "a fresh read is the box measured")
+    assert "BX2" in body[check:gap] and "RX2" in body[check:gap], (
         "the gap must compare the body's box with the reference box")
-    assert "JsonBool('placement_ok', PlaceOk)" in body
-    assert "If HaveNewRect Then" in body[check:gap]
+    assert "JsonRaw('placement_ok', PlaceOkJson)" in body
+    assert "Else If HaveNewRect Then" in body[check:gap]
+
+
+def test_a_stale_read_is_unverified_not_failed(handlers):
+    """Mutation: measure the STALE (pre-move) box, or pass it.
+
+    A stale BoundingRectangle is the box from before the move: for
+    align='none' that sits near absolute (0, 0), ~50,000 mil from a
+    footprint at (50000, 50000), so measuring it fails a move that worked
+    (two reviews, 2026-10-04). A stale read measures the EXPECTED box
+    instead; far is still a failure (the computed move is wrong), near is
+    ok=null (unverified), never a pass.
+    """
+    body = handlers["Lib_Link3DModel"]
+    stale = body.index("BX1 := X1 + DX;")
+    assert body.rindex("If Stale Then", 0, stale) > stale - 60, (
+        "the expected box is what a STALE read measures")
+    gap = body.index("PlaceOk := (Gap <= MilsToCoordF(PlaceFarMils));")
+    assert stale < gap
+    after = body[gap:body.index("PlaceJson := JsonObj(", gap)]
+    assert "Else If Stale Then" in after and "PlaceKnown := False;" in after
+    assert "PlaceOkJson := 'null';" in after
+    assert "JsonRaw('ok', PlaceOkJson)" in body
 
 
 def test_place_far_mils_is_a_declared_constant():

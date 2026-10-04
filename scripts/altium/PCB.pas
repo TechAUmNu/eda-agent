@@ -4596,11 +4596,14 @@ End;
 { rotation and the read-backs are the Body3D_ helpers in Library.pas, so the   }
 { board and the library cannot drift apart on how a model is turned.           }
 {                                                                              }
-{ ROTATION goes through Body3D_ApplyModelState, on the MODEL. IPCB_ComponentBody }
-{ exposes no Rotation on AD26 26.9.1.9: assigning one raised "Undeclared       }
-{ identifier", which DelphiScript cannot catch, and it took the polling loop   }
-{ down. The model's state is the rotation that exists; see the 3D block        }
-{ comment in Library.pas for what attests it and why it is still unverified.   }
+{ ROTATION goes through Body3D_ApplyModelState, on the MODEL.                  }
+{ IPCB_ComponentBody exposes no Rotation on AD26 26.9.1.9: assigning one       }
+{ raised "Undeclared identifier", which DelphiScript cannot catch, and it      }
+{ took the polling loop down. The model's state is the rotation that exists;   }
+{ the 3D block comment in Library.pas records SetState landing live            }
+{ (2026-10-04). The Dz argument is passed as 0 here: whether a BOARD body's    }
+{ StandoffHeight lifts a STEP model is unmeasured (the library measurement     }
+{ found it does not there), so standoff_height keeps its old route.            }
 {                                                                              }
 { POSITION IS A BOX, NOT AN ORIGIN, and that is a change. The first version    }
 { read Body.x and Body.y to compute the move. Neither IPCB_ComponentBody nor   }
@@ -4628,7 +4631,7 @@ Var
     Body : IPCB_ComponentBody;
     Model : IPCB_Model;
     ModelPath, LayerStr, Why, AlignStr, Failure, FailCode : String;
-    StateJson, MatchJson, ExpectJson, BboxJson : String;
+    ExpectJson, BboxJson : String;
     BodyX, BodyY, Standoff, RotX, RotY, RotZ : Double;
     CentreX, CentreY : Double;
     Lyr : TLayer;
@@ -4830,8 +4833,6 @@ Begin
     { parameters as 0 on a live session (2026-10-04, see the 3D block comment }
     { in Library.pas), so model_state stays null, rotation_readback_matches   }
     { null, and rotation_readback says why instead of reporting a mismatch.   }
-    StateJson := 'null';
-    MatchJson := 'null';
 
     MarkDocDirtyByPath(Board.FileName);
 
@@ -4856,9 +4857,9 @@ Begin
             JsonBool('rotation_applied', DidRotation) + ',' +
             JsonRaw('rotation_requested', JsonObj(JsonFloat('x', RotX) + ','
                 + JsonFloat('y', RotY) + ',' + JsonFloat('z', RotZ))) + ',' +
-            JsonRaw('model_state', StateJson) + ',' +
-            JsonRaw('rotation_readback_matches', MatchJson) + ',' +
-            JsonRaw('rotation_readback', Body3D_RotationReadbackJson(0)) + ',' +
+            JsonNull('model_state') + ',' +
+            JsonNull('rotation_readback_matches') + ',' +
+            JsonRaw('rotation_readback', Body3D_RotationReadbackJson(True)) + ',' +
             JsonRaw('bbox', BboxJson) + ',' +
             JsonRaw('bbox_expected', ExpectJson) + ',' +
             JsonBool('bbox_readback_stale', Stale)

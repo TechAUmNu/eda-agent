@@ -229,17 +229,28 @@ def set_option(dialog, words: Iterable[str], want: bool, role: str) -> dict:
     return result
 
 
-def _same_path(a: str, b: str) -> bool:
-    """Two library paths name the same file: normalised, case-insensitive.
+def same_library_path(a: object, b: object) -> bool:
+    """Two library paths name the same file. ONE rule for the batch flow.
 
-    ``os.path.normcase`` lowercases only on Windows, so the case fold is
-    explicit: Altium's paths are Windows paths whatever runs the tests.
+    Absolute (``os.path.abspath``, so a relative ``library_path`` compares
+    with the absolute path a caption carries), normalised, separators as
+    Windows writes them, and case-folded EXPLICITLY: ``os.path.normcase``
+    folds only on Windows, and Altium's paths are Windows paths whatever
+    runs the tests. Surrounding quotes, spaces and a trailing full stop (a
+    caption's sentence end) are dropped. Empty never matches.
+    ``ipc_batch_flow._same_path`` delegates here.
     """
-    def norm(p: str) -> str:
-        p = (p or "").strip().strip('"').rstrip(".").strip()
-        return os.path.normpath(p.replace("/", "\\")).replace(
-            "/", "\\").lower()
-    return bool(a and b) and norm(a) == norm(b)
+    def norm(p: object) -> str:
+        text = str(p or "").strip().strip('"').rstrip(".").strip()
+        text = os.path.abspath(text.replace("/", "\\"))
+        return os.path.normpath(text).replace("/", "\\").lower()
+    if not a or not b:
+        return False
+    return norm(a) == norm(b)
+
+
+#: The ellipsis a caption carries when Windows or Altium shortened a path.
+_ELISION = ("...", chr(0x2026))
 
 
 def destination_choice(described: list, library_path: str) -> dict:
@@ -257,13 +268,17 @@ def destination_choice(described: list, library_path: str) -> dict:
 
     REFUSED (``ok`` False, ``found`` None) when a ``Generate all
     footprints in <path>`` radio names a DIFFERENT library: starting would
-    write somewhere other than the library this call was given. Also
+    write somewhere other than the library this call was given. Refused
+    too, with its own reason, when the path is ELIDED ("..." or an
+    ellipsis, a caption Windows or Altium shortened): it cannot be
+    confirmed, which is not the same as naming another library. Also
     refused when nothing matches. Pure: no window is touched here.
     """
     radios = [c for c in described if c.get("role") == "radiobutton"]
     offered = [c.get("label") or c.get("name") for c in described
                if c.get("role") in ("checkbox", "radiobutton")]
     wrong: list = []
+    elided: list = []
     legacy: list = []
     for info in radios:
         label = (info.get("label") or info.get("name") or "").strip()
@@ -274,10 +289,20 @@ def destination_choice(described: list, library_path: str) -> dict:
             if all(word in label.lower() for word in CURRENT_LIBRARY_WORDS):
                 legacy.append((info, label))
             continue
-        if _same_path(named, library_path):
+        if same_library_path(named, library_path):
             return {"ok": True, "found": info, "match": "path",
                     "label": label, "named_path": named}
+        if any(mark in named for mark in _ELISION):
+            elided.append(named)
+            continue
         wrong.append(named)
+    if elided and not wrong:
+        return {"ok": False, "found": None, "offered": offered,
+                "named_paths": elided, "reason": (
+                    f"the destination radio's path is elided "
+                    f"({elided[0]!r}), so it cannot be confirmed to be the "
+                    f"target library {library_path!r}; refusing to Start "
+                    f"rather than guess")}
     if wrong:
         return {"ok": False, "found": None, "offered": offered,
                 "named_paths": wrong, "reason": (

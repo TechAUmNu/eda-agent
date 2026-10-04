@@ -60,10 +60,8 @@ _STATE_FILE = "ipc_batch_state.json"
 
 
 def _same_path(a: object, b: object) -> bool:
-    if not a or not b:
-        return False
-    return (os.path.normcase(os.path.abspath(str(a)))
-            == os.path.normcase(os.path.abspath(str(b))))
+    """One path rule for the whole batch flow: the dialog module's."""
+    return ipc_batch_dialog.same_library_path(a, b)
 
 
 def _failure(command: str, exc: BaseException) -> dict:

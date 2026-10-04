@@ -29,6 +29,12 @@ independent of tool names and are NOT changed by this convention.
 All `pcb_*`, `lib_*`, `audit_*`, and `design_*` tools already satisfy the
 convention and are left as-is. Well-formed `sch_*` tools are also kept.
 
+## Accepted exceptions
+
+| tool | why it does not use the shared verb set |
+|---|---|
+| `lib_read_pcblib_file` | `read` and `pcblib_file` on purpose. Every `lib_get_*` answers from Altium's MEMORY; this one parses the SAVED .PcbLib on disk with no Altium involved, and that difference is the whole point of the tool (memory and file disagreed twice on 2026-10-04). `get` would hide it among the memory reads, and dropping `pcblib_file` would hide that it reads a file. Added 2026-10-04 and kept under that name by review. |
+
 ## Rename map
 
 ### application -> app_

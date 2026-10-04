@@ -175,7 +175,9 @@ def test_a_component_body_carries_its_model_placement():
     fp = pcblib.parse_footprint(_stream(_props_record(
         12, 57, props, [(0, 0), (10, 0), (10, 5), (0, 5)])))
     body = fp["bodies"][0]
-    assert body["layer"] == "MECHANICAL1"
+    assert body["layer"] == "Mechanical1", (
+        "one spelling across kinds: the fill/arc byte name, not V7_LAYER's")
+    assert body["layer_v7"] == "MECHANICAL1"
     assert body["standoff_height_mils"] == -40.3543
     assert body["overall_height_mils"] == pytest.approx(39.3701, abs=1e-4)
     assert body["outline_bbox_mils"] == {"x1": 0.0, "y1": 0.0,
@@ -192,7 +194,8 @@ def test_a_region_reports_layer_kind_and_extent():
         11, 37, "|V7_LAYER=TOPSOLDER|KIND=0|",
         [(150, -20), (190, -20), (190, 20), (150, 20), (150, -20)])))
     region = fp["regions"][0]
-    assert region["layer"] == "TOPSOLDER" and region["kind"] == "0"
+    assert region["layer"] == "TopSolder" and region["kind"] == "0"
+    assert region["layer_v7"] == "TOPSOLDER"
     assert region["vertex_count"] == 5
     assert region["bbox_mils"] == {"x1": 150.0, "y1": -20.0,
                                    "x2": 190.0, "y2": 20.0}
@@ -206,11 +209,93 @@ def test_a_truncated_stream_keeps_what_parsed_and_says_where_it_broke():
     assert "runs past the end" in fp["parse_error"]
 
 
-def test_unknown_record_kinds_are_counted_not_guessed():
-    odd = b"\x09" + _block(b"\x00" * 12)
-    fp = pcblib.parse_footprint(_stream(odd, _track(33, 0, 0, 1, 1, 1)))
-    assert fp["other_records"] == {"9": 1}
-    assert len(fp["tracks"]) == 1
+def test_an_unknown_record_kind_stops_the_parse_and_says_so():
+    """Mutation: guess one block for an unknown type and carry on.
+
+    The block count is known only for the eight kinds the reader parses.
+    A guess that is wrong reads every later record from the wrong offset,
+    so the parse STOPS there, keeps what came before, and says where.
+    """
+    before = _track(33, 0, 0, 1, 1, 1)
+    odd = bytes([9]) + _block(bytes(12))
+    stream = _stream(before, odd, _track(33, 5, 5, 6, 6, 1))
+    fp = pcblib.parse_footprint(stream)
+    assert len(fp["tracks"]) == 1, "only the record BEFORE the unknown one"
+    assert fp["complete"] is False
+    at = len(_stream(before))
+    assert f"unknown record type 9 at byte {at}" in fp["parse_error"]
+    assert "not parsed" in fp["parse_error"]
+
+
+def test_a_two_block_unknown_record_cannot_invent_primitives():
+    """The case a guess gets wrong: an unknown record with TWO blocks,
+    whose second block is the bytes of a pad record.
+
+    A one-block guess reads the second block's length prefix as the next
+    record type, misreads everything after it, and can produce primitives
+    that are not in the file. Stopping produces none and says the
+    footprint is incomplete.
+    """
+    fake_pad = _pad("X", 1, 1, 10, 10)
+    odd = bytes([10]) + _block(bytes(8)) + _block(fake_pad)
+    fp = pcblib.parse_footprint(_stream(odd))
+    assert fp["pads"] == [] and fp["tracks"] == []
+    assert fp["complete"] is False
+    assert "unknown record type 10" in fp["parse_error"]
+
+
+def test_a_complete_footprint_says_so():
+    fp = pcblib.parse_footprint(_stream(_track(33, 0, 0, 1, 1, 1)))
+    assert fp["complete"] is True and "parse_error" not in fp
+
+
+def test_the_tool_does_not_present_a_partial_footprint_as_proof(
+        tmp_path, monkeypatch):
+    """Mutation: return ok=True for a footprint whose parse stopped."""
+    lib = tmp_path / "x.PcbLib"
+    lib.write_bytes(b"placeholder")
+    partial = {"name": "FP", "storage": "FP", "complete": False,
+               "parse_error": "unknown record type 9 at byte 40",
+               "pads": [], "counts": {}}
+
+    def fake(path, footprint_name="", offset=0, limit=25):
+        out = {"library_path": str(path), "total": 2,
+               "footprints": [partial], "incomplete": ["FP"]}
+        if footprint_name:
+            out["found"] = True
+        else:
+            out.update(offset=0, count=1)
+        return out
+
+    monkeypatch.setattr(pcblib, "read_pcblib", fake)
+    tool = _tool()
+    one = asyncio.run(tool(library_path=str(lib), footprint_name="FP"))
+    assert one["ok"] is False
+    assert "could not be read to the end" in one["reason"]
+    page = asyncio.run(tool(library_path=str(lib)))
+    assert page["ok"] is True and page["incomplete"] == ["FP"]
+    assert "partial" in page["warning"]
+
+
+@pytest.mark.parametrize("raw,name", [
+    ("TOPSOLDER", "TopSolder"), ("BOTTOMPASTE", "BottomPaste"),
+    ("TOPOVERLAY", "TopOverlay"), ("MECHANICAL13", "Mechanical13"),
+    ("MECHANICAL32", "Mechanical32"), ("KEEPOUT", "KeepOut"),
+    ("MULTILAYER", "MultiLayer"), ("TOP", "TopLayer"),
+    ("BOTTOM", "BottomLayer"), ("MID3", "MidLayer3"),
+    ("PLANE2", "InternalPlane2"), ("SOMETHINGELSE", "SOMETHINGELSE"),
+])
+def test_v7_layer_names_use_the_byte_spelling(raw, name):
+    """Mutation: report V7_LAYER as stored. A region on TOPSOLDER and a
+    pad-side fill on TopSolder then compare unequal for the same layer."""
+    assert pcblib.v7_layer_name(raw) == name
+
+
+def test_v7_names_match_the_byte_names_of_the_same_layer():
+    for code, raw in ((37, "TOPSOLDER"), (35, "TOPPASTE"), (33, "TOPOVERLAY"),
+                      (56, "KEEPOUT"), (74, "MULTILAYER"), (69,
+                      "MECHANICAL13"), (1, "TOP"), (32, "BOTTOM")):
+        assert pcblib.v7_layer_name(raw) == pcblib.layer_name(code)
 
 
 def test_layer_names():
@@ -235,6 +320,8 @@ def test_the_carrier_library_parses_end_to_end():
     assert result["total"] > 0 and result["count"] == result["total"]
     broken = [f["name"] for f in result["footprints"] if "parse_error" in f]
     assert not broken, broken
+    assert result["incomplete"] == []
+    assert all(f["complete"] for f in result["footprints"])
     unknown = {k for f in result["footprints"] for k in f["other_records"]}
     assert not unknown, f"record kinds the reader does not know: {unknown}"
     pads = sum(f["counts"]["pads"] for f in result["footprints"])

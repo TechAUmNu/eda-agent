@@ -64,7 +64,7 @@ PY_DIR = REPO / "src" / "eda_agent"
 #: Empty. The last two entries were link_3d_model's rotation_x and
 #: rotation_y, sent and never read while no rotation could be applied.
 #: All three rotations are now written on the model (Model.SetState in
-#: Body3D_ApplyRotation), so the handler reads every key it is sent.
+#: Body3D_ApplyModelState), so the handler reads every key it is sent.
 INTENTIONALLY_UNREAD: dict[tuple[str, str], str] = {}
 
 _CASE_FN = re.compile(r"'([a-z_0-9]+)'\s*:\s*Result\s*:=\s*(\w+)\(")

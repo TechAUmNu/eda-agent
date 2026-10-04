@@ -1801,6 +1801,54 @@ Begin
     Try Result := (PcbLib.CurrentComponent = Footprint); Except Result := False; End;
 End;
 
+{ LibParkCurrentElsewhere - make some OTHER footprint current, verified, so a  }
+{ footprint-only removal runs on a footprint that is NOT the current one.      }
+{                                                                              }
+{ WHY (2026-10-04, the block above Lib_DeleteFootprintPads). The removal that  }
+{ came back after the save ran on the CURRENT footprint (the add had made it   }
+{ current); the removal that persisted ran after a reload, which opens         }
+{ whichever footprint Altium chooses, so probably on a footprint that was not  }
+{ current. The library board holds the current footprint's primitives (rule    }
+{ 3 below), and a save that rebuilds the current footprint from the board's    }
+{ copy would write a footprint-only removal back. The tool's reload_first      }
+{ makes every doomed primitive disk-loaded; this reproduces the other half     }
+{ of the condition that persisted. Opt-in per request (park_current, sent by   }
+{ the Python side only after its reload_first ran), never with                 }
+{ remove_from_board, whose board half needs the footprint current.             }
+{                                                                              }
+{ Every member is shipped: the LibraryIterator walk is ResolveLibFootprint's,  }
+{ the interface comparison is LibMakeCurrentVerified's, and the switch is      }
+{ LibMakeCurrentVerified itself. False when the library holds no other         }
+{ footprint or the switch did not take; the caller removes anyway and says     }
+{ so (target_current_during_removal), and the tool's on-disk check is what     }
+{ settles whether the removal stuck.                                           }
+Function LibParkCurrentElsewhere(PcbLib : IPCB_Library; Target : IPCB_LibComponent) : Boolean;
+Var
+    Iter : IPCB_LibraryIterator;
+    Footprint, Other : IPCB_LibComponent;
+Begin
+    Result := False;
+    If (PcbLib = Nil) Or (Target = Nil) Then Exit;
+    Other := Nil;
+    Iter := PcbLib.LibraryIterator_Create;
+    Try
+        Footprint := Iter.FirstPCBObject;
+        While Footprint <> Nil Do
+        Begin
+            If Footprint <> Target Then
+            Begin
+                Other := Footprint;
+                Break;
+            End;
+            Footprint := Iter.NextPCBObject;
+        End;
+    Finally
+        PcbLib.LibraryIterator_Destroy(Iter);
+    End;
+    If Other = Nil Then Exit;
+    Result := LibMakeCurrentVerified(PcbLib, Other);
+End;
+
 { Record one removed object for the board half, as 'oid:addr|', once per      }
 { address. Oid is the primitive's ObjectId read into an Integer, the way      }
 { PCB_Unroute reads it, so the board walk can filter on its kind. The        }
@@ -1964,8 +2012,9 @@ End;
 { LibBoardStillListsCount - how many recorded objects ('oid:addr|' entries,   }
 { LibAddRemovalEntry's shape) the LIBRARY BOARD still lists. READ-ONLY: one   }
 { LibBoardListsAddress walk per entry, nothing removed, so it can follow     }
-{ every delete, opt-in or not. The board iterator it uses ran live in        }
-{ LibBoardRemoveEntries on 2026-10-04 (board_removal listed_before 1).       }
+{ a delete, opt-in or not. The board iterator it uses ran live in              }
+{ LibBoardRemoveEntries on 2026-10-04 (board_removal listed_before 1), on a    }
+{ pad of the CURRENT footprint; that is the only case it is run for.           }
 {                                                                              }
 { WHY A DELETE REPORTS IT. Measured 2026-10-04 on carrier.PcbLib: a pad added }
 { in the same session and removed from its footprint (still_listed 0) was    }
@@ -1974,8 +2023,11 @@ End;
 { count is what lets one live call show whether the board still holds it:   }
 { 0 here with the pad back in the file would point somewhere else. Only the   }
 { CURRENT footprint's primitives are on the board (rule 3), so for a         }
-{ footprint that is not current this is 0 by construction; the replies say   }
-{ which it was (target_was_current).                                         }
+{ footprint that is not current this is 0 by construction. The callers         }
+{ therefore run it ONLY while the footprint is current, and report null        }
+{ otherwise: a 0 that cannot be anything else is not evidence, and the walk    }
+{ would otherwise meet objects the footprint has just released (a review,      }
+{ 2026-10-04, flagged that wider exposure).                                    }
 Function LibBoardStillListsCount(Board : IPCB_Board; Entries : String) : Integer;
 Var
     Rest, Token, Addr : String;
@@ -5956,16 +6008,26 @@ End;
 { it here. The proof of a rotation is the saved file: lib_save_library, then  }
 { lib_read_pcblib_file, whose bodies carry MODEL.3D.ROTX/Y/Z and DZ.          }
 {                                                                              }
-{ Touches no IPCB_Model member, so it is safe on every path.                  }
-Function Body3D_RotationReadbackJson(Dummy : Integer) : String;
+{ Touches no IPCB_Model member, so it is safe on every path. ForBoard picks    }
+{ the verify_with hint: lib_read_pcblib_file reads only a .PcbLib, so a free   }
+{ body on a board (PCB_Place3DBody) gets a hint it can follow.                 }
+Function Body3D_RotationReadbackJson(ForBoard : Boolean) : String;
+Var
+    VerifyHint : String;
 Begin
+    If ForBoard Then
+        VerifyHint := 'look at it with obj_switch_view 3d. A board body stores '
+            + 'MODEL.3D.ROTX/ROTY/ROTZ like a library one, but '
+            + 'lib_read_pcblib_file reads only .PcbLib files'
+    Else
+        VerifyHint := 'lib_save_library, then lib_read_pcblib_file: the body''s '
+            + 'model.rot_x/rot_y/rot_z/dz_mils are MODEL.3D.ROTX/ROTY/ROTZ/DZ '
+            + 'as saved';
     Result := JsonObj(JsonBool('available', False) + ',' +
         JsonStr('reason', 'IPCB_Model.GetState returns its OUT parameters as 0 '
             + 'in DelphiScript (measured 2026-10-04), so the 3D rotation cannot '
             + 'be read back in memory') + ',' +
-        JsonStr('verify_with', 'lib_save_library, then lib_read_pcblib_file: '
-            + 'the body''s model.rot_x/rot_y/rot_z/dz_mils are MODEL.3D.ROTX/'
-            + 'ROTY/ROTZ/DZ as saved'));
+        JsonStr('verify_with', VerifyHint));
 End;
 
 { The proven half of a body's description, as JSON fields without braces:     }
@@ -6061,9 +6123,10 @@ Var
     Failure, FailCode, PadsJson, ExpectJson : String;
     AppliedJson, ReplacedJson, FrameJson, RotReqJson, MoveJson : String;
     RemovedEntries, BoardJson, PlaceJson, PlaceWhy, RefKind, ExpectFileJson : String;
+    BoardStillJson, PlaceBasis, PlaceOkJson : String;
     OffX, OffY, OffZ, RotX, RotY, RotZ : Double;
     WantRotation, WantModelState, DidModelState, DidMove, Replace : Boolean;
-    FromBoard, MadeCurrent, PlaceOk : Boolean;
+    FromBoard, MadeCurrent, PlaceOk, PlaceKnown, HavePlaceBox, CurrentAtRemove : Boolean;
     HaveRect, HaveNewRect, Stale, Aligned, DidLayer : Boolean;
     WantLayer : TLayer;
     Workspace : IWorkspace;
@@ -6075,7 +6138,7 @@ Var
     Model : IPCB_Model;
     OrgX, OrgY, DX, DY : TCoord;
     X1, Y1, X2, Y2, NX1, NY1, NX2, NY2, PX1, PY1, PX2, PY2 : TCoord;
-    RX1, RY1, RX2, RY2, GapX, GapY, Gap : TCoord;
+    RX1, RY1, RX2, RY2, GapX, GapY, Gap, BX1, BY1, BX2, BY2 : TCoord;
     PadCount, Removed, RemovedDistinct, Remaining, BoardRemoved, BoardStill : Integer;
 Begin
     ModelPath := ExtractJsonValue(Params, 'model_path');
@@ -6245,6 +6308,8 @@ Begin
     RemovedEntries := '';
     BoardRemoved := 0;
     BoardStill := 0;
+    BoardStillJson := 'null';
+    CurrentAtRemove := False;
     BoardJson := JsonObj(JsonBool('requested', False));
 
     Failure := '';
@@ -6325,8 +6390,18 @@ Begin
                     BoardJson := LibBoardRemoveEntries(PcbLib.Board, RemovedEntries,
                         Body3D_BodyAddresses(Footprint), MadeCurrent, BoardRemoved);
                 { What the library board still holds of the removed bodies, }
-                { read-only, before the new body joins it.                   }
-                BoardStill := LibBoardStillListsCount(PcbLib.Board, RemovedEntries);
+                { read-only, before the new body joins it, and only while   }
+                { the footprint is current (it is here, by the switch       }
+                { above; read back, the same comparison as                  }
+                { LibMakeCurrentVerified): for a footprint that is not      }
+                { current the count is 0 by construction (rule 3), so the   }
+                { reply says null rather than a 0 that proves nothing.      }
+                Try CurrentAtRemove := (PcbLib.CurrentComponent = Footprint); Except CurrentAtRemove := False; End;
+                If CurrentAtRemove Then
+                Begin
+                    BoardStill := LibBoardStillListsCount(PcbLib.Board, RemovedEntries);
+                    BoardStillJson := IntToStr(BoardStill);
+                End;
             End;
 
             Footprint.AddPCBObject(Body);
@@ -6441,36 +6516,89 @@ Begin
         RY2 := OrgY;
         RefKind := 'footprint_origin';
     End;
+    { WHICH BOX IS MEASURED. Normally the box read back after the move. When }
+    { that read is STALE (bbox_readback_stale: it did not change across a    }
+    { move, i.e. a cached BoundingRectangle, a documented failure mode) it   }
+    { is the PRE-move box, and for align=none that sits near absolute (0, 0), }
+    { ~50,000 mil from a footprint whose origin is (50000, 50000): failing   }
+    { on it would report a move that worked as a misplaced body (a review,   }
+    { 2026-10-04, caught exactly that). So a stale read measures the        }
+    { EXPECTED box instead (pre-move box plus the move). Far from the        }
+    { footprint is still a failure, because then the move AS COMPUTED puts   }
+    { the body off its footprint whatever the read says; near it is          }
+    { UNVERIFIED (ok null), not passed, because only the read could show     }
+    { the move landed. lib_read_pcblib_file on the saved file settles it.    }
+    HavePlaceBox := False;
+    PlaceBasis := 'none';
+    BX1 := 0;
+    BY1 := 0;
+    BX2 := 0;
+    BY2 := 0;
+    If Stale Then
+    Begin
+        BX1 := X1 + DX;
+        BY1 := Y1 + DY;
+        BX2 := X2 + DX;
+        BY2 := Y2 + DY;
+        HavePlaceBox := True;
+        PlaceBasis := 'bbox_expected';
+    End
+    Else If HaveNewRect Then
+    Begin
+        BX1 := NX1;
+        BY1 := NY1;
+        BX2 := NX2;
+        BY2 := NY2;
+        HavePlaceBox := True;
+        PlaceBasis := 'bbox_readback';
+    End;
     Gap := 0;
     PlaceOk := False;
+    PlaceKnown := True;
     PlaceWhy := '';
-    If HaveNewRect Then
+    If HavePlaceBox Then
     Begin
         GapX := 0;
-        If RX1 - NX2 > GapX Then GapX := RX1 - NX2;
-        If NX1 - RX2 > GapX Then GapX := NX1 - RX2;
+        If RX1 - BX2 > GapX Then GapX := RX1 - BX2;
+        If BX1 - RX2 > GapX Then GapX := BX1 - RX2;
         GapY := 0;
-        If RY1 - NY2 > GapY Then GapY := RY1 - NY2;
-        If NY1 - RY2 > GapY Then GapY := NY1 - RY2;
+        If RY1 - BY2 > GapY Then GapY := RY1 - BY2;
+        If BY1 - RY2 > GapY Then GapY := BY1 - RY2;
         Gap := GapX;
         If GapY > Gap Then Gap := GapY;
         PlaceOk := (Gap <= MilsToCoordF(PlaceFarMils));
         If Not PlaceOk Then
-            PlaceWhy := 'the body''s box is ' + FloatToJsonStr(CoordToMilsF(Gap))
+            PlaceWhy := 'the body''s box (' + PlaceBasis + ') is '
+                + FloatToJsonStr(CoordToMilsF(Gap))
                 + ' mil from the footprint''s ' + RefKind + ' (limit '
                 + IntToStr(PlaceFarMils) + ' mil): the model is not on its '
                 + 'footprint. Compare body.bbox with frame.pads_bbox. To '
                 + 'undo: lib_delete_footprint_primitives with object_type '
                 + 'componentbody and library_path (it saves and reloads '
                 + 'first, so the removal sticks), or link again with '
-                + 'replace=true and corrected offsets.';
+                + 'replace=true and corrected offsets.'
+        Else If Stale Then
+        Begin
+            PlaceKnown := False;
+            PlaceWhy := 'unverified: the bounding box read back did not change '
+                + 'across the move (bbox_readback_stale), so the box measured '
+                + 'is the EXPECTED one, which is on the footprint; only a '
+                + 'fresh read can show the move landed. Save, then '
+                + 'lib_read_pcblib_file(library_path, footprint_name): the '
+                + 'body''s model.x_mils/y_mils are its stored placement.';
+        End;
     End
     Else
         PlaceWhy := 'the body''s bounding box could not be read, so its '
             + 'placement is unverified. Save, lib_reload_library and read it '
             + 'with lib_get_footprint_bodies, or read the saved file with '
             + 'lib_read_pcblib_file.';
-    PlaceJson := JsonObj(JsonBool('ok', PlaceOk) + ','
+    If PlaceKnown Then
+        PlaceOkJson := BoolToJsonStr(PlaceOk)
+    Else
+        PlaceOkJson := 'null';
+    PlaceJson := JsonObj(JsonRaw('ok', PlaceOkJson) + ','
+        + JsonStr('basis', PlaceBasis) + ','
         + JsonStr('reference', RefKind) + ','
         + JsonFloat('gap_mils', CoordToMilsF(Gap)) + ','
         + JsonInt('limit_mils', PlaceFarMils) + ','
@@ -6508,7 +6636,7 @@ Begin
         + JsonInt('removed_bodies', RemovedDistinct) + ','
         + JsonInt('remove_calls', Removed) + ','
         + JsonInt('remaining_before_add', Remaining) + ','
-        + JsonInt('board_still_listed', BoardStill) + ','
+        + JsonRaw('board_still_listed', BoardStillJson) + ','
         + JsonRaw('board_removal', BoardJson));
     FrameJson := JsonObj(JsonFloat('origin_x_mils', CoordToMilsF(OrgX)) + ','
         + JsonFloat('origin_y_mils', CoordToMilsF(OrgY)) + ','
@@ -6524,14 +6652,14 @@ Begin
         + JsonRaw('applied', JsonObj(AppliedJson)) + ','
         + JsonRaw('rotation_requested', RotReqJson) + ','
         + JsonNull('model_state') + ','
-        + JsonRaw('rotation_readback', Body3D_RotationReadbackJson(0)) + ','
+        + JsonRaw('rotation_readback', Body3D_RotationReadbackJson(False)) + ','
         + JsonNull('rotation_readback_matches') + ','
         + JsonRaw('expected_in_file', ExpectFileJson) + ','
         + JsonRaw('replaced', ReplacedJson) + ','
         + JsonRaw('frame', FrameJson) + ','
         + JsonRaw('body', JsonObj(Body3D_BodyFieldsJson(Body, PcbLib.Board, OrgX, OrgY))) + ','
         + JsonRaw('placement', PlaceJson) + ','
-        + JsonBool('placement_ok', PlaceOk) + ','
+        + JsonRaw('placement_ok', PlaceOkJson) + ','
         + JsonRaw('bbox_expected', ExpectJson) + ','
         + JsonBool('bbox_readback_stale', Stale) + ','
         + JsonRaw('move_mils', MoveJson)));
@@ -6799,7 +6927,7 @@ Begin
                     { it: lib_read_pcblib_file.                              }
                     ModelJson := JsonObj(Body3D_ModelInfoJson(Model) + ','
                         + JsonNull('rotation') + ','
-                        + JsonRaw('rotation_readback', Body3D_RotationReadbackJson(0)));
+                        + JsonRaw('rotation_readback', Body3D_RotationReadbackJson(False)));
                 End
                 Else
                     ModelJson := 'null';
@@ -14018,10 +14146,12 @@ End;
 { call the way this does: a primitive created this session and removed from   }
 { its footprint is written back by the save, and a disk-loaded one is not     }
 { (the full record is above Lib_DeleteFootprintPads). The tool therefore     }
-{ saves and reloads first (reload_first, default on), and this reply carries  }
-{ the same diagnostics as the pad delete: target_was_current,                 }
-{ board_still_listed (LibBoardStillListsCount, read-only) and                 }
-{ marked_modified (marked through the given path and PcbLib.Board.FileName). }
+{ saves and reloads first (reload_first, default on), then asks for            }
+{ park_current, and this reply carries the same diagnostics as the pad         }
+{ delete: target_was_current, parked_elsewhere,                                }
+{ target_current_during_removal, board_still_listed (LibBoardStillListsCount,  }
+{ read-only, null when the footprint was not current) and marked_modified      }
+{ (marked through the given path and PcbLib.Board.FileName).                   }
 
 Function Lib_DeleteFootprintPrimitives(Params : String; RequestId : String) : String;
 Var
@@ -14041,9 +14171,10 @@ Var
     ObjFilter : Integer;
     WantLayer, MatchLayer : TLayer;
     IncludePads, Found, FromBoard, MadeCurrent : Boolean;
-    TargetWasCurrent, MarkedModified : Boolean;
+    TargetWasCurrent, MarkedModified, ParkWanted, Parked, CurrentDuring : Boolean;
     Removed, I, Examined, PrimOid, SameRun, RemoveCalls, DoubleListed : Integer;
     StillListed, BoardRemoved, BoardStill : Integer;
+    BoardStillJson : String;
 Begin
     LibPath := ExtractJsonValue(Params, 'library_path');
     FpWanted := ExtractJsonValue(Params, 'footprint_name');
@@ -14052,6 +14183,7 @@ Begin
     ConfirmStr := ExtractJsonValue(Params, 'confirm');
     IncludePads := (ExtractJsonValue(Params, 'include_pads') = 'true');
     FromBoard := (LowerCase(Trim(ExtractJsonValue(Params, 'remove_from_board'))) = 'true');
+    ParkWanted := (LowerCase(Trim(ExtractJsonValue(Params, 'park_current'))) = 'true');
 
     If FpWanted = '' Then
     Begin
@@ -14166,6 +14298,15 @@ Begin
     { Read, never written (see the measured note above the function). }
     TargetWasCurrent := False;
     Try TargetWasCurrent := (PcbLib.CurrentComponent = Target); Except TargetWasCurrent := False; End;
+    { park_current: remove from a footprint that is NOT current, the condition }
+    { of the delete that persisted (LibParkCurrentElsewhere, and the measured }
+    { block above Lib_DeleteFootprintPads). Sent only after the tool's        }
+    { reload_first ran, never honoured with remove_from_board.                }
+    Parked := False;
+    If ParkWanted And (Not FromBoard) And TargetWasCurrent Then
+        Parked := LibParkCurrentElsewhere(PcbLib, Target);
+    CurrentDuring := False;
+    Try CurrentDuring := (PcbLib.CurrentComponent = Target); Except CurrentDuring := False; End;
 
     ObjFilter := ObjectTypeFromStringPCB(ObjTypeStr);
     If (ObjTypeStr <> '') And (ObjFilter = -1) Then
@@ -14370,10 +14511,18 @@ Begin
         End;
     End;
 
-    { What the LIBRARY BOARD still holds of the removed primitives. }
+    { What the LIBRARY BOARD still holds of the removed primitives, only      }
+    { while the footprint is current (null otherwise: the board holds no     }
+    { primitive of a footprint that is not current, rule 3).                  }
     BoardStill := 0;
-    If Entries <> '' Then
+    BoardStillJson := 'null';
+    If (Entries <> '') And CurrentDuring Then
+    Begin
         BoardStill := LibBoardStillListsCount(PcbLib.Board, Entries);
+        BoardStillJson := IntToStr(BoardStill);
+    End
+    Else If CurrentDuring Then
+        BoardStillJson := '0';
 
     MarkedModified := False;
     If (Removed > 0) Or (BoardRemoved > 0) Then
@@ -14402,8 +14551,10 @@ Begin
         + '"remove_calls":' + IntToStr(RemoveCalls) + ','
         + '"double_listed":' + IntToStr(DoubleListed) + ','
         + '"still_listed":' + IntToStr(StillListed) + ','
-        + '"board_still_listed":' + IntToStr(BoardStill) + ','
+        + '"board_still_listed":' + BoardStillJson + ','
         + '"target_was_current":' + BoolToJsonStr(TargetWasCurrent) + ','
+        + '"parked_elsewhere":' + BoolToJsonStr(Parked) + ','
+        + '"target_current_during_removal":' + BoolToJsonStr(CurrentDuring) + ','
         + '"marked_modified":' + BoolToJsonStr(MarkedModified) + ','
         + '"examined":' + IntToStr(Examined) + ','
         + '"layers":[' + RemovedJson + '],'
@@ -15296,12 +15447,22 @@ End;
 {                                                                              }
 { THE FIX IS IN THE TOOL, not here: lib_delete_footprint_pads saves and       }
 { reloads the library FIRST (reload_first, default on), so every pad it       }
-{ removes is a disk-loaded one, the case step 4 proved. This handler reports  }
-{ what one live call needs to tell the two cases apart:                       }
-{   target_was_current   was the footprint current during the removal;       }
+{ removes is a disk-loaded one, the case step 4 proved, and then asks for      }
+{ park_current: a footprint that is current after the reopen is parked, by     }
+{ making another footprint current (LibParkCurrentElsewhere), so the removal   }
+{ also runs on a footprint that is NOT current, step 4's other condition. A    }
+{ review (2026-10-04) pointed out that the evidence fits "the save rebuilds    }
+{ the CURRENT footprint from the board's copy" as well as "session-created",   }
+{ and reload_first alone fixes only the second. The tool then saves again and  }
+{ reads the FILE (verify_on_disk), which settles it whichever theory holds.    }
+{ This handler reports what one live call needs to tell the cases apart:       }
+{   target_was_current   was the footprint current when the call arrived;      }
+{   parked_elsewhere     park_current switched to another footprint;           }
+{   target_current_during_removal  whether it was current while removed;       }
 {   still_listed         removed pads the FOOTPRINT iterator still lists;    }
 {   board_still_listed   removed pads the LIBRARY BOARD iterator still lists }
-{                        (LibBoardStillListsCount, read-only);              }
+{                        (LibBoardStillListsCount, read-only), counted only    }
+{                        while the footprint is current, null otherwise;       }
 {   marked_modified      the document reads modified after the delete. It    }
 {                        is marked through the path given AND through        }
 {                        PcbLib.Board.FileName, the path every add handler   }
@@ -15323,13 +15484,16 @@ Var
     I, J, WantIdx, Matches, Picked, OpCount, Removed, DoubleListed : Integer;
     Removals, StillListed, PadsBefore, PadsAfter, PadOid, BoardRemoved : Integer;
     BoardStill : Integer;
+    BoardStillJson : String;
     Found, TakeAll, FromBoard, MadeCurrent, TargetWasCurrent, MarkedModified : Boolean;
+    ParkWanted, Parked, CurrentDuring : Boolean;
 Begin
     LibPath := ExtractJsonValue(Params, 'library_path');
     FpWanted := ExtractJsonValue(Params, 'footprint_name');
     PadsStr := ExtractJsonValue(Params, 'pads');
     ConfirmStr := ExtractJsonValue(Params, 'confirm');
     FromBoard := (LowerCase(Trim(ExtractJsonValue(Params, 'remove_from_board'))) = 'true');
+    ParkWanted := (LowerCase(Trim(ExtractJsonValue(Params, 'park_current'))) = 'true');
     If FpWanted = '' Then
     Begin
         Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'footprint_name is required');
@@ -15381,6 +15545,16 @@ Begin
     { pads are removed (see the measured block above).                       }
     TargetWasCurrent := False;
     Try TargetWasCurrent := (PcbLib.CurrentComponent = Target); Except TargetWasCurrent := False; End;
+    { park_current (sent only after the tool's reload_first ran): remove from  }
+    { a footprint that is NOT current, the condition of the delete that       }
+    { persisted (LibParkCurrentElsewhere). Never with remove_from_board, whose }
+    { board half needs the footprint current. Before the snapshot, so every   }
+    { address recorded below is read with the footprint already parked.       }
+    Parked := False;
+    If ParkWanted And (Not FromBoard) And TargetWasCurrent Then
+        Parked := LibParkCurrentElsewhere(PcbLib, Target);
+    CurrentDuring := False;
+    Try CurrentDuring := (PcbLib.CurrentComponent = Target); Except CurrentDuring := False; End;
 
     OpCount := 0;
     Removed := 0;
@@ -15598,9 +15772,18 @@ Begin
         End;
     End;
 
-    { What the LIBRARY BOARD still holds of the removed pads, read-only. }
-    If Entries <> '' Then
+    { What the LIBRARY BOARD still holds of the removed pads, read-only, and }
+    { only while the footprint is current: otherwise the board does not hold }
+    { its primitives at all (rule 3), the count is 0 by construction, and    }
+    { the reply says null instead of a 0 that proves nothing.                }
+    BoardStillJson := 'null';
+    If (Entries <> '') And CurrentDuring Then
+    Begin
         BoardStill := LibBoardStillListsCount(PcbLib.Board, Entries);
+        BoardStillJson := IntToStr(BoardStill);
+    End
+    Else If CurrentDuring Then
+        BoardStillJson := '0';
 
     If (Removed > 0) Or (BoardRemoved > 0) Then
     Begin
@@ -15619,8 +15802,10 @@ Begin
         + JsonInt('pads_before', PadsBefore) + ','
         + JsonInt('pads_after', PadsAfter) + ','
         + JsonInt('still_listed', StillListed) + ','
-        + JsonInt('board_still_listed', BoardStill) + ','
+        + JsonRaw('board_still_listed', BoardStillJson) + ','
         + JsonBool('target_was_current', TargetWasCurrent) + ','
+        + JsonBool('parked_elsewhere', Parked) + ','
+        + JsonBool('target_current_during_removal', CurrentDuring) + ','
         + JsonInt('double_listed', DoubleListed) + ','
         + JsonRaw('board_removal', BoardJson) + ','
         + JsonBool('marked_modified', MarkedModified) + ','
@@ -15632,7 +15817,8 @@ Begin
             + 'saved .PcbLib with no Altium involved and must not list the '
             + 'pads. still_listed above must be 0; board_still_listed above 0 '
             + 'is a pad the library board still holds, which a save can write '
-            + 'back.')));
+            + 'back (null: the footprint was not current, so the board does '
+            + 'not hold its pads and there was nothing to count).')));
 End;
 
 {..............................................................................}
