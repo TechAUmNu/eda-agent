@@ -2149,6 +2149,7 @@ def register_library_tools(mcp):
         library_path: Optional[str] = None,
         component_name: Optional[str] = None,
         registration: str = "both",
+        remove_from_board: bool = False,
     ) -> dict[str, Any]:
         """Add a text primitive to a PcbLib footprint.
 
@@ -2168,6 +2169,12 @@ def register_library_tools(mcp):
         the same string is removed on the spot and counted in
         ``duplicates_removed``. ``lib_audit_footprint_policies`` no longer
         reads the double registration as two texts either.
+
+        The cleanup removes nothing unless the text this call created was
+        read by address and is listed by the footprint, so it can never
+        take the new text with the duplicate; ``duplicate_cleanup`` says
+        ``none``, ``removed`` or why it was skipped. A duplicate is taken
+        off the footprint only, unless ``remove_from_board``.
 
         Args:
             text: The string to place. Required.
@@ -2197,12 +2204,15 @@ def register_library_tools(mcp):
                 "board" runs only that half of the registration, so one
                 live session can show which persists exactly once after
                 save and reload.
+            remove_from_board: also take a removed duplicate off the
+                library board. Unmeasured and off by default; see
+                ``lib_delete_footprint_primitives``.
 
         Returns:
             Dict with ``success``, ``footprint``, ``text``, ``layer``,
             ``x``, ``y``, ``registration``, ``new_objects``,
-            ``group_yields``, ``duplicates_found``, ``duplicates_removed``
-            and ``pending_save``.
+            ``group_yields``, ``duplicates_found``, ``duplicates_removed``,
+            ``duplicate_cleanup``, ``board_removal`` and ``pending_save``.
         """
         if not text:
             return {"ok": False,
@@ -2233,6 +2243,8 @@ def register_library_tools(mcp):
             params["component_name"] = component_name
         if mode != "both":
             params["registration"] = mode
+        if remove_from_board:
+            params["remove_from_board"] = "true"
         result = await bridge.send_command_async(
             "library.add_footprint_text", params,
         )
@@ -2990,6 +3002,7 @@ def register_library_tools(mcp):
         align: str = "none",
         library_path: str = "",
         layer: str = "",
+        remove_from_board: bool = False,
     ) -> dict[str, Any]:
         """Link a 3D STEP model to a PcbLib footprint.
 
@@ -3030,6 +3043,14 @@ def register_library_tools(mcp):
             rotation_y: rotation about Y in degrees, the same route.
             rotation_z: rotation about Z in degrees, the same route.
             replace: remove the footprint's existing 3D bodies first.
+                They are removed from the FOOTPRINT, the removal that has
+                run live.
+            remove_from_board: with ``replace``, also take the replaced
+                bodies off the library's backing board. UNMEASURED and
+                off by default: see ``lib_delete_footprint_primitives``,
+                which shares the rule. Use it if a replaced placeholder
+                comes back after app_save_all and lib_reload_library.
+                ``replaced.board_removal`` reports what it found.
             align: where the body goes in X and Y.
                 ``"none"`` (default, the previous behaviour) moves it by
                 (offset_x, offset_y) from wherever Altium put it, which is
@@ -3083,8 +3104,11 @@ def register_library_tools(mcp):
             rotation was asked for or none could be read).
 
             ``replaced``: ``requested``, ``removed_bodies``,
-            ``remove_calls`` and ``remaining_before_add`` (0 when the
-            replace worked).
+            ``remove_calls``, ``remaining_before_add`` (0 when the
+            replace worked) and ``board_removal`` (``{requested}``, or
+            with ``remove_from_board`` what the board half found:
+            ``listed_before``, ``removed``, ``still_listed``,
+            ``skipped_still_in_footprint``, ``not_run``).
 
             ``frame``: ``origin_x_mils`` / ``origin_y_mils`` (the
             footprint origin in library-board coordinates) and
@@ -3122,6 +3146,11 @@ def register_library_tools(mcp):
             return {"ok": False, "reason": (
                 f"align must be one of {', '.join(_FOOTPRINT_3D_ALIGN)}; "
                 f"got {align!r}.")}
+        if remove_from_board and not replace:
+            return {"ok": False, "reason": (
+                "remove_from_board takes the REPLACED bodies off the "
+                "library board, so it needs replace=True; without it "
+                "nothing is removed.")}
 
         params: dict[str, Any] = {
             "component_name": component_name,
@@ -3139,6 +3168,8 @@ def register_library_tools(mcp):
             params["library_path"] = library_path
         if layer:
             params["layer"] = layer
+        if remove_from_board:
+            params["remove_from_board"] = "true"
         bridge = get_bridge()
         return await bridge.send_command_async("library.link_3d_model", params)
 
@@ -3146,7 +3177,7 @@ def register_library_tools(mcp):
     async def lib_get_footprint_bodies(
         footprint_name: str = "",
         library_path: str = "",
-        model_state: bool = True,
+        model_state: bool = False,
         offset: int = 0,
         limit: int = 250,
     ) -> dict[str, Any]:
@@ -3163,17 +3194,18 @@ def register_library_tools(mcp):
         and ``bbox`` (``x1, y1, x2, y2, width, height`` in mils from the
         footprint origin), plus the pads' box in the same frame
         (``frame.pads_bbox``) so a model sitting off its land is visible
-        in the numbers. With ``model_state`` each body also carries
+        in the numbers. With ``model_state=True`` each body also carries
         ``model``: ``type`` (``extruded``, ``generic`` = an imported STEP
         or other model file, ``cylinder``, ``sphere``), ``type_id``,
         ``file``, ``planar_rotation`` and ``rotation`` (``{x, y, z,
         dz_mils}`` read back from the model, null when unreadable).
 
         With ``footprint_name`` empty: the whole library, one line per
-        footprint with ``bodies`` and, with ``model_state``, how many of
-        each type. Paged by ``offset`` / ``limit``; ``total`` is the
-        library size. Use it to find every footprint still carrying a
-        placeholder: an ``extruded`` count above 0 and ``generic`` at 0.
+        footprint with ``bodies`` and, with ``model_state=True``, how many
+        of each type. Paged by ``offset`` / ``limit``; ``total`` is the
+        library size. With ``model_state=True`` it finds every footprint
+        still carrying a placeholder: an ``extruded`` count above 0 and
+        ``generic`` at 0.
 
         The single-footprint form makes the footprint current so its frame
         is the one lib_link_3d_model measures in, then puts the previous
@@ -3183,12 +3215,19 @@ def register_library_tools(mcp):
             footprint_name: footprint to list; empty sweeps the library.
             library_path: optional .PcbLib; defaults to the focused one.
                 Refused when a different document ends up in front.
-            model_state: read the model behind each body (type, file,
-                rotation). These reads use IPCB_Model members the AD26
-                script binding declares but no earlier call here
-                exercised; if a live call with this on ever stops the
-                bridge, ``model_state=False`` still answers with
-                everything else.
+            model_state: OFF by default. True also reads the model
+                behind each body (type, file, rotation), through
+                IPCB_Model members (ModelType, FileName, Rotation,
+                GetState) that the AD26 script binding declares but no
+                live call has run yet. If one of those names does not
+                resolve, the fault is not catchable: it stops the
+                polling loop, and nothing answers until the bridge is
+                restarted by hand. A default-on read would make every
+                ordinary call, and every body of a sweep, that
+                experiment, so the reads stay opt-in until
+                docs/RELEASE_VERIFICATION.md step 5 has passed live.
+                Without it the reply still carries layer, heights, bbox
+                and the pads' box, all read with proven members.
             offset: first footprint of the sweep page.
             limit: footprints per sweep page.
 
@@ -3233,6 +3272,7 @@ def register_library_tools(mcp):
         library_path: Optional[str] = None,
         replace: bool = False,
         align: str = "none",
+        remove_from_board: bool = False,
     ) -> dict[str, Any]:
         """Batch-link STEP models to footprints by matching file names.
 
@@ -3251,6 +3291,8 @@ def register_library_tools(mcp):
                 for real models in one call. See lib_link_3d_model.
             align: passed to every link: ``"none"``, ``"center"`` or
                 ``"pads"``. See lib_link_3d_model.
+            remove_from_board: with ``replace``, passed to every link.
+                Unmeasured and off by default; see lib_link_3d_model.
 
         Returns:
             {"linked": [{footprint, model, applied, replaced, bbox}],
@@ -3272,6 +3314,10 @@ def register_library_tools(mcp):
             return {"ok": False, "reason": (
                 f"align must be one of {', '.join(_FOOTPRINT_3D_ALIGN)}; "
                 f"got {align!r}.")}
+        if remove_from_board and not replace:
+            return {"ok": False, "reason": (
+                "remove_from_board needs replace=True: it takes the "
+                "replaced bodies off the library board.")}
 
         models: dict[str, str] = {}
         for f in d.iterdir():
@@ -3296,17 +3342,19 @@ def register_library_tools(mcp):
                 unmatched.append(fname)
                 continue
             used.add(key)
+            link_params: dict[str, Any] = {
+                "component_name": fname,
+                "model_path": models[key],
+                "offset_x": 0, "offset_y": 0, "offset_z": 0,
+                "rotation_x": 0, "rotation_y": 0, "rotation_z": 0,
+                "replace": "true" if replace else "false",
+                "align": align,
+            }
+            if remove_from_board:
+                link_params["remove_from_board"] = "true"
             try:
                 res = await bridge.send_command_async(
-                    "library.link_3d_model",
-                    {
-                        "component_name": fname,
-                        "model_path": models[key],
-                        "offset_x": 0, "offset_y": 0, "offset_z": 0,
-                        "rotation_x": 0, "rotation_y": 0, "rotation_z": 0,
-                        "replace": "true" if replace else "false",
-                        "align": align,
-                    },
+                    "library.link_3d_model", link_params,
                 )
             except (AltiumNotRunningError, AltiumTimeoutError) as e:
                 # The bridge itself is gone: every later link would fail
@@ -5171,6 +5219,7 @@ def register_library_tools(mcp):
         library_path: str = "",
         include_pads: bool = False,
         confirm: bool = False,
+        remove_from_board: bool = False,
     ) -> dict[str, Any]:
         """Delete primitives inside ONE footprint of a PCB library.
 
@@ -5191,6 +5240,13 @@ def register_library_tools(mcp):
         the part's connectivity rather than its drawing, and clearing
         graphics off a layer should not quietly cost you the pinout.
 
+        REMOVED FROM THE FOOTPRINT, the removal this tool has always
+        made. A primitive added in this session is listed twice until the
+        library is reloaded (``double_listed`` counts them), and deleting
+        one of those has been seen to come back after a save and reload.
+        If that happens, save, ``lib_reload_library`` and delete again, or
+        pass ``remove_from_board=True``.
+
         Args:
             footprint_name: The footprint to edit. Required: deleting
                 from whichever footprint the editor happens to show is
@@ -5204,10 +5260,25 @@ def register_library_tools(mcp):
             confirm: Required. Read the footprint first with
                 ``lib_probe_footprint`` and pass True once the filters
                 are what you mean.
+            remove_from_board: ALSO take each removed primitive off the
+                library's backing board, the second place every add
+                registers it. Off by default because no live session has
+                run it yet (docs/RELEASE_VERIFICATION.md step 24). With
+                it the footprint is made current first (``SELECT_FAILED``
+                if that does not take, nothing removed), the footprint
+                removal runs as usual, and only then is the board swept,
+                by address, for objects the footprint no longer lists.
 
         Returns:
-            Dict with ``library``, ``footprint``, ``removed``,
-            ``examined``, ``layers`` and ``pads_included``.
+            Dict with ``library``, ``footprint``, ``removed`` (distinct
+            primitives), ``remove_calls``, ``double_listed``,
+            ``still_listed`` (must be 0), ``examined``, ``layers``,
+            ``pads_included``, ``board_removal`` (``{requested}``, or
+            with ``remove_from_board``: ``made_current``, ``objects``,
+            ``listed_before`` = how many the board still listed after
+            the footprint removal, ``removed``, ``remove_calls``,
+            ``still_listed``, ``skipped_still_in_footprint``,
+            ``not_run``) and ``note``.
         """
         if not footprint_name.strip():
             return {"ok": False, "reason": "footprint_name is required"}
@@ -5227,6 +5298,8 @@ def register_library_tools(mcp):
             params["include_pads"] = "true"
         if confirm:
             params["confirm"] = "true"
+        if remove_from_board:
+            params["remove_from_board"] = "true"
 
         bridge = get_bridge()
         return await bridge.send_command_async(
@@ -5332,6 +5405,7 @@ def register_library_tools(mcp):
         pads: list[dict[str, Any]],
         library_path: str = "",
         confirm: bool = False,
+        remove_from_board: bool = False,
     ) -> dict[str, Any]:
         """Delete individual pads from ONE PcbLib footprint.
 
@@ -5354,12 +5428,17 @@ def register_library_tools(mcp):
             library_path: The .PcbLib. Defaults to the focused document.
             confirm: Required. Read the pads with
                 ``lib_get_pad_geometry`` first, then pass True.
+            remove_from_board: also take each removed pad off the
+                library's backing board. Unmeasured and off by default;
+                see ``lib_delete_footprint_primitives``, which shares the
+                rule.
 
         Returns:
             {library, footprint, removed, selectors, results, pads_before,
-             pads_after, still_listed, double_listed, written_to_disk:
-             false, pending_save}. still_listed must be 0. The library is
-            MARKED dirty, not written: ``app_save_all`` flushes it.
+             pads_after, still_listed, double_listed, board_removal,
+             written_to_disk: false, pending_save}. still_listed must be
+            0. The library is MARKED dirty, not written: ``app_save_all``
+            flushes it.
         """
         if not str(footprint_name or "").strip():
             return {"ok": False, "reason": "footprint_name is required"}
@@ -5380,6 +5459,8 @@ def register_library_tools(mcp):
         }
         if str(library_path or "").strip():
             params["library_path"] = str(library_path).strip()
+        if remove_from_board:
+            params["remove_from_board"] = "true"
         bridge = get_bridge()
         return await bridge.send_command_async(
             "library.delete_footprint_pads", params, timeout=120.0)

@@ -9,9 +9,10 @@ review cannot see failing, because the Pascal cannot run here:
 * The IPCB_Model members (SetState, GetState, ModelType, FileName,
   Rotation) are declared by the AD26 script binding and exercised by no
   earlier code. An undeclared identifier halts the polling loop where no
-  Try reaches, so each is confined to one small helper, and the helpers
-  that apply or read a rotation run only when a rotation was asked for.
-  A plain link then runs exactly the sequence that has always worked.
+  Try reaches, so each is confined to one small helper, and every helper
+  runs only on an explicit request: a rotation, or model_state=true on
+  the body list (off by default). A plain link and a default list then
+  run only members that have run live before.
 * The rotation is written BEFORE the body derives its outline and before
   it is added. Setting body properties on an unowned body crashed
   ADVPCB.DLL once; this writes the model, and the order is what makes
@@ -93,8 +94,29 @@ def test_set_and_get_state_are_called_only_inside_their_helpers(
                 offenders.append(f"{module}:{name} calls .{member}(")
     assert not offenders, (
         "IPCB_Model.SetState/GetState are unproven on a live session and "
-        "must stay inside their one-purpose helpers, so a fault fails only "
-        "the call that asked for a rotation: " + "; ".join(offenders))
+        "must stay inside their one-purpose helpers, which run only when "
+        "a rotation was asked for; a fault in one stops the polling loop, "
+        "so no default path may reach them: " + "; ".join(offenders))
+
+
+def test_the_body_list_reads_models_only_when_asked(handlers):
+    """Mutation: parse model_state as `<> 'false'` again (default ON).
+
+    That made the first ordinary lib_get_footprint_bodies call, and every
+    body of every footprint in a sweep, run four IPCB_Model members no
+    live session has confirmed, where a fault cannot be caught.
+    """
+    body = handlers["Lib_GetFootprintBodies"]
+    assert re.search(r"WantModel\s*:=\s*\(LowerCase\(Trim\(ExtractJsonValue"
+                     r"\(Params,\s*'model_state'\)\)\)\s*=\s*'true'\)", body), (
+        "model_state must be an explicit opt-in: only 'true' turns it on")
+    assert "<> 'false'" not in body
+    for helper in ("Body3D_ModelTypeId(", "Body3D_ModelInfoJson(",
+                   "Body3D_ModelStateJson("):
+        for hit in re.finditer(re.escape(helper), body):
+            guard = body.rfind("If WantModel Then", 0, hit.start())
+            assert guard >= 0 and hit.start() - guard < 400, (
+                f"{helper} is reached without `If WantModel Then` in front")
 
 
 def test_model_reads_go_through_helpers(handlers):
@@ -347,6 +369,18 @@ def test_body_list_sends_model_state_as_a_word(fake):
     assert command == "library.get_footprint_bodies"
     assert params["model_state"] == "false"
     assert params["footprint_name"] == "SOIC8"
+
+
+def test_body_list_reads_no_model_by_default(fake):
+    """Mutation: default model_state back to True on the Python side."""
+    tools = _tools()
+    asyncio.run(tools["lib_get_footprint_bodies"](footprint_name="SOIC8"))
+    _command, params = fake.commands[-1]
+    assert params["model_state"] == "false"
+    asyncio.run(tools["lib_get_footprint_bodies"](
+        footprint_name="SOIC8", model_state=True))
+    _command, params = fake.commands[-1]
+    assert params["model_state"] == "true"
 
 
 def test_board_body_sends_rotation_and_refuses_a_bad_align(fake):

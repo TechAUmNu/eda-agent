@@ -66,13 +66,47 @@ def test_the_scan_sees_library_pas():
 # Registration: every footprint primitive reaches disk.
 # ---------------------------------------------------------------------------
 
+def _both_branch(body: str) -> str:
+    """The ``Mode = 'both'`` branch of RegisterLibPrimitive, the default."""
+    start = body.index("If Mode = 'both' Then")
+    end = body.index("Else If Mode = 'footprint'", start)
+    return body[start:end]
+
+
 def test_the_shared_registration_has_all_four_calls():
     """Footprint.AddPCBObject alone reads back and is discarded on save."""
-    body = FNS["RegisterLibPrimitive"]
-    assert "Footprint.AddPCBObject(Prim)" in body
-    assert "PcbLib.Board.AddPCBObject(Prim)" in body
-    assert body.count("PCBM_BoardRegisteration") == 2, (
+    both = _both_branch(FNS["RegisterLibPrimitive"])
+    assert "Footprint.AddPCBObject(Prim)" in both
+    assert "PcbLib.Board.AddPCBObject(Prim)" in both
+    assert both.count("PCBM_BoardRegisteration") == 2, (
         "both the footprint and the board must be told")
+
+
+def test_the_shared_registration_keeps_the_inline_order():
+    """Both adds, then both broadcasts: the order pads were measured with.
+
+    Mutation: move the board add below the footprint broadcast (the
+    interleaved order an earlier version of the helper ran). Every call
+    was proven, the order never was, and it sat under every track, arc,
+    text, fill and region add. The inline pad add is read too, so the two
+    cannot drift apart again.
+    """
+    both = _both_branch(FNS["RegisterLibPrimitive"])
+    order = [both.index("Footprint.AddPCBObject(Prim)"),
+             both.index("PcbLib.Board.AddPCBObject(Prim)"),
+             both.index("SendMessageToRobots(Footprint.I_ObjectAddress"),
+             both.index("SendMessageToRobots(PcbLib.Board.I_ObjectAddress")]
+    assert order == sorted(order), (
+        "RegisterLibPrimitive must add to the footprint, add to the board, "
+        "then broadcast to the footprint, then to the board")
+
+    pad = FNS["Lib_AddFootprintPad"]
+    inline = [pad.index("Footprint.AddPCBObject(Pad)"),
+              pad.index("PcbLib.Board.AddPCBObject(Pad)"),
+              pad.index("SendMessageToRobots(Footprint.I_ObjectAddress"),
+              pad.index("SendMessageToRobots(PcbLib.Board.I_ObjectAddress")]
+    assert inline == sorted(inline), (
+        "the inline pad registration this helper copies changed order")
 
 
 def _creates_primitive(body: str) -> bool:
@@ -171,13 +205,35 @@ def test_the_text_handler_counts_and_removes_only_what_it_created():
         assert field in body, f"the reply lost {field}"
 
 
-def test_a_duplicate_is_removed_footprint_first_and_inside_the_walk():
-    """GroupIterator_Destroy releases what the iterator handed out."""
+def test_a_duplicate_is_removed_from_the_footprint_inside_the_walk():
+    """GroupIterator_Destroy releases what the iterator handed out.
+
+    Mutation: put back ``PcbLib.Board.RemovePCBObject(Prim)`` beside the
+    footprint removal, or drop the BeginModify bracket. The board removal
+    ran automatically on every duplicate and had never been measured; it
+    is now the caller's opt-in, through LibBoardRemoveEntries.
+    """
     body = FNS["RemoveLibTextByAddress"]
+    begin = body.index("PCBM_BeginModify")
     fp = body.index("Footprint.RemovePCBObject(Prim)")
-    board = body.index("PcbLib.Board.RemovePCBObject(Prim)")
     destroy = body.index("GroupIterator_Destroy")
-    assert fp < board < destroy
+    end = body.index("PCBM_EndModify")
+    assert begin < fp < destroy < end
+    assert "Board.RemovePCBObject" not in body
+
+
+def test_the_text_cleanup_never_removes_without_a_surviving_original():
+    """An unread NewAddr made the created text look like its own duplicate.
+
+    Mutation: delete either guard. With NewAddr '' every new text with
+    the string passed the duplicate test, the created one included, and
+    the cleanup would have removed it and reported success.
+    """
+    body = FNS["Lib_AddFootprintText"]
+    remove = body.index("RemoveLibTextByAddress(")
+    assert body.index("NewAddr = ''") < remove
+    assert body.index("Pos('|' + NewAddr + '|', AfterAddrs) = 0") < remove
+    assert '"duplicate_cleanup"' in body
 
 
 def test_the_geometry_reader_dedupes_by_address():
@@ -187,13 +243,18 @@ def test_the_geometry_reader_dedupes_by_address():
     assert "Txt.I_ObjectAddress" in body
 
 
-def test_a_delete_also_leaves_the_library_board():
-    """Removing from the footprint alone came back after a reload."""
+def test_a_default_delete_removes_from_the_footprint_only():
+    """The library-board half is opt-in until a live run proves it.
+
+    Mutation: put ``PcbLib.Board.RemovePCBObject(Prim)`` back in the
+    loop, or make the footprint current unconditionally. Both changed a
+    delete tool that had worked into the experiment. The shared rule and
+    its guards live in tests/test_library_removal_rule.py.
+    """
     body = FNS["Lib_DeleteFootprintPrimitives"]
-    fp = body.index("Target.RemovePCBObject(Prim)")
-    board = body.index("PcbLib.Board.RemovePCBObject(Prim)")
-    assert fp < board, "footprint first: the board removal may free it"
-    assert "PcbLib.CurrentComponent := Target" in body
+    assert "Target.RemovePCBObject(Prim)" in body
+    assert "Board.RemovePCBObject" not in body
+    assert "PcbLib.CurrentComponent :=" not in body
 
 
 # ---------------------------------------------------------------------------

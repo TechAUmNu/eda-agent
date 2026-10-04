@@ -1,4 +1,4 @@
-# Release verification: 2026.10.04.6
+# Release verification: 2026.10.04.7
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -46,7 +46,7 @@ works elsewhere cannot be an undeclared identifier:
 | 24, region outline in a footprint | `SetOutlineContour` | yes, `PCB_PlaceRegion` | medium, first use in a library |
 | 24, fill in a footprint | `X1Location` | yes, `PCB_PlaceFill` | low |
 | 24, choosing the footprint | `CurrentComponent` | yes, `Lib_SetDesignator` | low |
-| 24, delete from the library board | `RemovePCBObject` | yes, `PCBGeneric.pas` on boards | medium, first use on a library board |
+| 24, delete from the library board | `RemovePCBObject` | yes, `PCBGeneric.pas` on boards | medium, first use on a library board; reached only with `remove_from_board=true` |
 | 25, component kind | `ComponentKind` | yes, `Gen_SetNetTie` | low for the net-tie kinds, medium for the five written by ordinal |
 | 26, pin properties | `Designator` | yes, `Lib_AddPins` | low |
 | 27, current model | `IsCurrent` | yes, `Lib_NormalizeImplementations` | low |
@@ -73,6 +73,38 @@ rotation is non-zero, so every other 3D step stays clear of it.
 Two steps now write `StandoffHeight` and neither has run, so they do not
 vouch for each other: steps 5 and 15 share one unproven identifier. Run
 whichever is easier and the other drops to a behavioural check.
+
+### What a default call can never reach
+
+Every unproven member and every unproven SEQUENCE in this release sits
+behind an argument that has to be passed on purpose. A call with default
+arguments makes only calls that have run live before, so an ordinary
+session cannot stop the polling loop on one of these. Keep each one
+opt-in until its step has passed, and only then consider flipping a
+default:
+
+| Opt-in | What it reaches | Step |
+|---|---|---|
+| a non-zero rotation on `lib_link_3d_model` / `pcb_place_3d_body` | `IPCB_Model.SetState`, `GetState` | 5, 15 |
+| `model_state=true` on `lib_get_footprint_bodies` (default false) | `IPCB_Model.ModelType`, `FileName`, `Rotation`, `GetState` | 22, after 5 |
+| `remove_from_board=true` on `lib_delete_footprint_primitives`, `lib_delete_footprint_pads`, `lib_add_footprint_text`, `lib_link_3d_model` with `replace`, `lib_auto_link_3d_models` with `replace` | `RemovePCBObject` on the library board, and making the footprint current first | 24 |
+| `keepout=true` on a fill, or `kind=keepout` on a region, NOT on KeepOutLayer | the `IsKeepout` write | 24 |
+| `kind=cutout` on a footprint region | the `Kind := eRegionKind_Cutout` write | 16, 24 |
+
+Both writes in the last two rows are read back (`keepout_applied`,
+`kind_applied`), so the first live call that reaches them says whether
+they took, if it does not stop the loop. If one does stop it, the fix is
+to refuse that argument in the Python payload builder, not to retry.
+
+Two READS on default paths are new at their call site but not new
+identifiers, so they cannot fault as undeclared: `Component.ComponentKind`
+in `lib_get_component_details` (written by `Gen_SetNetTie`), and
+`Body.Model` in `Body3D_GetModel` (written by every body placement here).
+Only their read accessors are unexercised, and each read sits in a `Try`.
+Confirm both on any live call you make anyway: `lib_get_component_details`
+on a symbol answers `component_kind` and `component_kind_ordinal` with a
+plausible value, and `lib_get_footprint_bodies` with `model_state=true`
+(after step 5) gives each body a `model` object rather than null.
 
 ### What this release adds, and why it is a different kind of risk
 
@@ -232,7 +264,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.04.6`, `version_match` =
+Expect `altium_script_version` = `2026.10.04.7`, `version_match` =
 `true`, and `mcp_server_version` = `0.6.1`.
 
 Those are two different versions and they fail differently.
@@ -1285,17 +1317,26 @@ footprint's `RemovePCBObject`, exactly as `lib_delete_footprint_primitives`
 does; `align` moves with `MoveByXY` from the box `BoundingRectangle`
 reports; and `lib_get_footprint_bodies` only reads. Its `model_state`
 reads (`ModelType`, `FileName`, `Rotation`, `GetState`) are as unproven
-as step 5's, so run step 5 first, and use `model_state=false` if one of
-them stops the loop.
+as step 5's, which is why `model_state` is OFF unless passed as true: a
+default list touches none of them. Run step 5 first, and only then
+`model_state=true`. If that stops the loop, the bridge needs a manual
+restart, and the default list still works.
 
-On a copy of a library whose footprints came from the IPC generator:
+First the default list, which reads no model at all:
 
     lib_get_footprint_bodies  library_path <copy.PcbLib>
+
+Every IPC footprint must show `bodies` above 0 and the reply
+`model_state: false`. Then, after step 5 has passed, on a copy of a
+library whose footprints came from the IPC generator:
+
+    lib_get_footprint_bodies  library_path <copy.PcbLib>  model_state true
 
 Every IPC footprint must show `extruded` above 0 and `generic` 0. Then
 one footprint in detail:
 
     lib_get_footprint_bodies  library_path <copy.PcbLib>  footprint_name <fp>
+                              model_state true
 
 The generator's body is centred on the land, so its `bbox` and
 `frame.pads_bbox` must be roughly concentric about 0, 0. If both are far
@@ -1311,10 +1352,13 @@ Then the swap:
 
 `replaced.removed_bodies` must equal the body count read above,
 `replaced.remaining_before_add` must be 0, and `body.bbox` must now be
-centred on the origin. Save, `lib_reload_library`, list the footprint
-again: one `generic` body and no `extruded` one. If the placeholder is
-back after the reload, the footprint-side removal is not enough on this
-build and the library board needs the same `RemovePCBObject`; record it.
+centred on the origin. `replaced.board_removal` must read
+`{requested: false}`: the replace removes from the footprint only. Save,
+`lib_reload_library`, list the footprint again: one `generic` body and
+no `extruded` one. If the placeholder is back after the reload, the
+footprint-side removal is not enough on this build; repeat on a fresh
+copy with `remove_from_board true` (step 24's measurement) and record
+both replies.
 
 Run `align pads` on a footprint whose land is NOT centred on its origin
 (a connector), and confirm `body.bbox` centres on `frame.pads_bbox`
@@ -1364,10 +1408,11 @@ On a scratch .PcbLib only:
 6. `lib_delete_footprint_pads` on "3" index 0 with `confirm: true`. The
    library was reloaded in step 5, so expect `removed: 1`, `still_listed: 0`,
    `double_listed: 0`. Then add one more pad "9" and delete it WITHOUT a
-   reload: that pad is listed twice, so expect `double_listed: 1`. Save,
-   reload, read: neither pad may come back. If one does, removing it from
-   the footprint is not enough and the library board's registration has to
-   be removed too; record which one.
+   reload: that pad is listed twice, so expect `double_listed: 1`, and
+   `board_removal: {requested: false}`. Save, reload, read: neither pad
+   may come back. If one does, removing it from the footprint is not
+   enough; step 24's delete measurement says whether `remove_from_board`
+   cures it. Record which pad came back.
 7. `lib_set_footprint_description` once with `footprint_name` and once with
    `descriptions` for two footprints. Save, reload, `lib_get_footprints`: the
    new text must be on disk.
@@ -1414,10 +1459,21 @@ Then a cutout, whose `Kind` write is step 16's:
 `app_save_all`, `lib_reload_library`, and `lib_probe_footprint` with the
 same footprint: every fill and region must still be there, once.
 
+REGISTRATION ORDER. `RegisterLibPrimitive` now emits the four calls in
+the order `Lib_AddFootprintPad` carries inline (footprint add, board
+add, then both broadcasts); the version before this interleaved them.
+Every track, arc, text, fill and region add above runs through it, so
+the save-reload-probe of fills and regions is also the check that the
+order persists, exactly once.
+
 THE DOUBLED TEXT. Measured 2026-10-03: one `lib_add_footprint_text`
 call, two identical texts. Add one text to a scratch footprint and read
 the reply: `new_objects` must be 1, `group_yields` 1 or 2,
-`duplicates_found` 0. Then `app_save_all`, `lib_reload_library`, and
+`duplicates_found` 0, `duplicate_cleanup` `none`. Any other
+`duplicate_cleanup` than `none` or `removed` means the guard refused to
+clean up, because the created text's address could not be read or the
+footprint did not list it; record the reply. Then `app_save_all`,
+`lib_reload_library`, and
 `lib_probe_footprint`: the string must appear exactly once. If it
 appears twice with `duplicates_found` 0, the copy is made at save time,
 not in the session; repeat on a fresh footprint with
@@ -1425,15 +1481,45 @@ not in the session; repeat on a fresh footprint with
 make whichever persists once the default in `RegisterLibPrimitive`'s
 caller.
 
-Then the delete. `lib_delete_footprint_primitives` now removes from the
-library board as well as the footprint. Delete the text just added,
-`app_save_all`, `lib_reload_library`, probe: it must be gone without a
-second delete. Record the result beside steps 22 and 23: the 3D
-`replace` and `lib_delete_footprint_pads` still remove from the
-footprint only, on purpose, until this run shows whether the second
-removal is needed and safe. If it is, give them the same footprint-first,
-board-second removal; if the bridge stops here instead, drop the board
-removal from `Lib_DeleteFootprintPrimitives` and `RemoveLibTextByAddress`.
+THE DELETE, AND WHETHER THE LIBRARY BOARD HALF IS NEEDED. Every library
+removal (`lib_delete_footprint_primitives`, `lib_delete_footprint_pads`,
+the 3D `replace`, the duplicate-text cleanup) removes from the FOOTPRINT
+only by default, the removal that has run live. The library-board half
+is behind `remove_from_board=true` on each of them, through one shared
+helper (`LibBoardRemoveEntries`) with one rule: the footprint is made
+current and read back first, the footprint half runs as usual, and only
+then is the board swept by address, never for an object the footprint
+still lists. Nobody has watched that run. Two premises in this code
+contradicted each other until now (a comment said a footprint-only
+removal comes back after save and reload, while the pad and 3D paths
+relied on it), and this measurement is what settles them. On a scratch
+footprint, `app_checkpoint` first, `app_ping` after every call:
+
+1. Add two texts, "A" and "B", WITHOUT a reload in between (each is
+   listed twice). Then
+   `lib_delete_footprint_primitives  footprint_name <fp>  object_type string
+   layer TopOverlay  confirm true` with NO `remove_from_board`. Expect
+   `removed: 2`, `double_listed: 2`, `still_listed: 0`,
+   `board_removal: {requested: false}`. `app_save_all`,
+   `lib_reload_library`, probe. RECORD whether the texts came back.
+2. If they did NOT come back, the footprint half is enough: the board
+   half is unnecessary, keep it opt-in (or delete it), and the
+   contradiction resolves in favour of the pad and 3D paths. Stop here.
+3. If they DID come back, the footprint half is not enough. Add two new
+   texts the same way and delete them with `remove_from_board true`.
+   Read `board_removal`: `made_current: true`, `objects: 2`, and
+   `listed_before` is the number the library board still listed after
+   the footprint removal (2 confirms the premise; 0 means the board does
+   not hold them and something else brings them back). `removed` and
+   `still_listed: 0` say the board let go. `app_ping`, then
+   `app_save_all`, `lib_reload_library`, probe: they must be gone.
+4. If step 3 stops the loop, record the last reply and do not retry: the
+   board removal stays opt-in for good, and the documented workaround
+   (save, reload, delete again) stands.
+
+Only a passing step 3 justifies making `remove_from_board` the default,
+and then for all four paths at once, by changing the one default in the
+Python tools; the Pascal already shares the helper.
 
 Sub-mil: `lib_add_footprint_tracks` with `x1: 12.5`, and
 `lib_add_footprint_arc` with `radius: 12.5`, must read back 12.5 through

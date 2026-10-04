@@ -1653,11 +1653,20 @@ End;
 {..............................................................................}
 { RegisterLibPrimitive - the registration every footprint primitive needs.     }
 {                                                                              }
-{ The same four calls Lib_AddFootprintPad carries inline, and for the same     }
-{ measured reason: Footprint.AddPCBObject alone leaves an object that every    }
-{ read reports and the save discards. It has to be added to the library's      }
-{ backing Board as well, and the registration broadcast to both. Factored out  }
-{ so a new primitive kind cannot be written with three of the four.            }
+{ The same four calls Lib_AddFootprintPad carries inline, IN THE SAME ORDER,   }
+{ and for the same measured reason: Footprint.AddPCBObject alone leaves an     }
+{ object that every read reports and the save discards. It has to be added to }
+{ the library's backing Board as well, and the registration broadcast to both. }
+{ Factored out so a new primitive kind cannot be written with three of the    }
+{ four.                                                                        }
+{                                                                              }
+{ 'both' is BOTH ADDS, THEN BOTH BROADCASTS: footprint add, board add,        }
+{ footprint broadcast, board broadcast. That is the order pads, tracks and    }
+{ arcs were measured persisting with, and the one Lib_AddFootprintPad(s) and   }
+{ Lib_Link3DModel still carry inline. An earlier version of this helper       }
+{ interleaved them (add, broadcast, add, broadcast): every call proven, the   }
+{ ORDER never run, under every track, arc, text, fill and region add. A review }
+{ caught it; keep the order.                                                   }
 {                                                                              }
 { Mode selects which half runs, and exists ONLY to settle one live question:   }
 { text was measured persisting twice after one call (2026-10-03), while pads  }
@@ -1671,14 +1680,25 @@ End;
 {..............................................................................}
 Procedure RegisterLibPrimitive(PcbLib : IPCB_Library; Footprint : IPCB_LibComponent; Prim : IPCB_Primitive; Mode : String);
 Begin
-    If (Mode = 'both') Or (Mode = 'footprint') Then
+    If Mode = 'both' Then
     Begin
+        Footprint.AddPCBObject(Prim);
+        PcbLib.Board.AddPCBObject(Prim);
+        PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
+            c_Broadcast, PCBM_BoardRegisteration, Prim.I_ObjectAddress);
+        PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress,
+            c_Broadcast, PCBM_BoardRegisteration, Prim.I_ObjectAddress);
+    End
+    Else If Mode = 'footprint' Then
+    Begin
+        { Diagnostic half only (registration=footprint). }
         Footprint.AddPCBObject(Prim);
         PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
             c_Broadcast, PCBM_BoardRegisteration, Prim.I_ObjectAddress);
-    End;
-    If (Mode = 'both') Or (Mode = 'board') Then
+    End
+    Else If Mode = 'board' Then
     Begin
+        { Diagnostic half only (registration=board). }
         PcbLib.Board.AddPCBObject(Prim);
         PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress,
             c_Broadcast, PCBM_BoardRegisteration, Prim.I_ObjectAddress);
@@ -1722,56 +1742,297 @@ Begin
 End;
 
 {..............................................................................}
-{ RemoveLibTextByAddress - take ONE text object out of a footprint, from both  }
-{ the footprint and the library board, the mirror of RegisterLibPrimitive.     }
+{ REMOVING PRIMITIVES FROM A PCBLIB FOOTPRINT: ONE RULE FOR EVERY DELETE.      }
+{                                                                              }
+{ Four paths remove library primitives: lib_delete_footprint_primitives,       }
+{ lib_delete_footprint_pads, lib_link_3d_model replace=true (Body3D_RemoveAll) }
+{ and the duplicate cleanup in lib_add_footprint_text. They share one rule.   }
+{                                                                              }
+{ 1. THE FOOTPRINT HALF IS THE DEFAULT, AND THE ONLY HALF THAT HAS RUN LIVE.   }
+{    Footprint.RemovePCBObject on a primitive a still-open group iterator has  }
+{    just yielded, one match per pass (the measured shape, recorded in        }
+{    Lib_DeleteFootprintPrimitives). Each caller keeps that call INLINE, in   }
+{    the shape that ran, so the default path makes the Altium calls the base  }
+{    build made and no others.                                                 }
+{                                                                              }
+{ 2. THE LIBRARY-BOARD HALF IS OPT-IN (remove_from_board=true) and runs only   }
+{    through LibBoardRemoveEntries below. UNMEASURED: no live session has run  }
+{    it. It exists because of the owner's report (2026-10-03) that a           }
+{    generated footprint "ignores primitive deletes until the library is       }
+{    reloaded", and the recipe "delete, reload, delete again". That fits an    }
+{    object whose library-board registration outlives a footprint-only         }
+{    removal and is written back by the save. It fits other causes too, and a  }
+{    removal sequence nobody has watched does not become the default of a      }
+{    delete tool that worked. RELEASE_VERIFICATION step 24 settles it with one }
+{    delete, save and reload; the board_removal reply object is what it reads. }
+{                                                                              }
+{ 3. THE FOOTPRINT IS MADE CURRENT ONLY FOR THE BOARD HALF, verified, and      }
+{    before anything is removed (LibMakeCurrentVerified). The library board   }
+{    holds the CURRENT footprint's primitives, so walking it for a footprint  }
+{    that is not current would find nothing and report that as a clean       }
+{    board. A footprint-only removal leaves CurrentComponent alone, as the    }
+{    base build did. lib_link_3d_model and lib_add_footprint_text make the    }
+{    footprint current anyway, because they ADD to it.                        }
+{                                                                              }
+{ 4. THE BOARD HALF NEVER TOUCHES AN OBJECT THE FOOTPRINT STILL LISTS, and     }
+{    hands RemovePCBObject only what a fresh board iterator has just yielded  }
+{    by address. The footprint is finished with an object before the board    }
+{    sees it, so the second footprint entry of a double-registered primitive  }
+{    is never handed back after the board released it. The first version of  }
+{    the board removal interleaved the two (footprint, board, then the        }
+{    footprint's second entry), and a review flagged exactly that.            }
+{..............................................................................}
+
+{ Make Footprint the library's current one and READ THE SWITCH BACK: the same  }
+{ property write and comparison ResolveLibFootprint and Lib_SetDesignator      }
+{ make. False means the switch did not take, and the caller refuses.           }
+Function LibMakeCurrentVerified(PcbLib : IPCB_Library; Footprint : IPCB_LibComponent) : Boolean;
+Begin
+    Result := False;
+    If (PcbLib = Nil) Or (Footprint = Nil) Then Exit;
+    If PcbLib.CurrentComponent <> Footprint Then
+    Begin
+        Try PcbLib.CurrentComponent := Footprint; Except End;
+    End;
+    Try Result := (PcbLib.CurrentComponent = Footprint); Except Result := False; End;
+End;
+
+{ Record one removed object for the board half, as 'oid:addr|', once per      }
+{ address. Oid is the primitive's ObjectId read into an Integer, the way      }
+{ PCB_Unroute reads it, so the board walk can filter on its kind. The        }
+{ ':' in front of the address keeps 1234 from matching inside 11234.          }
+Function LibAddRemovalEntry(Entries : String; Oid : Integer; Addr : String) : String;
+Begin
+    Result := Entries;
+    If Addr = '' Then Exit;
+    If Pos(':' + Addr + '|', Entries) = 0 Then
+        Result := Entries + IntToStr(Oid) + ':' + Addr + '|';
+End;
+
+{ Does the library BOARD list the object at this address? A READ-ONLY walk in }
+{ the board iterator shape ProcessPCBBoardObjects uses on a PcbDoc: the three  }
+{ filters, then compare addresses. Board is PcbLib.Board, an IPCB_Board, so    }
+{ every member here is one the PcbDoc paths already call.                     }
+Function LibBoardListsAddress(Board : IPCB_Board; Oid : Integer; Addr : String) : Boolean;
+Var
+    Iter : IPCB_BoardIterator;
+    Obj : IPCB_Primitive;
+    ThisAddr : String;
+Begin
+    Result := False;
+    If (Board = Nil) Or (Addr = '') Then Exit;
+    Iter := Board.BoardIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(Oid));
+        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_Method(eProcessAll);
+        Obj := Iter.FirstPCBObject;
+        While Obj <> Nil Do
+        Begin
+            ThisAddr := '';
+            Try ThisAddr := IntToStr(Obj.I_ObjectAddress); Except End;
+            If ThisAddr = Addr Then
+            Begin
+                Result := True;
+                Break;
+            End;
+            Obj := Iter.NextPCBObject;
+        End;
+    Finally
+        Board.BoardIterator_Destroy(Iter);
+    End;
+End;
+
+{ LibBoardRemoveEntries - THE OPT-IN BOARD HALF. UNMEASURED (rule 2 above).   }
+{                                                                              }
+{ For each recorded object the footprint no longer lists:                     }
+{   * a fresh board iterator walks to it BY ADDRESS and stops there;           }
+{   * it is removed WHILE THAT ITERATOR IS OPEN, and the iterator destroyed    }
+{     after. The PcbDoc paths destroy first and remove after                   }
+{     (PCB_DeleteInvalidObjects), which is proven on a board, but these are   }
+{     LIBRARY primitives, and for those Lib_DeleteFootprintPrimitives          }
+{     measured that an iterator's destroy can leave what it yielded dangling.  }
+{     Removing before the destroy is safe under either behaviour; destroying  }
+{     first is safe under only one;                                            }
+{   * the removal itself is PCB_DeleteObject's: broadcast, then RemovePCBObject;}
+{   * at most two removals per object, in case the board lists it twice the   }
+{     way the footprint does, then a read-only walk says whether it is gone.  }
+{                                                                              }
+{ Skip is a '|addr|addr|' set of objects the footprint STILL lists. Those are }
+{ counted and never touched (rule 4). MadeCurrent false runs nothing: the     }
+{ board would not hold the footprint's primitives (rule 3). The caller owns   }
+{ PreProcess / PostProcess.                                                    }
+{                                                                              }
+{ Returns the board_removal JSON object for the reply. Removed is handed back }
+{ too, so the caller knows whether the library changed.                       }
+Function LibBoardRemoveEntries(Board : IPCB_Board; Entries : String; Skip : String;
+                               MadeCurrent : Boolean; Var Removed : Integer) : String;
+Var
+    Iter : IPCB_BoardIterator;
+    Obj : IPCB_Primitive;
+    Rest, Token, Addr, ThisAddr, NotRun : String;
+    BarPos, ColonPos, Oid, Pass, Objects, Listed, Still, Skipped, Calls : Integer;
+    Hit, Saw, Took : Boolean;
+Begin
+    Removed := 0;
+    Objects := 0;
+    Listed := 0;
+    Still := 0;
+    Skipped := 0;
+    Calls := 0;
+    NotRun := '';
+    If Board = Nil Then NotRun := 'no library board'
+    Else If Not MadeCurrent Then NotRun := 'footprint not current';
+    Rest := Entries;
+    While Rest <> '' Do
+    Begin
+        BarPos := Pos('|', Rest);
+        If BarPos = 0 Then Break;
+        Token := Copy(Rest, 1, BarPos - 1);
+        Rest := Copy(Rest, BarPos + 1, Length(Rest));
+        ColonPos := Pos(':', Token);
+        If ColonPos = 0 Then Continue;
+        Oid := StrToIntDef(Copy(Token, 1, ColonPos - 1), -1);
+        Addr := Copy(Token, ColonPos + 1, Length(Token));
+        If (Oid < 0) Or (Addr = '') Then Continue;
+        Objects := Objects + 1;
+        If NotRun <> '' Then Continue;
+        If Pos('|' + Addr + '|', Skip) > 0 Then
+        Begin
+            Skipped := Skipped + 1;
+            Continue;
+        End;
+        Saw := False;
+        Took := False;
+        For Pass := 1 To 2 Do
+        Begin
+            Hit := False;
+            Iter := Board.BoardIterator_Create;
+            Try
+                Iter.AddFilter_ObjectSet(MkSet(Oid));
+                Iter.AddFilter_LayerSet(AllLayers);
+                Iter.AddFilter_Method(eProcessAll);
+                Obj := Iter.FirstPCBObject;
+                While Obj <> Nil Do
+                Begin
+                    ThisAddr := '';
+                    Try ThisAddr := IntToStr(Obj.I_ObjectAddress); Except End;
+                    If ThisAddr = Addr Then
+                    Begin
+                        Hit := True;
+                        Break;
+                    End;
+                    Obj := Iter.NextPCBObject;
+                End;
+                If Hit And (Obj <> Nil) Then
+                Begin
+                    Saw := True;
+                    Try
+                        PCBServer.SendMessageToRobots(Board.I_ObjectAddress,
+                            c_Broadcast, PCBM_BoardRegisteration, Obj.I_ObjectAddress);
+                        Board.RemovePCBObject(Obj);
+                        Took := True;
+                        Calls := Calls + 1;
+                    Except
+                        Hit := False;
+                    End;
+                End;
+            Finally
+                Board.BoardIterator_Destroy(Iter);
+            End;
+            If Not Hit Then Break;
+        End;
+        If Saw Then Listed := Listed + 1;
+        If Took Then Removed := Removed + 1;
+        If LibBoardListsAddress(Board, Oid, Addr) Then Still := Still + 1;
+    End;
+    Result := JsonObj(JsonBool('requested', True) + ','
+        + JsonBool('made_current', MadeCurrent) + ','
+        + JsonStr('not_run', NotRun) + ','
+        + JsonInt('objects', Objects) + ','
+        + JsonInt('listed_before', Listed) + ','
+        + JsonInt('removed', Removed) + ','
+        + JsonInt('remove_calls', Calls) + ','
+        + JsonInt('still_listed', Still) + ','
+        + JsonInt('skipped_still_in_footprint', Skipped));
+End;
+
+{..............................................................................}
+{ RemoveLibTextByAddress - take ONE text object out of a footprint: the        }
+{ duplicate cleanup of Lib_AddFootprintText.                                   }
+{                                                                              }
+{ FOOTPRINT ONLY, by rule 1 above. This used to remove from the library board }
+{ as well, automatically, whenever a duplicate was found: the unmeasured      }
+{ sequence on a path nobody asked to run. The board half now runs only when   }
+{ the caller passed remove_from_board, through LibBoardRemoveEntries, and     }
+{ Entries records what this removed for it.                                   }
 {                                                                              }
 { Removed WHILE THE ITERATOR IS OPEN, after the walk has stopped at the match: }
 { Lib_DeleteFootprintPrimitives measured that GroupIterator_Destroy releases   }
 { what the iterator handed out, so removing after the destroy dereferenced a   }
 { dangling object inside ScriptingSystem.DLL. The walk never resumes after the }
 { removal, so the skip-entries hazard of removing mid-walk cannot arise.       }
+{ Up to two passes, each with a fresh iterator: a text added this session is  }
+{ listed twice until a reload, one listing per pass.                          }
 {                                                                              }
-{ FOOTPRINT FIRST, BOARD SECOND. The footprint removal is the one this         }
-{ codebase already performs. While the board still holds the object it cannot  }
-{ have been freed, so handing it to Board.RemovePCBObject afterwards is safe;  }
-{ the reverse order could hand a freed object to the footprint. Each is in its }
-{ own Try because a double-registered object may already be gone from the      }
-{ second owner.                                                                }
+{ BRACKETED with PCBM_BeginModify / PCBM_EndModify on the footprint, as every  }
+{ other footprint removal here is. The first version had no bracket, and      }
+{ Lib_SetDesignator measured that an unbracketed footprint edit can be        }
+{ dropped when the component is re-serialised on save.                        }
 {                                                                              }
 { The caller owns PreProcess / PostProcess.                                     }
 {..............................................................................}
-Function RemoveLibTextByAddress(PcbLib : IPCB_Library; Footprint : IPCB_LibComponent; Addr : String) : Boolean;
+Function RemoveLibTextByAddress(Footprint : IPCB_LibComponent; Addr : String; Var Entries : String) : Boolean;
 Var
     GrpIter : IPCB_GroupIterator;
     Prim : IPCB_Primitive;
     ThisAddr : String;
+    Pass, Oid : Integer;
+    Hit : Boolean;
 Begin
     Result := False;
     If (Footprint = Nil) Or (Addr = '') Then Exit;
-    GrpIter := Footprint.GroupIterator_Create;
+    PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
+        c_Broadcast, PCBM_BeginModify, c_NoEventData);
     Try
-        GrpIter.AddFilter_ObjectSet(MkSet(eTextObject));
-        Prim := GrpIter.FirstPCBObject;
-        While Prim <> Nil Do
+        For Pass := 1 To 2 Do
         Begin
-            ThisAddr := '';
-            Try ThisAddr := IntToStr(Prim.I_ObjectAddress); Except End;
-            If ThisAddr = Addr Then Break;
-            Prim := GrpIter.NextPCBObject;
-        End;
-        If Prim <> Nil Then
-        Begin
+            Hit := False;
+            GrpIter := Footprint.GroupIterator_Create;
             Try
-                Footprint.RemovePCBObject(Prim);
-                Result := True;
-            Except End;
-            Try
-                PcbLib.Board.RemovePCBObject(Prim);
-                Result := True;
-            Except End;
+                GrpIter.AddFilter_ObjectSet(MkSet(eTextObject));
+                Prim := GrpIter.FirstPCBObject;
+                While Prim <> Nil Do
+                Begin
+                    ThisAddr := '';
+                    Try ThisAddr := IntToStr(Prim.I_ObjectAddress); Except End;
+                    If ThisAddr = Addr Then
+                    Begin
+                        Hit := True;
+                        Break;
+                    End;
+                    Prim := GrpIter.NextPCBObject;
+                End;
+                If Hit And (Prim <> Nil) Then
+                Begin
+                    Oid := -1;
+                    Try Oid := Prim.ObjectId; Except Oid := -1; End;
+                    Try
+                        Footprint.RemovePCBObject(Prim);
+                        Result := True;
+                        Entries := LibAddRemovalEntry(Entries, Oid, Addr);
+                    Except
+                        Hit := False;
+                    End;
+                End;
+            Finally
+                Footprint.GroupIterator_Destroy(GrpIter);
+            End;
+            If Not Hit Then Break;
         End;
     Finally
-        Footprint.GroupIterator_Destroy(GrpIter);
+        PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
+            c_Broadcast, PCBM_EndModify, c_NoEventData);
     End;
 End;
 
@@ -2523,8 +2784,14 @@ End;
 {   2. Every text object the call CREATED is counted by address (new_objects), }
 {      and how often the group iterator yields it (group_yields; 2 is the      }
 {      measured double registration, harmless, gone after a reload). A second }
-{      NEW object carrying the same string is removed from the footprint and   }
-{      the board, and counted in duplicates_removed.                          }
+{      NEW object carrying the same string is removed from the FOOTPRINT and   }
+{      counted in duplicates_removed; the library board too only with         }
+{      remove_from_board=true (see REMOVING PRIMITIVES FROM A PCBLIB          }
+{      FOOTPRINT). NOTHING IS REMOVED unless the object this call created was }
+{      read by address AND is listed by the footprint: an unread address left }
+{      NewAddr empty, every new text with the string then looked like a       }
+{      duplicate, and the cleanup would have taken the new text with them    }
+{      while reporting success. duplicate_cleanup says which way it went.     }
 {   3. registration = both | footprint | board selects which half of the      }
 {      registration runs, so a live session can find the one that persists    }
 {      exactly once without a redeploy. Default both, unchanged.              }
@@ -2545,12 +2812,14 @@ End;
 {   library_path           - optional .PcbLib to focus first                  }
 {   component_name         - optional footprint name; made current, verified  }
 {   registration           - both (default) | footprint | board               }
+{   remove_from_board      - 'true' also takes a removed duplicate off the    }
+{                            library board (opt-in, unmeasured)                }
 Function Lib_AddFootprintText(Params : String; RequestId : String) : String;
 Var
     TextStr, LayerStr, FlagStr, RespJson, ErrCode, Why : String;
     MirrorStr, RegMode, BeforeAddrs, AfterAddrs, NewAddr, Rest, Addr : String;
-    RawStr, ExtraAddrs, LayerName : String;
-    Mirror, UseTTFont : Boolean;
+    RawStr, ExtraAddrs, LayerName, Cleanup, Entries, BoardJson, StillAddrs : String;
+    Mirror, UseTTFont, FromBoard, MadeCurrent : Boolean;
     PcbLib : IPCB_Library;
     Footprint : IPCB_LibComponent;
     Text : IPCB_Text;
@@ -2559,6 +2828,7 @@ Var
     Layer : TLayer;
     X, Y, Size, Width, Rotation : Double;
     BeforeYields, NewObjects, NewYields, DupFound, Removed, BarPos : Integer;
+    StillYields, BoardRemoved : Integer;
 Begin
     TextStr := ExtractJsonValue(Params, 'text');
     If TextStr = '' Then
@@ -2580,6 +2850,7 @@ Begin
     { eBottomOverlay without MirrorFlag, and eTopOverlay with it.          }
     MirrorStr := ExtractJsonValue(Params, 'mirror');
     Mirror := (MirrorStr = 'true') Or (MirrorStr = 'True') Or (MirrorStr = '1');
+    FromBoard := (LowerCase(Trim(ExtractJsonValue(Params, 'remove_from_board'))) = 'true');
     RegMode := LowerCase(Trim(ExtractJsonValue(Params, 'registration')));
     If RegMode = '' Then RegMode := 'both';
     If (RegMode <> 'both') And (RegMode <> 'footprint') And (RegMode <> 'board') Then
@@ -2682,12 +2953,29 @@ Begin
         Footprint.GroupIterator_Destroy(GrpIter);
     End;
 
-    { Remove the duplicates, one per pass, each from both owners. Only     }
+    { Remove the duplicates, footprint only unless remove_from_board. Only }
     { objects that did not exist before this call and carry this call's    }
     { string can be here, so nothing the footprint already held is touched. }
+    {                                                                       }
+    { AND ONLY WHEN THE CREATED TEXT IS KNOWN TO SURVIVE. "Not the one     }
+    { created here" is decided by NewAddr. If that read raised, NewAddr is }
+    { '' and the created text itself passes the duplicate test; if the     }
+    { footprint does not list the created text, there is no surviving copy }
+    { to keep. Either way duplicates_found is still counted and reported,  }
+    { and nothing is removed.                                              }
     Removed := 0;
-    If ExtraAddrs <> '' Then
+    BoardRemoved := 0;
+    Entries := '';
+    BoardJson := JsonObj(JsonBool('requested', FromBoard));
+    If ExtraAddrs = '' Then
+        Cleanup := 'none'
+    Else If NewAddr = '' Then
+        Cleanup := 'skipped: the created text''s address could not be read'
+    Else If Pos('|' + NewAddr + '|', AfterAddrs) = 0 Then
+        Cleanup := 'skipped: the footprint does not list the created text'
+    Else
     Begin
+        Cleanup := 'removed';
         PCBServer.PreProcess;
         Try
             Rest := ExtraAddrs;
@@ -2698,10 +2986,26 @@ Begin
                 Addr := Copy(Rest, 1, BarPos - 1);
                 Rest := Copy(Rest, BarPos + 1, Length(Rest));
                 If Addr = '' Then Continue;
-                If RemoveLibTextByAddress(PcbLib, Footprint, Addr) Then Inc(Removed);
+                If Addr = NewAddr Then Continue;
+                If RemoveLibTextByAddress(Footprint, Addr, Entries) Then Inc(Removed);
             End;
         Finally
             PCBServer.PostProcess;
+        End;
+
+        { The opt-in board half, after the footprint read-back so it never }
+        { touches a text the footprint still lists.                        }
+        If FromBoard And (Entries <> '') Then
+        Begin
+            StillAddrs := LibTextAddresses(Footprint, StillYields);
+            MadeCurrent := LibMakeCurrentVerified(PcbLib, Footprint);
+            PCBServer.PreProcess;
+            Try
+                BoardJson := LibBoardRemoveEntries(PcbLib.Board, Entries,
+                    StillAddrs, MadeCurrent, BoardRemoved);
+            Finally
+                PCBServer.PostProcess;
+            End;
         End;
     End;
 
@@ -2723,6 +3027,8 @@ Begin
         ',"group_yields":' + IntToStr(NewYields) +
         ',"duplicates_found":' + IntToStr(DupFound) +
         ',"duplicates_removed":' + IntToStr(Removed) +
+        ',"duplicate_cleanup":"' + EscapeJsonString(Cleanup) + '"' +
+        ',"board_removal":' + BoardJson +
         ',"pending_save":true}';
     Result := BuildSuccessResponse(RequestId, RespJson);
 End;
@@ -5169,7 +5475,10 @@ End;
 { That makes an undeclared identifier unlikely, not impossible, and it cannot }
 { be caught. So each unproven member sits in a function of its own and is     }
 { reached only when the caller asked for what it gives: a plain link with no  }
-{ rotation, and a body list with model_state=false, touch none of them.       }
+{ rotation, and a body list without model_state=true, touch none of them. A   }
+{ fault in one would stop the polling loop, not just the call, so every one   }
+{ of these reads stays OPT-IN until RELEASE_VERIFICATION step 5 has passed on }
+{ a live session.                                                              }
 {                                                                              }
 { Body.x and Body.y are deliberately NOT used. Neither IPCB_ComponentBody nor }
 { its ancestors IPCB_Region and IPCB_Primitive declare a position in the AD26 }
@@ -5352,15 +5661,19 @@ End;
 {                                                                              }
 { Returns the number of RemovePCBObject calls that returned; Distinct is the  }
 { number of different bodies they removed.                                    }
+{                                                                              }
+{ FOOTPRINT ONLY, under the shared rule (REMOVING PRIMITIVES FROM A PCBLIB     }
+{ FOOTPRINT, beside RemoveLibTextByAddress). Entries records each removed     }
+{ body for the opt-in board half, which Lib_Link3DModel runs only when asked. }
 Function Body3D_RemoveAll(Footprint : IPCB_LibComponent;
-                          Var Distinct : Integer) : Integer;
+                          Var Distinct : Integer; Var Entries : String) : Integer;
 Var
     GrpIter : IPCB_GroupIterator;
     Prim : IPCB_Primitive;
     Seen : TStringList;
     Addr, LastAddr : String;
     Found : Boolean;
-    I, SameRun : Integer;
+    I, SameRun, Oid : Integer;
 Begin
     Result := 0;
     Distinct := 0;
@@ -5387,12 +5700,17 @@ Begin
                     LastAddr := Addr;
                     If SameRun <= 2 Then
                     Begin
+                        Oid := -1;
+                        Try Oid := Prim.ObjectId; Except Oid := -1; End;
                         Try
                             Footprint.RemovePCBObject(Prim);
                             Result := Result + 1;
                             Found := True;
                             If (Addr <> '') And (Seen.IndexOf(Addr) < 0) Then
+                            Begin
                                 Seen.Add(Addr);
+                                Entries := LibAddRemovalEntry(Entries, Oid, Addr);
+                            End;
                         Except
                             Found := False;
                         End;
@@ -5408,6 +5726,34 @@ Begin
     Finally
         Distinct := Seen.Count;
         Try Seen.Free; Except End;
+    End;
+End;
+
+{ Every distinct 3D body address on a footprint, as '|addr|addr|': the read-  }
+{ back that tells the board half which removed bodies the footprint still    }
+{ lists. Body3D_CountBodies's walk, keeping the addresses.                   }
+Function Body3D_BodyAddresses(Footprint : IPCB_LibComponent) : String;
+Var
+    GrpIter : IPCB_GroupIterator;
+    Prim : IPCB_Primitive;
+    Addr : String;
+Begin
+    Result := '|';
+    If Footprint = Nil Then Exit;
+    GrpIter := Footprint.GroupIterator_Create;
+    Try
+        GrpIter.AddFilter_ObjectSet(MkSet(eComponentBodyObject));
+        Prim := GrpIter.FirstPCBObject;
+        While Prim <> Nil Do
+        Begin
+            Addr := '';
+            Try Addr := IntToStr(Prim.I_ObjectAddress); Except End;
+            If (Addr <> '') And (Pos('|' + Addr + '|', Result) = 0) Then
+                Result := Result + Addr + '|';
+            Prim := GrpIter.NextPCBObject;
+        End;
+    Finally
+        Footprint.GroupIterator_Destroy(GrpIter);
     End;
 End;
 
@@ -5590,7 +5936,10 @@ End;
 {         (mils), rotation_x/rotation_y/rotation_z (degrees, on the MODEL),   }
 {         replace ('true' removes the footprint's existing bodies first),     }
 {         align ('none' | 'center' | 'pads'), layer (optional; with replace  }
-{         and no layer the new body takes the replaced body's layer).         }
+{         and no layer the new body takes the replaced body's layer),         }
+{         remove_from_board ('true' with replace also takes the replaced     }
+{         bodies off the library board: the opt-in, unmeasured half of the   }
+{         shared removal rule beside RemoveLibTextByAddress).                }
 {                                                                              }
 { align: 'none' moves the body by (offset_x, offset_y) from wherever the      }
 { factory put it, which is the old behaviour. 'center' puts the centre of the }
@@ -5610,8 +5959,10 @@ Var
     LayerStr, LayerSource : String;
     Failure, FailCode, StateJson, PadsJson, ExpectJson, MatchJson : String;
     AppliedJson, ReplacedJson, FrameJson, RotReqJson, MoveJson : String;
+    RemovedEntries, BoardJson : String;
     OffX, OffY, OffZ, RotX, RotY, RotZ, ReadX, ReadY, ReadZ : Double;
     WantRotation, DidRotation, DidStandoff, DidMove, Replace : Boolean;
+    FromBoard, MadeCurrent : Boolean;
     HaveRect, HaveNewRect, Stale, StateOk, Aligned, DidLayer : Boolean;
     WantLayer : TLayer;
     Workspace : IWorkspace;
@@ -5623,12 +5974,14 @@ Var
     Model : IPCB_Model;
     OrgX, OrgY, DX, DY : TCoord;
     X1, Y1, X2, Y2, NX1, NY1, NX2, NY2, PX1, PY1, PX2, PY2 : TCoord;
-    PadCount, Removed, RemovedDistinct, Remaining : Integer;
+    PadCount, Removed, RemovedDistinct, Remaining, BoardRemoved : Integer;
 Begin
     ModelPath := ExtractJsonValue(Params, 'model_path');
     ComponentName := ExtractJsonValue(Params, 'component_name');
     LibPath := Trim(ExtractJsonValue(Params, 'library_path'));
     Replace := (LowerCase(ExtractJsonValue(Params, 'replace')) = 'true');
+    FromBoard := Replace
+        And (LowerCase(Trim(ExtractJsonValue(Params, 'remove_from_board'))) = 'true');
     AlignStr := LowerCase(Trim(ExtractJsonValue(Params, 'align')));
     If AlignStr = '' Then AlignStr := 'none';
     LayerStr := Trim(ExtractJsonValue(Params, 'layer'));
@@ -5779,6 +6132,15 @@ Begin
     OrgX := FootprintOriginX(Footprint);
     OrgY := FootprintOriginY(Footprint);
 
+    { The board half of a replace needs the footprint current (rule 3 beside }
+    { RemoveLibTextByAddress). It already is, by the switch above or by      }
+    { being the current one; this reads that back before anything goes.    }
+    MadeCurrent := False;
+    If FromBoard Then MadeCurrent := LibMakeCurrentVerified(PcbLib, Footprint);
+    RemovedEntries := '';
+    BoardRemoved := 0;
+    BoardJson := JsonObj(JsonBool('requested', False));
+
     Failure := '';
     FailCode := '';
     DidRotation := False;
@@ -5847,8 +6209,14 @@ Begin
                     WantLayer := Body3D_FirstBodyLayer(Footprint);
                     If WantLayer <> eNoLayer Then LayerSource := 'replaced body';
                 End;
-                Removed := Body3D_RemoveAll(Footprint, RemovedDistinct);
+                Removed := Body3D_RemoveAll(Footprint, RemovedDistinct, RemovedEntries);
                 Remaining := Body3D_CountBodies(Footprint);
+                { The opt-in board half, after the footprint read-back and   }
+                { before the new body is added, never on a body the          }
+                { footprint still lists (rule 4).                            }
+                If FromBoard Then
+                    BoardJson := LibBoardRemoveEntries(PcbLib.Board, RemovedEntries,
+                        Body3D_BodyAddresses(Footprint), MadeCurrent, BoardRemoved);
             End;
 
             Footprint.AddPCBObject(Body);
@@ -5971,7 +6339,8 @@ Begin
     ReplacedJson := JsonObj(JsonBool('requested', Replace) + ','
         + JsonInt('removed_bodies', RemovedDistinct) + ','
         + JsonInt('remove_calls', Removed) + ','
-        + JsonInt('remaining_before_add', Remaining));
+        + JsonInt('remaining_before_add', Remaining) + ','
+        + JsonRaw('board_removal', BoardJson));
     FrameJson := JsonObj(JsonFloat('origin_x_mils', CoordToMilsF(OrgX)) + ','
         + JsonFloat('origin_y_mils', CoordToMilsF(OrgY)) + ','
         + JsonRaw('pads_bbox', PadsJson));
@@ -6021,12 +6390,18 @@ End;
 { one lib_link_3d_model measures in, and puts the previous current footprint  }
 { back afterwards. The dispatcher restores the focused DOCUMENT.              }
 {                                                                              }
-{ model_state=false skips every unproven IPCB_Model read (see the 3D block    }
-{ comment above). If a live call with it on ever faults, that is the switch   }
-{ that still answers while the read is fixed.                                 }
+{ MODEL READS ARE OPT-IN: model_state must be exactly 'true'. They go through }
+{ IPCB_Model members no live call has run yet (see the 3D block comment       }
+{ above), and an undeclared identifier there is not caught by any Try: it    }
+{ stops the polling loop and the bridge needs a manual restart. A default-on  }
+{ read would make the first ordinary call, and every body of every footprint }
+{ in a sweep, the experiment. Without model_state the reply carries          }
+{ everything the proven members give. Flip the default only after            }
+{ RELEASE_VERIFICATION step 5 has passed live.                               }
 {                                                                              }
 { Params: footprint_name (empty = sweep), library_path (optional),           }
-{         model_state ('false' to skip model reads), offset, limit (sweep).  }
+{         model_state ('true' to read the models; anything else skips them),  }
+{         offset, limit (sweep).                                               }
 Function Lib_GetFootprintBodies(Params : String; RequestId : String) : String;
 Var
     LibPath, FocusedPath, FpWanted, FpName, Addr : String;
@@ -6048,7 +6423,7 @@ Var
 Begin
     LibPath := Trim(ExtractJsonValue(Params, 'library_path'));
     FpWanted := Trim(ExtractJsonValue(Params, 'footprint_name'));
-    WantModel := (LowerCase(ExtractJsonValue(Params, 'model_state')) <> 'false');
+    WantModel := (LowerCase(Trim(ExtractJsonValue(Params, 'model_state'))) = 'true');
     Offset := StrToIntDef(ExtractJsonValue(Params, 'offset'), 0);
     Limit := StrToIntDef(ExtractJsonValue(Params, 'limit'), 250);
     If Offset < 0 Then Offset := 0;
@@ -13453,11 +13828,21 @@ End;
 { Collect first, delete second. Removing objects while the group iterator is   }
 { walking them is how a traversal skips half the list, and a half-cleared      }
 { footprint looks like the filter was wrong.                                   }
+{                                                                              }
+{ FOOTPRINT ONLY BY DEFAULT, the removal this tool has always made.            }
+{ remove_from_board=true adds the library-board half, which is unmeasured: the }
+{ footprint is made current (verified) before anything goes, and the board is  }
+{ swept after the footprint is finished. See REMOVING PRIMITIVES FROM A PCBLIB }
+{ FOOTPRINT, beside RemoveLibTextByAddress, for the rule and why. The reply's  }
+{ double_listed counts primitives added this session (listed twice): those are }
+{ the ones a footprint-only delete has been seen to bring back after a save    }
+{ and reload, and the note says what to do about it.                           }
 
 Function Lib_DeleteFootprintPrimitives(Params : String; RequestId : String) : String;
 Var
     LibPath, FocusedPath, FpWanted, FpName, ObjTypeStr, LayerStr : String;
-    ConfirmStr, RemovedJson, PrimAddr, BoardGone : String;
+    ConfirmStr, RemovedJson, PrimAddr, LastAddr, SeenAddrs, Entries : String;
+    StillAddrs, BoardJson, NoteStr : String;
     Workspace : IWorkspace;
     Doc : IDocument;
     PcbLib : IPCB_Library;
@@ -13470,8 +13855,9 @@ Var
       the way the script expects is its own runtime fault. }
     ObjFilter : Integer;
     WantLayer, MatchLayer : TLayer;
-    IncludePads, Found, Gone, FirstSight : Boolean;
-    Removed, I, Examined : Integer;
+    IncludePads, Found, FromBoard, MadeCurrent : Boolean;
+    Removed, I, Examined, PrimOid, SameRun, RemoveCalls, DoubleListed : Integer;
+    StillListed, BoardRemoved : Integer;
 Begin
     LibPath := ExtractJsonValue(Params, 'library_path');
     FpWanted := ExtractJsonValue(Params, 'footprint_name');
@@ -13479,6 +13865,7 @@ Begin
     LayerStr := ExtractJsonValue(Params, 'layer');
     ConfirmStr := ExtractJsonValue(Params, 'confirm');
     IncludePads := (ExtractJsonValue(Params, 'include_pads') = 'true');
+    FromBoard := (LowerCase(Trim(ExtractJsonValue(Params, 'remove_from_board'))) = 'true');
 
     If FpWanted = '' Then
     Begin
@@ -13574,18 +13961,19 @@ Begin
         Exit;
     End;
 
-    { MAKE IT CURRENT, verified, before removing anything. The removal below
-      takes each primitive out of the library BOARD as well as the footprint
-      (see there), and the board holds only the current footprint's
-      primitives. Same switch and read-back as ResolveLibFootprint. }
-    If PcbLib.CurrentComponent <> Target Then
+    { MADE CURRENT ONLY FOR THE BOARD HALF, verified, before anything is
+      removed: the library board holds only the current footprint's
+      primitives (rule 3 beside RemoveLibTextByAddress). A footprint-only
+      delete leaves CurrentComponent alone, as this tool always did. }
+    MadeCurrent := False;
+    If FromBoard Then
     Begin
-        Try PcbLib.CurrentComponent := Target; Except End;
-        If PcbLib.CurrentComponent <> Target Then
+        MadeCurrent := LibMakeCurrentVerified(PcbLib, Target);
+        If Not MadeCurrent Then
         Begin
             Result := BuildErrorResponse(RequestId, 'SELECT_FAILED',
-                'Could not make footprint "' + FpWanted + '" current. '
-                + 'Nothing was deleted.');
+                'Could not make footprint "' + FpWanted + '" current, which '
+                + 'remove_from_board needs. Nothing was deleted.');
             Exit;
         End;
     End;
@@ -13636,7 +14024,12 @@ Begin
     Removed := 0;
     Examined := 0;
     RemovedJson := '';
-    BoardGone := '|';
+    RemoveCalls := 0;
+    DoubleListed := 0;
+    SameRun := 0;
+    LastAddr := '';
+    SeenAddrs := '|';
+    Entries := '';
 
     PCBServer.PreProcess;
     Try
@@ -13683,56 +14076,56 @@ Begin
                   the one-match-per-pass design exists to avoid cannot
                   arise. The outer loop takes a fresh iterator for the next
                   one. }
-                { FROM BOTH OWNERS, the mirror of the add. Every add handler
-                  registers with the footprint AND PcbLib.Board, so removing
-                  from the footprint alone left the board's registration in
-                  place: the delete read back as done, and the primitive was
-                  back after save and reload. That is the owner's recipe
-                  "delete, reload, delete again" (2026-10-03), and their note
-                  that a generated footprint "ignores primitive deletes until
-                  the library is reloaded".
-                  Footprint first: it is the removal already proven here,
-                  and while the board still holds the object it cannot have
-                  been freed. Board second, and ONCE per object: a
-                  double-registered primitive is yielded twice, and its
-                  second yield only takes the footprint's second entry. }
+                { FOOTPRINT ONLY: the removal this tool has always made, and
+                  the only one that has run live. The board half, when asked
+                  for, runs after this loop has finished with every object.
+
+                  A primitive added this session is listed twice until a
+                  reload, so its address can come round again, and each pass
+                  removes one listing; it is counted once in removed and once
+                  in double_listed. A THIRD consecutive sighting of one
+                  address means RemovePCBObject is returning without
+                  removing, and the loop stops there instead of spinning to
+                  its bound (Body3D_RemoveAll's guard). }
                 If Found And (Prim <> Nil) Then
                 Begin
                     PrimAddr := '';
                     Try PrimAddr := IntToStr(Prim.I_ObjectAddress); Except End;
-                    FirstSight := (PrimAddr = '')
-                        Or (Pos('|' + PrimAddr + '|', BoardGone) = 0);
-                    Gone := False;
-                    Try
-                        Target.RemovePCBObject(Prim);
-                        Gone := True;
-                    Except End;
-                    If FirstSight Then
+                    PrimOid := -1;
+                    Try PrimOid := Prim.ObjectId; Except PrimOid := -1; End;
+                    If (PrimAddr <> '') And (PrimAddr = LastAddr) Then
+                        SameRun := SameRun + 1
+                    Else
+                        SameRun := 1;
+                    LastAddr := PrimAddr;
+                    If SameRun > 2 Then
+                        Found := False
+                    Else
                     Begin
-                        If PrimAddr <> '' Then
-                            BoardGone := BoardGone + PrimAddr + '|';
                         Try
-                            PcbLib.Board.RemovePCBObject(Prim);
-                            Gone := True;
-                        Except End;
-                        If Gone Then
-                        Begin
-                            Removed := Removed + 1;
-                            If RemovedJson <> '' Then
-                                RemovedJson := RemovedJson + ',';
-                            RemovedJson := RemovedJson + '"'
-                                + EscapeJsonString(GetLayerString(MatchLayer))
-                                + '"';
-                        End
-                        Else
+                            Target.RemovePCBObject(Prim);
+                            RemoveCalls := RemoveCalls + 1;
+                            If (PrimAddr <> '')
+                               And (Pos('|' + PrimAddr + '|', SeenAddrs) > 0) Then
+                                DoubleListed := DoubleListed + 1
+                            Else
+                            Begin
+                                If PrimAddr <> '' Then
+                                    SeenAddrs := SeenAddrs + PrimAddr + '|';
+                                Entries := LibAddRemovalEntry(Entries, PrimOid, PrimAddr);
+                                Removed := Removed + 1;
+                                If RemovedJson <> '' Then
+                                    RemovedJson := RemovedJson + ',';
+                                RemovedJson := RemovedJson + '"'
+                                    + EscapeJsonString(GetLayerString(MatchLayer))
+                                    + '"';
+                            End;
+                        Except
                             { It matched and would not go. Stop rather than
                               loop on it forever. }
                             Found := False;
-                    End
-                    Else If Not Gone Then
-                        { A repeat yield of an object already removed that
-                          will not leave the footprint: stop, as above. }
-                        Found := False;
+                        End;
+                    End;
                 End;
             Finally
                 Target.GroupIterator_Destroy(GrpIter);
@@ -13747,19 +14140,75 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    If Removed > 0 Then
+    { READ BACK: which removed objects does the footprint still list? A
+      read-only walk with the members the loop above already uses. }
+    StillAddrs := '|';
+    StillListed := 0;
+    If Entries <> '' Then
+    Begin
+        GrpIter := Target.GroupIterator_Create;
+        Try
+            Prim := GrpIter.FirstPCBObject;
+            While Prim <> Nil Do
+            Begin
+                PrimAddr := '';
+                Try PrimAddr := IntToStr(Prim.I_ObjectAddress); Except End;
+                If (PrimAddr <> '') And (Pos(':' + PrimAddr + '|', Entries) > 0)
+                   And (Pos('|' + PrimAddr + '|', StillAddrs) = 0) Then
+                Begin
+                    StillAddrs := StillAddrs + PrimAddr + '|';
+                    StillListed := StillListed + 1;
+                End;
+                Prim := GrpIter.NextPCBObject;
+            End;
+        Finally
+            Target.GroupIterator_Destroy(GrpIter);
+        End;
+    End;
+
+    { THE OPT-IN BOARD HALF, after the footprint is finished, never on an
+      object the footprint still lists (rule 4). }
+    BoardRemoved := 0;
+    BoardJson := JsonObj(JsonBool('requested', False));
+    If FromBoard Then
+    Begin
+        PCBServer.PreProcess;
+        Try
+            BoardJson := LibBoardRemoveEntries(PcbLib.Board, Entries,
+                StillAddrs, MadeCurrent, BoardRemoved);
+        Finally
+            PCBServer.PostProcess;
+        End;
+    End;
+
+    If (Removed > 0) Or (BoardRemoved > 0) Then
     Begin
         Try PcbLib.Board.ViewManager_FullUpdate; Except End;
         MarkDocDirtyByPath(LibPath);
     End;
 
+    NoteStr := 'Removed in memory; app_save_all writes it. Proof it '
+        + 'persisted: lib_reload_library, then lib_probe_footprint.';
+    If (DoubleListed > 0) And (Not FromBoard) Then
+        NoteStr := NoteStr + ' ' + IntToStr(DoubleListed) + ' of these were '
+            + 'added this session (listed twice). A footprint-only delete of '
+            + 'such a primitive has been seen to come back after save and '
+            + 'reload: if one does, save, lib_reload_library and delete it '
+            + 'again, or repeat with remove_from_board=true (unmeasured, see '
+            + 'RELEASE_VERIFICATION step 24).';
+
     Result := BuildSuccessResponse(RequestId,
         '{"library":"' + EscapeJsonString(LibPath) + '",'
         + '"footprint":"' + EscapeJsonString(FpWanted) + '",'
         + '"removed":' + IntToStr(Removed) + ','
+        + '"remove_calls":' + IntToStr(RemoveCalls) + ','
+        + '"double_listed":' + IntToStr(DoubleListed) + ','
+        + '"still_listed":' + IntToStr(StillListed) + ','
         + '"examined":' + IntToStr(Examined) + ','
         + '"layers":[' + RemovedJson + '],'
-        + '"pads_included":' + BoolToJsonStr(IncludePads) + '}');
+        + '"pads_included":' + BoolToJsonStr(IncludePads) + ','
+        + '"board_removal":' + BoardJson + ','
+        + '"note":"' + EscapeJsonString(NoteStr) + '"}');
 End;
 
 {..............................................................................}
@@ -14612,11 +15061,18 @@ End;
 { listed twice until a reload, so each address gets up to two passes and the  }
 { reply says how many removals each took. Whether the removal reaches disk is  }
 { checked the only way it can be: save, reload, read (see the reply's note).  }
+{                                                                              }
+{ FOOTPRINT ONLY BY DEFAULT. remove_from_board=true adds the unmeasured        }
+{ library-board half under the shared rule (REMOVING PRIMITIVES FROM A PCBLIB  }
+{ FOOTPRINT, beside RemoveLibTextByAddress): the footprint is made current,    }
+{ verified, before the snapshot, and the board is swept after the read-back,  }
+{ never for a pad the footprint still lists.                                  }
 {..............................................................................}
 Function Lib_DeleteFootprintPads(Params : String; RequestId : String) : String;
 Var
     LibPath, FpWanted, PadsStr, Remaining, Op, ErrCode, ErrMsg, ConfirmStr : String;
     Desig, IdxStr, AllStr, PadAddr, TxtName, ItemJson, ResultsJson, RefusedJson : String;
+    Entries, StillAddrs, BoardJson : String;
     PcbLib : IPCB_Library;
     Target : IPCB_LibComponent;
     GrpIter : IPCB_GroupIterator;
@@ -14624,13 +15080,14 @@ Var
     Prim : IPCB_Primitive;
     SnapAddrs, SnapNames, Doomed, AfterAddrs : TStringList;
     I, J, WantIdx, Matches, Picked, OpCount, Removed, DoubleListed : Integer;
-    Removals, StillListed, PadsBefore, PadsAfter : Integer;
-    Found, TakeAll : Boolean;
+    Removals, StillListed, PadsBefore, PadsAfter, PadOid, BoardRemoved : Integer;
+    Found, TakeAll, FromBoard, MadeCurrent : Boolean;
 Begin
     LibPath := ExtractJsonValue(Params, 'library_path');
     FpWanted := ExtractJsonValue(Params, 'footprint_name');
     PadsStr := ExtractJsonValue(Params, 'pads');
     ConfirmStr := ExtractJsonValue(Params, 'confirm');
+    FromBoard := (LowerCase(Trim(ExtractJsonValue(Params, 'remove_from_board'))) = 'true');
     If FpWanted = '' Then
     Begin
         Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'footprint_name is required');
@@ -14664,13 +15121,32 @@ Begin
         Exit;
     End;
 
+    { Current only for the board half, and before the snapshot below so the }
+    { addresses it records are the ones the current footprint holds.        }
+    MadeCurrent := False;
+    If FromBoard Then
+    Begin
+        MadeCurrent := LibMakeCurrentVerified(PcbLib, Target);
+        If Not MadeCurrent Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'SELECT_FAILED',
+                'Could not make footprint "' + FpWanted + '" current, which '
+                + 'remove_from_board needs. Nothing was removed.');
+            Exit;
+        End;
+    End;
+
     OpCount := 0;
     Removed := 0;
     DoubleListed := 0;
     StillListed := 0;
     PadsAfter := 0;
+    BoardRemoved := 0;
     ResultsJson := '';
     RefusedJson := '';
+    Entries := '';
+    StillAddrs := '|';
+    BoardJson := JsonObj(JsonBool('requested', False));
 
     SnapAddrs := TStringList.Create;
     SnapNames := TStringList.Create;
@@ -14807,9 +15283,12 @@ Begin
                         { Lib_DeleteFootprintPrimitives.                     }
                         If Found And (Prim <> Nil) Then
                         Begin
+                            PadOid := -1;
+                            Try PadOid := Prim.ObjectId; Except PadOid := -1; End;
                             Try
                                 Target.RemovePCBObject(Prim);
                                 Removals := Removals + 1;
+                                Entries := LibAddRemovalEntry(Entries, PadOid, Doomed[I]);
                             Except
                                 Found := False;
                             End;
@@ -14840,7 +15319,11 @@ Begin
                 If (PadAddr <> '') And (AfterAddrs.IndexOf(PadAddr) < 0) Then
                 Begin
                     AfterAddrs.Add(PadAddr);
-                    If Doomed.IndexOf(PadAddr) >= 0 Then StillListed := StillListed + 1;
+                    If Doomed.IndexOf(PadAddr) >= 0 Then
+                    Begin
+                        StillListed := StillListed + 1;
+                        StillAddrs := StillAddrs + PadAddr + '|';
+                    End;
                 End;
                 Pad := GrpIter.NextPCBObject;
             End;
@@ -14855,7 +15338,19 @@ Begin
         Try AfterAddrs.Free; Except End;
     End;
 
-    If Removed > 0 Then
+    { The opt-in board half, after the read-back (rule 4). }
+    If FromBoard Then
+    Begin
+        PCBServer.PreProcess;
+        Try
+            BoardJson := LibBoardRemoveEntries(PcbLib.Board, Entries,
+                StillAddrs, MadeCurrent, BoardRemoved);
+        Finally
+            PCBServer.PostProcess;
+        End;
+    End;
+
+    If (Removed > 0) Or (BoardRemoved > 0) Then
     Begin
         Try PcbLib.Board.ViewManager_FullUpdate; Except End;
         MarkDocDirtyByPath(LibPath);
@@ -14871,6 +15366,7 @@ Begin
         + JsonInt('pads_after', PadsAfter) + ','
         + JsonInt('still_listed', StillListed) + ','
         + JsonInt('double_listed', DoubleListed) + ','
+        + JsonRaw('board_removal', BoardJson) + ','
         + JsonBool('written_to_disk', False) + ','
         + JsonBool('pending_save', Removed > 0) + ','
         + JsonStr('note', 'Removed in memory and the library marked dirty. '

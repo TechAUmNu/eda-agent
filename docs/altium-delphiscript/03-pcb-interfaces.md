@@ -780,9 +780,15 @@ footprint height sweep and the layout model.
 None of these is exercised by a call that has run live yet. Each is
 declared by the AD26 script binding (ScriptingSystem.dll method list and
 property table, read 2026-10-04 from 26.10.1.5) and by
-Altium.SDK.Interfaces.dll, and each is reached through one small
-`Body3D_` helper in Library.pas so a fault fails only the call that
-asked for it. `docs/RELEASE_VERIFICATION.md` step 5 is the measurement.
+Altium.SDK.Interfaces.dll. That makes an undeclared identifier unlikely,
+not impossible, and if one of these names does not resolve the fault is
+NOT caught by any `Try`: it stops the polling loop, and the bridge has
+to be restarted by hand. So each is reached through one small `Body3D_`
+helper in Library.pas, and every helper runs only on an explicit
+request: a rotation on `lib_link_3d_model` / `pcb_place_3d_body`, or
+`model_state=true` on `lib_get_footprint_bodies` (off by default). A
+default call never touches them. `docs/RELEASE_VERIFICATION.md` step 5
+is the measurement; keep them opt-in until it has passed live.
 
 **`SetState(RotX, RotY, RotZ : Double; Dz : Integer)`**
 The model's 3D rotation in degrees and its Z offset in internal units:
