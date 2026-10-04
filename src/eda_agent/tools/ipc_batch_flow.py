@@ -366,7 +366,8 @@ async def run_batch(bridge, pid: int, csv_paths: list, library_path: str, *,
         ui = await loop.run_in_executor(None, functools.partial(
             _drive_one_reporting, pid, csv_path, dirs,
             dialog_timeout=dialog_timeout, run_timeout=run_timeout,
-            open_report=open_report, may_steal_focus=may_steal_focus))
+            open_report=open_report, may_steal_focus=may_steal_focus,
+            library_path=library_path))
         rec["dialog"] = ui
 
         if ui.get("batch_dialog_open"):

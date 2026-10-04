@@ -35,6 +35,19 @@ words rather than exact captions, read back after every change, and a
 miss STOPS the run before Start with what was actually on screen, so one
 live call corrects the constant instead of a run going wrong.
 
+MEASURED 2026-10-04 (AD26, form class TForm_FootprintWizardBatch, title
+'IPC(R) Footprints Batch generator'): the destination radio is NOT
+captioned 'Generate all footprints in current PcbLib file' on this
+build. It names the library: 'Generate all footprints in
+H:\\git\\multiviewer\\hardware\\multiviewer\\carrier.PcbLib' (checked and
+enabled), beside 'Generate single PcbLib files per footprint name' and
+'... per input file'. The word match ('current' + 'pcblib') missed it
+and the run stopped at 'configure', unstarted, which was the safe
+outcome. set_destination now accepts that caption when, and only when,
+the path it names IS the target library (normalised, case-insensitive),
+which is a stronger check than the old words; the old caption is still
+accepted; a caption naming any other library refuses Start.
+
 NOTHING HERE PRESSES AN UNKNOWN BUTTON. The presses are Add Files, the
 file dialog's OK, Start, and Close (before Start, or after the run has
 finished). Any other dialog that appears stops the run and is reported,
@@ -74,6 +87,9 @@ FILE_DIALOG_TITLE = "Open Package Data Files"
 
 #: Option captions as WORDS, all of which must appear in the label.
 CURRENT_LIBRARY_WORDS = ("current", "pcblib")      # the destination radio
+#: The destination radio as this AD26 build captions it: the prefix, then
+#: the full path of the library the run will write into.
+DESTINATION_PREFIX = "generate all footprints in "
 REPORT_ON_WORDS = ("report", "completion")         # Generate report on completion
 OPEN_REPORT_WORDS = ("open", "report")             # Open generated report
 
@@ -210,6 +226,115 @@ def set_option(dialog, words: Iterable[str], want: bool, role: str) -> dict:
                 "label": label,
                 "reason": f"setting {label!r} raised: {exc}"}
     result["label"] = label
+    return result
+
+
+def _same_path(a: str, b: str) -> bool:
+    """Two library paths name the same file: normalised, case-insensitive.
+
+    ``os.path.normcase`` lowercases only on Windows, so the case fold is
+    explicit: Altium's paths are Windows paths whatever runs the tests.
+    """
+    def norm(p: str) -> str:
+        p = (p or "").strip().strip('"').rstrip(".").strip()
+        return os.path.normpath(p.replace("/", "\\")).replace(
+            "/", "\\").lower()
+    return bool(a and b) and norm(a) == norm(b)
+
+
+def destination_choice(described: list, library_path: str) -> dict:
+    """Pick the destination radio from the options on screen, or refuse.
+
+    Accepted, in this order:
+
+    * ``Generate all footprints in <path>`` whose ``<path>`` is
+      ``library_path`` (``match: "path"``): the caption this AD26 build
+      shows, and the stronger check, because it names the file the run
+      will write into;
+    * ``Generate all footprints in current PcbLib file`` (``match:
+      "current_words"``), the caption the extension's string table
+      carries.
+
+    REFUSED (``ok`` False, ``found`` None) when a ``Generate all
+    footprints in <path>`` radio names a DIFFERENT library: starting would
+    write somewhere other than the library this call was given. Also
+    refused when nothing matches. Pure: no window is touched here.
+    """
+    radios = [c for c in described if c.get("role") == "radiobutton"]
+    offered = [c.get("label") or c.get("name") for c in described
+               if c.get("role") in ("checkbox", "radiobutton")]
+    wrong: list = []
+    legacy: list = []
+    for info in radios:
+        label = (info.get("label") or info.get("name") or "").strip()
+        named = _destination_path(label)
+        if named is None:
+            # Not a path caption: the old caption, by its words, or
+            # another option ('Generate single PcbLib files per ...').
+            if all(word in label.lower() for word in CURRENT_LIBRARY_WORDS):
+                legacy.append((info, label))
+            continue
+        if _same_path(named, library_path):
+            return {"ok": True, "found": info, "match": "path",
+                    "label": label, "named_path": named}
+        wrong.append(named)
+    if wrong:
+        return {"ok": False, "found": None, "offered": offered,
+                "named_paths": wrong, "reason": (
+                    f"the destination radio names {wrong[0]!r}, not the "
+                    f"target library {library_path!r}; Start would write "
+                    f"into a different library")}
+    if legacy:
+        info, label = legacy[0]
+        return {"ok": True, "found": info, "match": "current_words",
+                "label": label}
+    return {"ok": False, "found": None, "offered": offered, "reason": (
+        "no radiobutton reads 'Generate all footprints in current PcbLib "
+        "file' or 'Generate all footprints in <the target library>'")}
+
+
+def _destination_path(label: str) -> Optional[str]:
+    """The library a 'Generate all footprints in <path>' caption names.
+
+    None for any other caption, including the old 'Generate all
+    footprints in current PcbLib file', which names no path.
+    """
+    low = (label or "").strip().lower()
+    if not low.startswith(DESTINATION_PREFIX):
+        return None
+    named = label.strip()[len(DESTINATION_PREFIX):].strip()
+    if not named or named.lower().startswith("current pcblib"):
+        return None
+    return named
+
+
+def set_destination(dialog, library_path: str) -> dict:
+    """Select the destination radio (see destination_choice) and read it back.
+
+    Same guards as set_option: every accessibility call is caught, and a
+    failure is a miss, which refuses Start.
+    """
+    if not controls.available():
+        return {"ok": False, "reason": "reading dialog options needs comtypes"}
+    try:
+        described = controls.describe_all(dialog)
+    except Exception as exc:                     # noqa: BLE001
+        return {"ok": False, "reason": (
+            f"the dialog's options could not be read: {exc}")}
+    choice = destination_choice(described, library_path)
+    if not choice.get("ok"):
+        return {k: v for k, v in choice.items() if k != "found"}
+    found = choice["found"]
+    label = choice.get("label")
+    try:
+        result = controls.set_checked(found["hwnd"], True)
+    except Exception as exc:                     # noqa: BLE001
+        return {"ok": False, "label": label, "match": choice.get("match"),
+                "reason": f"setting {label!r} raised: {exc}"}
+    result["label"] = label
+    result["match"] = choice.get("match")
+    if choice.get("named_path"):
+        result["named_path"] = choice["named_path"]
     return result
 
 
@@ -459,7 +584,8 @@ def start_and_wait(pid: int, dialog, report_dirs: list, csv_path: str,
 def drive_one(pid: int, csv_path: str, report_dirs: list, *,
               dialog_timeout: float = 30.0, run_timeout: float = 180.0,
               open_report: Optional[bool] = None,
-              may_steal_focus: bool = True) -> dict:
+              may_steal_focus: bool = True,
+              library_path: str = "") -> dict:
     """Everything between the dialog opening and it closing, for one CSV.
 
     Returns ``ok`` and, on a stop, ``stage``, ``reason`` and what was on
@@ -484,14 +610,14 @@ def drive_one(pid: int, csv_path: str, report_dirs: list, *,
         rec["batch_dialog_open"] = not closing.get("closed", False)
         return rec
 
-    destination = set_option(dialog, CURRENT_LIBRARY_WORDS, True,
-                             role="radiobutton")
+    destination = set_destination(dialog, library_path)
     rec["destination"] = destination
     if not destination.get("ok"):
         return stop_unstarted("configure", (
-            "could not confirm 'Generate all footprints in current PcbLib "
-            "file'. Refusing to Start: the other choices write separate "
-            "PcbLib files into the Output Folder instead of the library"))
+            "could not confirm that the run writes into the target library "
+            f"({destination.get('reason')}). Refusing to Start: the other "
+            "choices write separate PcbLib files into the Output Folder, "
+            "or into a different library"))
     rec["report_option"] = set_option(dialog, REPORT_ON_WORDS, True,
                                       role="checkbox")
     if open_report is not None:

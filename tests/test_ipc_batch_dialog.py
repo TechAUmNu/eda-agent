@@ -196,3 +196,121 @@ def test_an_unreadable_destination_still_refuses_start(monkeypatch):
     rec = dlg.drive_one(1, r"C:\w\a.csv", [], dialog_timeout=1)
     assert rec["stage"] == "configure" and "Start" not in screen.pressed
     assert rec["batch_dialog_open"] is False
+
+
+# ---------------------------------------------------------------------------
+# The destination radio as this AD26 build captions it (measured 2026-10-04):
+# 'Generate all footprints in <full path of the library>', not 'current
+# PcbLib file'. The word match missed it and the run stopped unstarted.
+
+_TARGET = r"H:\git\multiviewer\hardware\multiviewer\carrier.PcbLib"
+
+_MEASURED_OPTIONS = [
+    ("Produce STEP model", "checkbox"),
+    ("Generate all footprints in " + _TARGET, "radiobutton"),
+    ("Open generated PcbLib files on completion", "checkbox"),
+    ("Open generated report", "checkbox"),
+    ("Generate report on completion", "checkbox"),
+    ("Generate single PcbLib files per footprint name", "radiobutton"),
+    ("Generate single PcbLib files per input file", "radiobutton"),
+]
+
+
+def _described(options):
+    return [{"label": label, "role": role, "hwnd": 500 + i}
+            for i, (label, role) in enumerate(options)]
+
+
+@pytest.mark.parametrize("target", [
+    _TARGET,
+    _TARGET.lower(),
+    _TARGET.replace("\\", "/"),
+    "  " + _TARGET + "  ",
+])
+def test_the_path_caption_is_accepted_when_it_names_the_target(target):
+    out = dlg.destination_choice(_described(_MEASURED_OPTIONS), target)
+    assert out["ok"] is True and out["match"] == "path"
+    assert out["found"]["hwnd"] == 501
+    assert out["named_path"] == _TARGET
+
+
+def test_a_caption_naming_another_library_refuses_start():
+    """Mutation: accept any 'Generate all footprints in ...' radio."""
+    out = dlg.destination_choice(_described(_MEASURED_OPTIONS),
+                                 r"H:\git\other\parts.PcbLib")
+    assert out["ok"] is False and out["found"] is None
+    assert "different library" in out["reason"]
+    assert out["named_paths"] == [_TARGET]
+
+
+def test_a_path_holding_the_old_words_is_still_judged_by_its_path():
+    """Mutation: let the 'current' + 'pcblib' word match win first.
+
+    A library under a folder called 'current' contains both words, and
+    must still be refused when it is not the target.
+    """
+    options = [(r"Generate all footprints in C:\current\x.PcbLib",
+                "radiobutton")]
+    out = dlg.destination_choice(_described(options), _TARGET)
+    assert out["ok"] is False
+
+
+def test_the_old_caption_is_still_accepted():
+    options = [("Generate all footprints in current PcbLib file",
+                "radiobutton"),
+               ("Generate single PcbLib files per input file", "radiobutton")]
+    out = dlg.destination_choice(_described(options), _TARGET)
+    assert out["ok"] is True and out["match"] == "current_words"
+    assert out["found"]["hwnd"] == 500
+
+
+def test_no_destination_radio_refuses_start():
+    options = [("Generate single PcbLib files per input file", "radiobutton")]
+    out = dlg.destination_choice(_described(options), _TARGET)
+    assert out["ok"] is False and out["offered"]
+
+
+def test_set_destination_checks_the_measured_radio(monkeypatch):
+    monkeypatch.setattr(dlg.controls, "available", lambda: True)
+    monkeypatch.setattr(dlg.controls, "describe_all",
+                        lambda d: _described(_MEASURED_OPTIONS))
+    seen = []
+
+    def set_checked(hwnd, want):
+        seen.append((hwnd, want))
+        return {"ok": True, "checked": True}
+
+    monkeypatch.setattr(dlg.controls, "set_checked", set_checked)
+    out = dlg.set_destination(_form(), _TARGET)
+    assert out["ok"] is True and out["match"] == "path"
+    assert seen == [(501, True)]
+
+
+def test_drive_one_refuses_start_for_a_foreign_destination(monkeypatch):
+    """The whole stop path: the form names another library, so the run
+    stops at 'configure', closes the unstarted form, and never presses
+    Start."""
+    form = _form()
+    screen = Screen(monkeypatch, form)
+    screen.on_press["&Close"] = lambda: screen.windows.pop(100)
+    monkeypatch.setattr(dlg, "snapshot", lambda d: {})
+    monkeypatch.setattr(dlg.controls, "available", lambda: True)
+    monkeypatch.setattr(dlg.controls, "describe_all",
+                        lambda d: _described(_MEASURED_OPTIONS))
+    monkeypatch.setattr(dlg.controls, "set_checked",
+                        lambda hwnd, want: {"ok": True})
+    rec = dlg.drive_one(1, r"C:\w\a.csv", [], dialog_timeout=1,
+                        library_path=r"H:\elsewhere\other.PcbLib")
+    assert rec["stage"] == "configure" and "Start" not in screen.pressed
+    assert "different library" in rec["reason"]
+    assert rec["batch_dialog_open"] is False
+
+
+def test_the_flow_hands_the_target_library_to_the_dialog_driver():
+    import inspect
+    from eda_agent.tools import ipc_batch_flow as flow
+
+    source = inspect.getsource(flow.run_batch)
+    assert "library_path=library_path" in source, (
+        "drive_one must be told the target library, or the path caption "
+        "can never be confirmed")

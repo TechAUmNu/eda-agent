@@ -1,4 +1,4 @@
-# Release verification: 2026.10.04.9
+# Release verification: 2026.10.04.10
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -52,6 +52,8 @@ works elsewhere cannot be an undeclared identifier:
 | 27, current model | `IsCurrent` | yes, `Lib_NormalizeImplementations` | low |
 | 28, No-ERC on a pin | `Location` | yes, `Gen_PlaceNetLabel` | low |
 | 30, batch rename | `Name` on a footprint | yes, `Lib_RenameFootprint` | low |
+| 31, STEP Z offset | `SetState` on a model, now with a non-zero Dz | yes, `Body3D_ApplyModelState` ran it live with Dz 0 | low: whether this build honours Dz is read from the saved file |
+| 31, delete diagnostics | `BoardIterator_Destroy` (the library-board walk), read-only | yes, `LibBoardRemoveEntries` ran it live | low |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -85,8 +87,8 @@ default:
 
 | Opt-in | What it reaches | Step |
 |---|---|---|
-| a non-zero rotation on `lib_link_3d_model` / `pcb_place_3d_body` | `IPCB_Model.SetState`, `GetState` | 5, 15 |
-| `model_state=true` on `lib_get_footprint_bodies` (default false) | `IPCB_Model.ModelType`, `FileName`, `Rotation`, `GetState` | 22, after 5 |
+| a non-zero rotation (or, on `lib_link_3d_model`, a non-zero `offset_z`) on `lib_link_3d_model` / `pcb_place_3d_body` | `IPCB_Model.SetState` (ran live 2026-10-04 with a rotation; `GetState` is no longer called: it returned zeros) | 5, 15, 31 |
+| `model_state=true` on `lib_get_footprint_bodies` (default false) | `IPCB_Model.ModelType`, `FileName`, `Rotation` (ran live once without a fault) | 22, after 5 |
 | `remove_from_board=true` on `lib_delete_footprint_primitives`, `lib_delete_footprint_pads`, `lib_add_footprint_text`, `lib_link_3d_model` with `replace`, `lib_auto_link_3d_models` with `replace` | `RemovePCBObject` on the library board, and making the footprint current first | 24 |
 | `keepout=true` on a fill, or `kind=keepout` on a region, NOT on KeepOutLayer | the `IsKeepout` write | 24 |
 | `kind=cutout` on a footprint region | the `Kind := eRegionKind_Cutout` write | 16, 24 |
@@ -264,7 +266,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.04.9`, `version_match` =
+Expect `altium_script_version` = `2026.10.04.10`, `version_match` =
 `true`, and `mcp_server_version` = `0.6.1`.
 
 Those are two different versions and they fail differently.
@@ -458,6 +460,16 @@ sides.
 ---
 
 ## 5. 3D model placement (task #27)
+
+> **Partly settled live on 2026-10-04; read step 31 first.** `SetState`
+> ran and the rotation persisted (`MODEL.3D.ROTX=90 / ROTZ=45` in the
+> saved file). `GetState` ran and returned zeros, so it is no longer
+> called: `model_state` is now always null and `rotation_readback`
+> reports `available: false`; items 2 and the `model.rotation` checks
+> below are replaced by `lib_read_pcblib_file`. `offset_z` now writes the
+> model's `MODEL.3D.DZ` (Altium's own field), not `StandoffHeight`, so
+> `applied.standoff_height` is false and `applied.z_offset` true. With
+> `align` none the model origin now goes to the FOOTPRINT origin.
 
 The highest-risk item, and the one that can stop the loop: `SetState`
 and its read-back `GetState` are IPCB_Model members no earlier call
@@ -955,7 +967,10 @@ Then the rotation, after step 5 has settled `SetState`:
 
     pcb_place_3d_body  model_path <path>  x 1000  y 1000  rotation_z 90
 
-`rotation_applied` true, `model_state.z` 90. And `layer` with a name the
+`rotation_applied` true; `model_state` is null and
+`rotation_readback.available` false since step 31 (the GetState read
+returned zeros live), so read the rotation from a saved file or the 3D
+view. And `layer` with a name the
 board does not have must now answer `UNKNOWN_LAYER` and place nothing;
 it used to put the body on the top layer and echo the bad name.
 
@@ -1316,7 +1331,8 @@ step 5 does not already cover: `replace` removes bodies with the
 footprint's `RemovePCBObject`, exactly as `lib_delete_footprint_primitives`
 does; `align` moves with `MoveByXY` from the box `BoundingRectangle`
 reports; and `lib_get_footprint_bodies` only reads. Its `model_state`
-reads (`ModelType`, `FileName`, `Rotation`, `GetState`) are as unproven
+reads (`ModelType`, `FileName`, `Rotation`; `GetState` was dropped in
+step 31 after it returned zeros live) are as unproven
 as step 5's, which is why `model_state` is OFF unless passed as true: a
 default list touches none of them. Run step 5 first, and only then
 `model_state=true`. If that stops the loop, the bridge needs a manual
@@ -1639,6 +1655,142 @@ first anyway, on a scratch library, because the batch tool chains them.
 
 4. Run item 3 again unchanged: it must refuse at `stopped.stage =
    "preflight"` naming the footprint as already present, and open nothing.
+
+---
+
+## 31. Deletes that stick, a STEP on its footprint, and the saved-file reader (not yet run live)
+
+Four fixes from one live session on 2026-10-04 (the previous bridge build,
+carrier.PcbLib, throwaway footprint `ZZ_BRIDGE_TEST`, frame origin
+reported as (50000, 50000) mils). Each was found by reading the SAVED
+file, which is now a tool: `lib_read_pcblib_file` parses the .PcbLib with
+olefile and no Altium, so every check below reads disk, not memory.
+Pascal risk is low: the only Altium call that is new anywhere is
+`Model.SetState` with a NON-ZERO fourth argument (`Dz`), the same member
+and signature that ran live with 0; `LibBoardStillListsCount` is the
+read-only board walk `LibBoardRemoveEntries` ran live; `GetState` is no
+longer called at all.
+
+What was measured, so the read-backs below can be judged:
+
+* **Bug A, delete.** A pad created this session and deleted
+  (`still_listed 0`) was still in the file after `lib_save_library`; a
+  second delete with `remove_from_board=true` found it on the library
+  board, removed it (`remove_calls 2`) and still listed it
+  (`still_listed 1`); the save wrote it again, now first among the
+  pads. After `lib_reload_library` the same footprint-only delete
+  persisted, and that save read `was_modified false`.
+* **Bug B, 3D placement.** `align` none (the default) left the STEP
+  origin at ABSOLUTE (0, 0): `body.bbox` x -50024.30..-49931.60 in the
+  footprint frame, and `bbox_expected` identical to it, so the check
+  passed. The file stored `MODEL.2D.X=-49989.5mil MODEL.2D.Y=-50020mil`;
+  every other body in that library stores 0mil. `offset_z` 3 wrote
+  `STANDOFFHEIGHT=3mil` beside `MODEL.3D.DZ=0mil`, and `OVERALLHEIGHT`
+  stayed the model's own top: not lifted. Altium's AD26 example
+  `MiniPC.PcbLib` places generic bodies with `MODEL.3D.DZ` (787.4016mil,
+  39.3701mil) and derived, negative standoffs.
+* **Bug C, rotation read-back.** The rotation landed (file
+  `MODEL.3D.ROTX=90.000 ROTZ=45.000`) while `GetState` read 0, 0, 0 in
+  both `lib_link_3d_model` and `lib_get_footprint_bodies(model_state=true)`.
+* **Bug D, IPC batch.** The destination radio reads `Generate all
+  footprints in H:\git\multiviewer\hardware\multiviewer\carrier.PcbLib`
+  on this build, not `... current PcbLib file`; the run refused at
+  `configure` (safely, form closed unstarted).
+
+Run in this order on a scratch footprint (`<lib>` = the carrier library
+or a scratch copy, `<fp>` = a new throwaway footprint). Confirm `app_ping`
+answers after each call.
+
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.04.10`.
+
+2. **The reader on its own.** `lib_read_pcblib_file(<lib>, <fp>)` before
+   anything else (after creating `<fp>` and one `lib_save_library`):
+   expect `ok: true`, `found: true` and the footprint's current pads.
+   No Altium call is made; it works with Altium closed.
+
+3. **A session-created pad stays deleted (bug A, the one call).**
+   `lib_add_footprint_pads(component_name=<fp>, library_path=<lib>,
+   pads=[{designator:"1", x:0, y:0}, {designator:"3", x:200.25, y:0}])`,
+   then, WITHOUT saving:
+
+   ```
+   lib_delete_footprint_pads(footprint_name=<fp>, library_path=<lib>,
+                             pads=[{designator:"3"}], confirm=true)
+   ```
+
+   (`reload_first` is on by default.) Expect `reload_first: {ran: true,
+   saved: true, reloaded: true}`, `removed: 1`, `still_listed: 0`,
+   `board_still_listed: 0`, `marked_modified: true`; RECORD
+   `target_was_current`. Then `lib_save_library(<lib>)`: expect
+   `was_modified: true`. Then `lib_read_pcblib_file(<lib>, <fp>)`: pad
+   `3` must be ABSENT and pad `1` present. That one sequence settles it.
+   If pad 3 is still in the file, record `target_was_current` and
+   `board_still_listed`: true / above 0 points at the current-footprint
+   board copy surviving even a disk-loaded removal.
+
+4. **The old path still reproduces (optional, diagnostic).** Add pad `4`,
+   then delete it with `reload_first=false`. RECORD `board_still_listed`
+   and `target_was_current`; save; read the file. Pad `4` present in the
+   file with `board_still_listed` above 0 confirms the board copy is the
+   carrier of the bug.
+
+5. **Primitives delete and 3D replace use the same rule.**
+   `lib_add_footprint_track` on `<fp>`, then
+   `lib_delete_footprint_primitives(footprint_name=<fp>,
+   library_path=<lib>, object_type="track", confirm=true)`: expect
+   `reload_first.reloaded: true`, `board_still_listed: 0`; save; the
+   file lists no track on `<fp>`. (`lib_link_3d_model` with
+   `replace=true` and `library_path` must show `reload_first` in its
+   reply too.)
+
+6. **The STEP origin lands on the footprint origin (bug B).**
+
+   ```
+   lib_link_3d_model(component_name=<fp>, library_path=<lib>,
+       model_path=<Crystal_SMD_2520-4Pin_2.5x2.0mm.step>,
+       rotation_x=90, rotation_z=45, offset_x=10.5, offset_y=-20,
+       offset_z=3)
+   ```
+
+   Expect `applied.rotation: true`, `applied.z_offset: true`,
+   `applied.standoff_height: false`, `placement.ok: true` with
+   `placement.gap_mils` 0 (overlapping the pads) or small,
+   `placement_ok: true`, and `body.bbox` within a few hundred mil of the
+   origin (NOT near -50000). `expected_in_file`: `model_2d_x_mils 10.5`,
+   `model_2d_y_mils -20`, `model_3d_rotx 90`, `model_3d_rotz 45`,
+   `model_3d_dz_mils 3`. Save, then `lib_read_pcblib_file(<lib>, <fp>)`:
+   the body's `model.x_mils` = 10.5, `model.y_mils` = -20, `rot_x` 90,
+   `rot_z` 45, `dz_mils` = 3, and `outline_bbox_mils` near the pads.
+   If `dz_mils` reads 0, the Dz argument is ignored by this build:
+   record `standoff_height_mils` / `overall_height_mils` and report it.
+
+7. **The placement check fails a misplaced body.** Link the same model
+   with `offset_x=5000` (far from any pad): expect `ok: false`,
+   `placement_ok: false`, and a `reason` naming the gap. Undo it with
+   `lib_delete_footprint_primitives(object_type="componentbody",
+   confirm=true, library_path=<lib>)` and confirm the file has no body
+   left from it.
+
+8. **center and pads still work.** Link with `align="center"` and then
+   `align="pads"`, `replace=true`: `placement.ok: true`, and the body's
+   box centre within 1 mil of (offsets) / (pads centre + offsets).
+
+9. **The rotation read-back is honest (bug C).**
+   `lib_get_footprint_bodies(footprint_name=<fp>, library_path=<lib>,
+   model_state=true)`: each model has `rotation: null` and
+   `rotation_readback.available: false`; nothing reports 0, 0, 0. The
+   link reply has `model_state: null`, `rotation_readback_matches: null`
+   and `rotation_readback.available: false`.
+
+10. **The IPC batch generator accepts the path caption (bug D).**
+    Repeat step 30 item 3. Expect `runs[0].dialog.destination.ok: true`,
+    `match: "path"` and `named_path` equal to `<lib>`, and the run to go
+    past `configure`. The refusal for a caption naming a DIFFERENT
+    library is covered by tests/test_ipc_batch_dialog.py (the flow
+    focuses the target library first, so it is hard to provoke live).
+
+Record every read-back named above in this section once run, the way
+steps 22 to 24 record theirs.
 
 ---
 

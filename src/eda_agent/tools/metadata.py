@@ -135,6 +135,12 @@ _OFFLINE_CATEGORIES = frozenset({"routing", "meta", "parts"})
 # pcb / audit / simulation -> live_only; design is mixed (mostly offline,
 # handled by the offline classifier below).
 
+# Named tools that are pure Python whatever their prefix: they read a file
+# from disk and never ask the bridge. lib_read_pcblib_file is the persistence
+# proof for the library edit tools, and the point of it is that it answers
+# with Altium closed, so it must be findable under the offline filter.
+_OFFLINE_TOOLS = frozenset({"lib_read_pcblib_file"})
+
 # Tools that are pure Python regardless of their prefix (deterministic, no
 # bridge round-trip). Substring match keeps the calculators in one rule.
 _OFFLINE_SUBSTRINGS = ("_calc_", "calc_", "_compute_", "compute_")
@@ -460,7 +466,7 @@ def category_of(name: str) -> str:
 
 
 def _is_offline(name: str, category: str) -> bool:
-    if category in _OFFLINE_CATEGORIES:
+    if category in _OFFLINE_CATEGORIES or name in _OFFLINE_TOOLS:
         return True
     if name in _CALC_NEEDS_BRIDGE:
         return False

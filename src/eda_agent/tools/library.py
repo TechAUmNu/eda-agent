@@ -280,6 +280,68 @@ async def _save_library_verified(bridge, library_path: str) -> dict:
     return out
 
 
+#: The persistence proof every library delete/modify/3D tool points at.
+_FILE_PROOF = (
+    "lib_save_library, then lib_read_pcblib_file(library_path, "
+    "footprint_name): it reads the SAVED .PcbLib with no Altium involved, "
+    "so it shows what reached disk rather than what the editor holds")
+
+
+async def _reload_first(bridge, library_path: str,
+                        what: str) -> tuple[dict, Optional[dict]]:
+    """Save and reopen the library BEFORE a removal, so it removes disk-loaded
+    primitives. Returns ``(record, refusal)``; ``refusal`` is not None when
+    the removal must not be sent.
+
+    MEASURED 2026-10-04 (docs/RELEASE_VERIFICATION.md step 31, and the
+    block above Lib_DeleteFootprintPads in Library.pas): a pad created in
+    the same session and removed from its footprint was written back by
+    the next save (twice, the second time with remove_from_board=True),
+    while the same removal after lib_reload_library persisted. No proven
+    Altium member removes the session-created object's library-board
+    registration, so the tool makes every doomed primitive a disk-loaded
+    one: save the library (every pending edit in it, not only this
+    footprint's) and reopen it, then remove.
+
+    Refuses rather than deletes when the save does not reach disk (a
+    reload of a dirty library raises Altium's Unsaved Changes prompt and
+    blocks the bridge) or the reopen fails. Without ``library_path`` there
+    is no file to save and reopen, so it is SKIPPED, said so in the record.
+    """
+    path = str(library_path or "").strip()
+    if not path:
+        return ({"requested": True, "ran": False, "skipped": (
+            "no library_path was given, so there was no file to save and "
+            "reopen. A primitive created in this session may then come back "
+            "after the save; pass library_path to have it settled first")},
+                None)
+    save = await _save_library_verified(bridge, path)
+    rec: dict = {"requested": True, "ran": True, "saved": bool(save.get("ok")),
+                 "save": save, "reloaded": False}
+    if not save.get("ok"):
+        return rec, {"ok": False, "reload_first": rec, "reason": (
+            f"reload_first: the library could not be saved first, so it was "
+            f"not reopened and nothing was {what}: {save.get('reason')}. Fix "
+            f"that, or pass reload_first=False to remove from the library as "
+            f"it stands in memory")}
+    rec["reloaded"] = await _reload_library(bridge, path)
+    if not rec["reloaded"]:
+        return rec, {"ok": False, "reload_first": rec, "reason": (
+            f"reload_first: the library was saved but did not reopen, so "
+            f"nothing was {what}. Open it again (proj_open / app_list_documents"
+            f") and retry")}
+    return rec, None
+
+
+def _with_reload_record(result, rec: Optional[dict]):
+    """Attach the reload_first record to a handler reply."""
+    if rec is None:
+        return result
+    out = dict(result) if isinstance(result, dict) else {"reply": result}
+    out["reload_first"] = rec
+    return out
+
+
 def _rename_ops(renames) -> tuple[list[str], list[dict]]:
     """Wire ops for ``library.rename_footprints``, and the renames refused.
 
@@ -3209,6 +3271,7 @@ def register_library_tools(mcp):
         library_path: str = "",
         layer: str = "",
         remove_from_board: bool = False,
+        reload_first: bool = True,
     ) -> dict[str, Any]:
         """Link a 3D STEP model to a PcbLib footprint.
 
@@ -3235,10 +3298,14 @@ def register_library_tools(mcp):
             offset_x: X offset in mils. What it is measured from depends
                 on ``align``.
             offset_y: Y offset in mils, with offset_x.
-            offset_z: Z offset in mils, sets the body's StandoffHeight
-                (confirmed live). The common adjustment: lifting a
-                connector body so it sits on its pads rather than
-                through them.
+            offset_z: Z offset in mils: the model's ``MODEL.3D.DZ``,
+                written on the model (``Model.SetState``'s Dz) with the
+                rotation, before the body derives its heights. That is
+                the field Altium's own libraries place a STEP with. It
+                used to set StandoffHeight, which was measured
+                (2026-10-04) to store a standoff without lifting the
+                model. The common adjustment: lifting a connector body
+                so it sits on its pads rather than through them.
             rotation_x: rotation about X in degrees. Written on the MODEL
                 (``Model.SetState``) before the body derives its outline,
                 because the model is where a 3D body's rotation lives:
@@ -3250,24 +3317,39 @@ def register_library_tools(mcp):
             rotation_z: rotation about Z in degrees, the same route.
             replace: remove the footprint's existing 3D bodies first.
                 They are removed from the FOOTPRINT, the removal that has
-                run live.
+                run live. A body created in this session would come back
+                with the next save (the pad delete measured exactly that,
+                2026-10-04), so with ``replace`` the library is saved and
+                reopened first by default (``reload_first``).
             remove_from_board: with ``replace``, also take the replaced
-                bodies off the library's backing board. UNMEASURED and
-                off by default: see ``lib_delete_footprint_primitives``,
-                which shares the rule. Use it if a replaced placeholder
-                comes back after lib_save_library and lib_reload_library.
-                ``replaced.board_removal`` reports what it found.
+                bodies off the library's backing board. Off by default,
+                and measured on the pad delete NOT to stop a
+                session-created primitive coming back: see
+                ``lib_delete_footprint_primitives``, which shares the
+                rule. ``replaced.board_removal`` reports what it found.
+            reload_first: with ``replace``, ON by default: save the
+                library and reopen it before the link, so every body it
+                replaces is loaded from disk. Needs ``library_path``
+                (skipped without it, ``reload_first.skipped`` says so).
+                The save writes every pending edit in that library; a
+                save that does not reach disk refuses the link. Ignored
+                without ``replace``, which removes nothing.
             align: where the body goes in X and Y.
-                ``"none"`` (default, the previous behaviour) moves it by
-                (offset_x, offset_y) from wherever Altium put it, which is
-                wherever the STEP's own origin lands.
+                ``"none"`` (default) puts the STEP's OWN ORIGIN on the
+                FOOTPRINT origin, plus (offset_x, offset_y): what Altium's
+                library editor does when it places a STEP body, and what
+                a KiCad or maker model authored about its footprint
+                origin needs. It used to move the body by the offsets
+                from where Altium dropped it, which is ABSOLUTE (0, 0)
+                on the library board (measured 2026-10-04): on a
+                footprint whose origin was (50000, 50000) mils the model
+                landed 50,000 mil from its pads.
                 ``"center"`` puts the centre of the body's bounding box on
                 the footprint origin, plus the offsets.
                 ``"pads"`` puts it on the centre of the pads, plus the
-                offsets.
-                The move is computed from the box read back after the
-                body is added, so it works whatever origin the STEP was
-                authored about. ``"center"`` suits a centred footprint,
+                offsets. Those two move from the box read back after the
+                body is added, so they work whatever origin the STEP was
+                authored about; ``"center"`` suits a centred footprint,
                 which an IPC generated one is.
             library_path: optional .PcbLib to focus first. Checked after
                 the open, and refused when a different document ends up in
@@ -3282,39 +3364,66 @@ def register_library_tools(mcp):
                 anything is touched. lib_get_footprint_bodies shows each
                 body's layer.
 
-        NOT YET RUN AGAINST A LIVE SESSION (2026-10-04): the rotation is
-        written with IPCB_Model.SetState and read back with GetState. The
-        AD26 script binding declares both, with exactly these parameters,
-        but no earlier call here exercised them. They run only when a
-        rotation is non-zero, so a link without one runs the sequence that
-        has always worked. Try one rotated link on a scratch footprint
-        first and read ``model_state``.
+        MEASURED LIVE 2026-10-04: the rotation written with
+        IPCB_Model.SetState lands and persists (the saved record read
+        MODEL.3D.ROTX=90, ROTZ=45). It CANNOT BE READ BACK in memory:
+        GetState returned zeros beside that file, because its OUT
+        parameters do not come back through DelphiScript, so it is no
+        longer called and ``rotation_readback`` says "unavailable"
+        instead of reporting a false mismatch. SetState runs only when a
+        rotation or offset_z is non-zero, so a plain link runs the
+        sequence that has always worked.
+
+        PROOF OF THE PLACEMENT: ``lib_save_library``, then
+        ``lib_read_pcblib_file(library_path, footprint_name)``. The body
+        there carries ``model.x_mils``/``y_mils`` (MODEL.2D.X/Y, relative
+        to the footprint origin: equal to offset_x/offset_y for
+        align="none"), ``rot_x/rot_y/rot_z`` and ``dz_mils`` (=
+        offset_z), exactly as stored. ``expected_in_file`` in this reply
+        lists the values to compare.
 
         Returns:
             ``success``, ``footprint``, ``model``, ``units`` ("mils"), and:
 
-            ``applied``: what was actually written. ``standoff_height``;
-            ``rotation`` (SetState returned without raising);
-            ``rotation_z`` (kept for older callers: rotation applied and
-            rotation_z non-zero); ``offset_xy`` (a move happened);
-            ``align``; ``aligned`` (false when the box or the pads could
-            not be read, so nothing was aligned); ``layer`` (a layer was
-            written) and ``layer_source`` (``argument``, ``replaced body``
-            or ``default``). A false covers both a refused write and an
-            argument left at its default.
+            ``ok`` is false (with ``reason``) when ``placement_ok`` is:
+            the body was added in memory but does not sit on its
+            footprint. Undo it with ``lib_delete_footprint_primitives``
+            (object_type "componentbody", with library_path, so its
+            reload_first saves and reopens first and the removal sticks),
+            or link again with ``replace=True`` and corrected offsets.
 
-            ``rotation_requested`` and ``model_state``: what was asked for
-            and, when a rotation was, what the model reports holding
-            (``{x, y, z, dz_mils}``, null when nothing could be read).
-            ``rotation_readback_matches`` compares the two (null when no
-            rotation was asked for or none could be read).
+            ``applied``: what was actually written. ``rotation``
+            (SetState returned without raising, a rotation was asked
+            for); ``rotation_z`` (kept for older callers); ``z_offset``
+            and ``z_offset_mils`` (offset_z written as the model's DZ);
+            ``standoff_height`` (always false now: offset_z no longer
+            writes it); ``offset_xy`` (a move happened); ``align``;
+            ``aligned`` (false when the box or the pads could not be
+            read, so nothing was aligned); ``layer`` (a layer was
+            written) and ``layer_source`` (``argument``, ``replaced
+            body`` or ``default``).
+
+            ``rotation_requested``; ``model_state`` and
+            ``rotation_readback_matches`` are null (kept for older
+            callers); ``rotation_readback`` is ``{available: false,
+            reason, verify_with}``. ``expected_in_file``: what the saved
+            ComponentBody record should hold, relative to the footprint
+            origin (``model_2d_x_mils``/``model_2d_y_mils`` for
+            align="none", null otherwise; ``model_3d_rotx/roty/rotz``;
+            ``model_3d_dz_mils``).
+
+            ``placement``: ``{ok, reference ("pads_bbox" or
+            "footprint_origin"), gap_mils, limit_mils, problem}``, the
+            gap between the body's box and the pads' box in the
+            footprint frame (0 = overlapping). Above 1000 mil, or a box
+            that cannot be read, is ``placement_ok`` false.
 
             ``replaced``: ``requested``, ``removed_bodies``,
             ``remove_calls``, ``remaining_before_add`` (0 when the
-            replace worked) and ``board_removal`` (``{requested}``, or
-            with ``remove_from_board`` what the board half found:
-            ``listed_before``, ``removed``, ``still_listed``,
-            ``skipped_still_in_footprint``, ``not_run``).
+            replace worked), ``board_still_listed`` (replaced bodies the
+            LIBRARY BOARD still lists, read-only) and ``board_removal``
+            (``{requested}``, or with ``remove_from_board`` what the
+            board half found). ``reload_first`` when ``replace`` ran it.
 
             ``frame``: ``origin_x_mils`` / ``origin_y_mils`` (the
             footprint origin in library-board coordinates) and
@@ -3325,7 +3434,11 @@ def register_library_tools(mcp):
             width, height``, mils from the footprint origin), all read
             back from the placed body.
 
-            ``bbox_expected``: the box the move should have produced.
+            ``bbox_expected``: the box the move should have produced
+            (the pre-move box plus the move). A consistency check against
+            a stale read ONLY, not a placement check: a body 50,000 mil
+            from its footprint passed it (2026-10-04). ``placement`` is
+            the placement check.
             ``bbox_readback_stale``: true when the read box did not change
             across a move, i.e. a cached BoundingRectangle; trust
             ``bbox_expected`` then, or save and lib_reload_library.
@@ -3377,7 +3490,22 @@ def register_library_tools(mcp):
         if remove_from_board:
             params["remove_from_board"] = "true"
         bridge = get_bridge()
-        return await bridge.send_command_async("library.link_3d_model", params)
+        rec = None
+        if replace and reload_first:
+            rec, refusal = await _reload_first(bridge, library_path,
+                                               "replaced or linked")
+            if refusal is not None:
+                return refusal
+        result = await bridge.send_command_async("library.link_3d_model", params)
+        result = _with_reload_record(result, rec)
+        if isinstance(result, dict) and result.get("placement_ok") is False:
+            result = dict(result)
+            result["ok"] = False
+            result["reason"] = (
+                "the 3D body was added in memory but does not sit on its "
+                "footprint: " + str((result.get("placement") or {}).get(
+                    "problem") or "placement check failed"))
+        return result
 
     @mcp.tool()
     async def lib_get_footprint_bodies(
@@ -3403,8 +3531,12 @@ def register_library_tools(mcp):
         in the numbers. With ``model_state=True`` each body also carries
         ``model``: ``type`` (``extruded``, ``generic`` = an imported STEP
         or other model file, ``cylinder``, ``sphere``), ``type_id``,
-        ``file``, ``planar_rotation`` and ``rotation`` (``{x, y, z,
-        dz_mils}`` read back from the model, null when unreadable).
+        ``file``, ``planar_rotation``, ``rotation`` (always null) and
+        ``rotation_readback`` (``{available: false, reason,
+        verify_with}``). The 3D rotation cannot be read in memory:
+        IPCB_Model.GetState returned zeros beside a saved ROTX=90 /
+        ROTZ=45 (measured 2026-10-04). ``lib_read_pcblib_file`` reads it
+        from the saved file.
 
         With ``footprint_name`` empty: the whole library, one line per
         footprint with ``bodies`` and, with ``model_state=True``, how many
@@ -3422,18 +3554,14 @@ def register_library_tools(mcp):
             library_path: optional .PcbLib; defaults to the focused one.
                 Refused when a different document ends up in front.
             model_state: OFF by default. True also reads the model
-                behind each body (type, file, rotation), through
-                IPCB_Model members (ModelType, FileName, Rotation,
-                GetState) that the AD26 script binding declares but no
-                live call has run yet. If one of those names does not
-                resolve, the fault is not catchable: it stops the
-                polling loop, and nothing answers until the bridge is
-                restarted by hand. A default-on read would make every
-                ordinary call, and every body of a sweep, that
-                experiment, so the reads stay opt-in until
-                docs/RELEASE_VERIFICATION.md step 5 has passed live.
-                Without it the reply still carries layer, heights, bbox
-                and the pads' box, all read with proven members.
+                behind each body (type, file, planar rotation), through
+                IPCB_Model members (ModelType, FileName, Rotation). They
+                ran live once without a fault (2026-10-04); they stay
+                opt-in until docs/RELEASE_VERIFICATION.md step 5 has
+                passed on the release build, because an unresolved name
+                is not catchable and stops the polling loop. Without it
+                the reply still carries layer, heights, bbox and the
+                pads' box, all read with proven members.
             offset: first footprint of the sweep page.
             limit: footprints per sweep page.
 
@@ -3479,6 +3607,7 @@ def register_library_tools(mcp):
         replace: bool = False,
         align: str = "none",
         remove_from_board: bool = False,
+        reload_first: bool = True,
     ) -> dict[str, Any]:
         """Batch-link STEP models to footprints by matching file names.
 
@@ -3498,15 +3627,23 @@ def register_library_tools(mcp):
             align: passed to every link: ``"none"``, ``"center"`` or
                 ``"pads"``. See lib_link_3d_model.
             remove_from_board: with ``replace``, passed to every link.
-                Unmeasured and off by default; see lib_link_3d_model.
+                Off by default; see lib_link_3d_model.
+            reload_first: with ``replace``, ON by default: save the
+                library and reopen it ONCE before the first link, so the
+                bodies being replaced are loaded from disk (a body created
+                in this session comes back with the next save otherwise;
+                see lib_link_3d_model). Needs ``library_path``; skipped
+                without it, and ``reload_first.skipped`` says so.
 
         Returns:
-            {"linked": [{footprint, model, applied, replaced, bbox}],
-             "failed": [{footprint, model, error, code}],
-             "unmatched_footprints": [...], "unused_models": [...]}.
-            A link that Altium refused is listed under ``failed`` rather
-            than ``linked``; before this every attempted link was
-            reported as linked whatever came back.
+            {"linked": [{footprint, model, applied, replaced, bbox,
+             placement}], "failed": [{footprint, model, error, code}],
+             "unmatched_footprints": [...], "unused_models": [...],
+             "reload_first"?}. A link that Altium refused, or whose body
+            fails the placement check (``placement_ok`` false: not on its
+            footprint), is listed under ``failed`` rather than
+            ``linked``. Persistence proof: lib_save_library, then
+            lib_read_pcblib_file.
         """
         from pathlib import Path
 
@@ -3531,6 +3668,12 @@ def register_library_tools(mcp):
                 models[f.stem.lower()] = str(f)
 
         bridge = get_bridge()
+        rec = None
+        if replace and reload_first:
+            rec, refusal = await _reload_first(bridge, library_path or "",
+                                               "replaced or linked")
+            if refusal is not None:
+                return refusal
         params: dict[str, Any] = {}
         if library_path:
             params["library_path"] = library_path
@@ -3584,21 +3727,32 @@ def register_library_tools(mcp):
                                "code": getattr(e, "code", "")})
                 continue
             res = res if isinstance(res, dict) else {}
+            if res.get("placement_ok") is False:
+                failed.append({"footprint": fname, "model": models[key],
+                               "code": "PLACEMENT_FAR_FROM_FOOTPRINT",
+                               "error": str((res.get("placement") or {}).get(
+                                   "problem") or "placement check failed"),
+                               "placement": res.get("placement")})
+                continue
             linked.append({
                 "footprint": fname,
                 "model": models[key],
                 "applied": res.get("applied"),
                 "replaced": res.get("replaced"),
                 "bbox": (res.get("body") or {}).get("bbox"),
+                "placement": res.get("placement"),
             })
 
-        return {
+        out = {
             "success": not failed,
             "linked": linked,
             "failed": failed,
             "unmatched_footprints": unmatched,
             "unused_models": [models[k] for k in models if k not in used],
         }
+        if rec is not None:
+            out["reload_first"] = rec
+        return out
 
     # =========================================================================
     # Library Search and Information
@@ -5447,6 +5601,7 @@ def register_library_tools(mcp):
         include_pads: bool = False,
         confirm: bool = False,
         remove_from_board: bool = False,
+        reload_first: bool = True,
     ) -> dict[str, Any]:
         """Delete primitives inside ONE footprint of a PCB library.
 
@@ -5468,11 +5623,15 @@ def register_library_tools(mcp):
         graphics off a layer should not quietly cost you the pinout.
 
         REMOVED FROM THE FOOTPRINT, the removal this tool has always
-        made. A primitive added in this session is listed twice until the
-        library is reloaded (``double_listed`` counts them), and deleting
-        one of those has been seen to come back after a save and reload.
-        If that happens, save, ``lib_reload_library`` and delete again, or
-        pass ``remove_from_board=True``.
+        made. A primitive CREATED IN THIS SESSION does not stay removed:
+        measured 2026-10-04, a pad added and then deleted came back with
+        the next save (twice, the second time with
+        ``remove_from_board=True``), while the same delete after
+        ``lib_reload_library`` persisted. So by default (``reload_first``)
+        this SAVES THE LIBRARY AND REOPENS IT FIRST, which makes every
+        primitive it removes one loaded from disk. That is a TOOLING fix,
+        not an Altium one: no proven script member removes a
+        session-created primitive's library-board registration.
 
         Args:
             footprint_name: The footprint to edit. Required: deleting
@@ -5489,23 +5648,44 @@ def register_library_tools(mcp):
                 are what you mean.
             remove_from_board: ALSO take each removed primitive off the
                 library's backing board, the second place every add
-                registers it. Off by default because no live session has
-                run it yet (docs/RELEASE_VERIFICATION.md step 24). With
-                it the footprint is made current first (``SELECT_FAILED``
-                if that does not take, nothing removed), the footprint
-                removal runs as usual, and only then is the board swept,
-                by address, for objects the footprint no longer lists.
+                registers it. Off by default. MEASURED 2026-10-04 on the
+                pad delete: the board half found a session-created pad,
+                "removed" it and still listed it, and the save wrote it
+                back; it does not fix that case (``reload_first`` does).
+                With it the footprint is made current first
+                (``SELECT_FAILED`` if that does not take, nothing
+                removed), the footprint removal runs as usual, and only
+                then is the board swept, by address, for objects the
+                footprint no longer lists.
+            reload_first: ON by default. Save the library and reopen it
+                before removing anything (needs ``library_path``; without
+                it this is skipped and ``reload_first.skipped`` says so).
+                The save writes EVERY pending edit in that library, not
+                only this footprint's. A save that does not reach disk
+                refuses the delete, because reopening a dirty library
+                raises Altium's Unsaved Changes prompt. False removes
+                from the library as it stands in memory, the old
+                behaviour.
+
+        PROOF IT PERSISTED: ``lib_save_library``, then
+        ``lib_read_pcblib_file(library_path, footprint_name)``, which
+        reads the saved file with no Altium involved.
 
         Returns:
             Dict with ``library``, ``footprint``, ``removed`` (distinct
             primitives), ``remove_calls``, ``double_listed``,
-            ``still_listed`` (must be 0), ``examined``, ``layers``,
-            ``pads_included``, ``board_removal`` (``{requested}``, or
-            with ``remove_from_board``: ``made_current``, ``objects``,
-            ``listed_before`` = how many the board still listed after
-            the footprint removal, ``removed``, ``remove_calls``,
-            ``still_listed``, ``skipped_still_in_footprint``,
-            ``not_run``) and ``note``.
+            ``still_listed`` (removed objects the FOOTPRINT still lists;
+            must be 0), ``board_still_listed`` (removed objects the
+            LIBRARY BOARD still lists; above 0 is one a save can write
+            back), ``target_was_current``, ``marked_modified`` (the
+            library reads modified afterwards), ``examined``,
+            ``layers``, ``pads_included``, ``board_removal``
+            (``{requested}``, or with ``remove_from_board``:
+            ``made_current``, ``objects``, ``listed_before``,
+            ``removed``, ``remove_calls``, ``still_listed``,
+            ``skipped_still_in_footprint``, ``not_run``), ``note``, and
+            ``reload_first`` (``{requested, ran, saved, reloaded, save}``
+            or ``{requested, ran: false, skipped}``).
         """
         if not footprint_name.strip():
             return {"ok": False, "reason": "footprint_name is required"}
@@ -5529,8 +5709,17 @@ def register_library_tools(mcp):
             params["remove_from_board"] = "true"
 
         bridge = get_bridge()
-        return await bridge.send_command_async(
+        rec = None
+        if reload_first and confirm:
+            # Only for a delete that will run: without confirm the handler
+            # refuses, and saving and reopening a library for that would
+            # be a side effect with nothing to show for it.
+            rec, refusal = await _reload_first(bridge, library_path, "deleted")
+            if refusal is not None:
+                return refusal
+        result = await bridge.send_command_async(
             "library.delete_footprint_primitives", params)
+        return _with_reload_record(result, rec)
 
     @mcp.tool()
     async def lib_modify_footprint_pads(
@@ -5607,7 +5796,10 @@ def register_library_tools(mcp):
             x_mil/y_mil, sizes, shape, corner_pct, hole fields, plated,
             layer, mode, and for a through-hole pad its ``bottom`` and
             ``mid`` copper. The library is MARKED dirty, not written:
-            ``lib_save_library(library_path)`` flushes it.
+            ``lib_save_library(library_path)`` flushes it, and
+            ``lib_read_pcblib_file(library_path, footprint_name)`` then
+            reads the pads back from the SAVED file (no Altium involved),
+            which is the proof the edit persisted.
         """
         if not str(footprint_name or "").strip():
             return {"ok": False, "reason": "footprint_name is required"}
@@ -5633,6 +5825,7 @@ def register_library_tools(mcp):
         library_path: str = "",
         confirm: bool = False,
         remove_from_board: bool = False,
+        reload_first: bool = True,
     ) -> dict[str, Any]:
         """Delete individual pads from ONE PcbLib footprint.
 
@@ -5646,6 +5839,21 @@ def register_library_tools(mcp):
         ALL OR NOTHING: if any selector does not resolve to exactly the
         pads it names, nothing is removed and the reply says which.
 
+        A PAD CREATED IN THIS SESSION DID NOT STAY DELETED (measured
+        2026-10-04): removed from the footprint, it was written back by
+        the next save, and again after a delete with
+        ``remove_from_board=True``; after ``lib_reload_library`` the same
+        delete persisted. So by default (``reload_first``) this SAVES THE
+        LIBRARY AND REOPENS IT FIRST, which makes every pad it removes one
+        loaded from disk. A tooling fix, stated plainly: no proven script
+        member removes a session-created pad's library-board registration.
+        The selectors are resolved after the reopen, in the reopened
+        library's pad order.
+
+        PROOF IT PERSISTED: ``lib_save_library``, then
+        ``lib_read_pcblib_file(library_path, footprint_name)``, which
+        reads the saved file with no Altium involved.
+
         Args:
             footprint_name: The footprint to edit. Required.
             pads: One dict per selector:
@@ -5656,15 +5864,26 @@ def register_library_tools(mcp):
             confirm: Required. Read the pads with
                 ``lib_get_pad_geometry`` first, then pass True.
             remove_from_board: also take each removed pad off the
-                library's backing board. Unmeasured and off by default;
-                see ``lib_delete_footprint_primitives``, which shares the
-                rule.
+                library's backing board. Off by default; measured
+                2026-10-04 NOT to stop a session-created pad coming back
+                (see ``lib_delete_footprint_primitives``, which shares the
+                rule).
+            reload_first: ON by default. Save the library and reopen it
+                before removing (needs ``library_path``; skipped without
+                it, and ``reload_first.skipped`` says so). The save writes
+                EVERY pending edit in that library. A save that does not
+                reach disk refuses the delete. False removes from the
+                library as it stands in memory.
 
         Returns:
             {library, footprint, removed, selectors, results, pads_before,
-             pads_after, still_listed, double_listed, board_removal,
-             written_to_disk: false, pending_save}. still_listed must be
-            0. The library is MARKED dirty, not written:
+             pads_after, still_listed, board_still_listed,
+             target_was_current, double_listed, board_removal,
+             marked_modified, written_to_disk: false, pending_save,
+             reload_first}. still_listed (the FOOTPRINT iterator) must be
+            0; board_still_listed (the LIBRARY BOARD iterator) above 0 is
+            a pad a save can write back. The library is MARKED dirty
+            (``marked_modified`` reads it back), not written:
             ``lib_save_library(library_path)`` flushes it.
         """
         if not str(footprint_name or "").strip():
@@ -5689,8 +5908,14 @@ def register_library_tools(mcp):
         if remove_from_board:
             params["remove_from_board"] = "true"
         bridge = get_bridge()
-        return await bridge.send_command_async(
+        rec = None
+        if reload_first:
+            rec, refusal = await _reload_first(bridge, library_path, "deleted")
+            if refusal is not None:
+                return refusal
+        result = await bridge.send_command_async(
             "library.delete_footprint_pads", params, timeout=120.0)
+        return _with_reload_record(result, rec)
 
     @mcp.tool()
     async def lib_set_footprint_description(
@@ -6805,6 +7030,107 @@ def register_library_tools(mcp):
         return await bridge.send_command_async(
             "library.normalize_implementations", params
         )
+
+    @mcp.tool()
+    async def lib_read_pcblib_file(
+        library_path: str,
+        footprint_name: str = "",
+        offset: int = 0,
+        limit: int = 25,
+    ) -> dict[str, Any]:
+        """Read a SAVED .PcbLib straight from disk: the persistence proof.
+
+        PURE PYTHON, NO ALTIUM. Every bridge read-back answers from
+        Altium's memory, and memory and file have disagreed: on
+        2026-10-04 a pad the delete reported gone was written back by the
+        next save, and a 3D body whose self-check passed was stored
+        50,000 mil from its footprint. Only the file showed either. So
+        after ``lib_delete_footprint_pads``,
+        ``lib_delete_footprint_primitives``, ``lib_modify_footprint_pads``
+        or ``lib_link_3d_model``, run ``lib_save_library`` and then this:
+        what it lists is what reached disk. No reload is needed, and it
+        works with Altium closed.
+
+        COORDINATES ARE MILS RELATIVE TO THE FOOTPRINT ORIGIN, exactly as
+        the file stores them (1/10000 mil resolution), so they compare
+        directly with the x/y the lib_ tools take.
+
+        Args:
+            library_path: full path of the .PcbLib on disk. Altium may
+                have it open; the file is only read.
+            footprint_name: one footprint (case-insensitive exact name).
+                Empty lists every footprint, paged.
+            offset: first footprint of a page (name order), when
+                footprint_name is empty.
+            limit: footprints per page, when footprint_name is empty.
+
+        Returns:
+            ``{ok, library_path, total, units: "mils", frame, found?,
+            closest?, offset?, count?, footprints: [{name, storage,
+            counts, pads, tracks, arcs, vias, fills, texts, regions,
+            bodies, other_records, parse_error?}]}``.
+
+            pads: ``designator, x_mils, y_mils, x_size_mils, y_size_mils,
+            shape (round | rectangular | octagonal | roundrect),
+            corner_pct, rotation, hole_mils, hole_type (round | square |
+            slot), slot_length_mils, hole_rotation, plated, layer,
+            paste_expansion_mils, mask_expansion_mils`` (the expansions
+            are null when the pad follows the design rule).
+            tracks: ``layer, x1_mils, y1_mils, x2_mils, y2_mils,
+            width_mils``. arcs: ``layer, x_mils, y_mils, radius_mils,
+            start_angle, end_angle, width_mils``. fills: ``layer,
+            x1_mils .. y2_mils, rotation``. texts: ``text, layer,
+            x_mils, y_mils, height_mils, rotation, stroke_width_mils``.
+            regions: ``layer, kind, is_keepout, vertex_count,
+            bbox_mils``.
+            bodies: ``layer, standoff_height_mils, overall_height_mils,
+            outline_bbox_mils, model: {name, type (extruded | generic |
+            cylinder | sphere), type_id, x_mils, y_mils (MODEL.2D.X/Y:
+            the model origin relative to the footprint origin),
+            planar_rotation, rot_x, rot_y, rot_z (MODEL.3D.ROTX/Y/Z),
+            dz_mils (MODEL.3D.DZ, the Z offset), embedded}``.
+            ``ok`` False with ``reason`` when the file is missing, not a
+            PcbLib, or the footprint is not in it (``closest`` names).
+        """
+        from ..fileio.altium_pcblib import read_pcblib
+
+        path = str(library_path or "").strip()
+        if not path:
+            return {"ok": False, "reason": "library_path is required"}
+        if not Path(path).is_file():
+            return {"ok": False, "library_path": path,
+                    "reason": f"no file at {path}"}
+        try:
+            offset = max(0, int(offset))
+            limit = int(limit)
+        except (TypeError, ValueError):
+            return {"ok": False,
+                    "reason": "offset and limit must be whole numbers"}
+        if limit <= 0:
+            limit = 25
+        try:
+            result = read_pcblib(path, str(footprint_name or "").strip(),
+                                 offset=offset, limit=limit)
+        except ValueError as exc:
+            return {"ok": False, "library_path": path, "reason": str(exc)}
+        except OSError as exc:
+            return {"ok": False, "library_path": path, "reason": (
+                f"the file could not be read: {exc}")}
+        except Exception as exc:                 # noqa: BLE001
+            # A damaged compound file can fail anywhere in olefile; that is
+            # an answer about the file, not a traceback in place of one.
+            return {"ok": False, "library_path": path, "reason": (
+                f"the file could not be parsed as a PcbLib: "
+                f"{type(exc).__name__}: {exc}")}
+        if str(footprint_name or "").strip() and not result.get("found"):
+            result["ok"] = False
+            result["reason"] = (
+                f"footprint {footprint_name!r} is not in the saved file. If "
+                f"it was created this session, it reaches the file only when "
+                f"lib_save_library writes it")
+            return result
+        result["ok"] = True
+        return result
 
     @mcp.tool()
     async def lib_inspect_cse_zip(zip_path: str) -> dict[str, Any]:

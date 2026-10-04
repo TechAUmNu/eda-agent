@@ -793,9 +793,20 @@ is the measurement; keep them opt-in until it has passed live.
 **`SetState(RotX, RotY, RotZ : Double; Dz : Integer)`**
 The model's 3D rotation in degrees and its Z offset in internal units:
 the `MODEL.3D.ROTX/ROTY/ROTZ/DZ` fields a saved PcbLib stores per body.
+**Ran live 2026-10-04** (AD26, `Body3D_ApplyModelState`): ROTX 90 /
+ROTZ 45 persisted to the saved file. `Dz` is how a generic (STEP) body
+is placed in Z: Altium's own example libraries store e.g.
+`MODEL.3D.DZ=39.3701mil` beside a derived, negative `STANDOFFHEIGHT`,
+and writing `StandoffHeight` on a STEP body was measured NOT to lift
+the model. Call it before `SetState_FromModel` so the body's heights
+are derived from the placed model.
 
 **`GetState(out RotX, RotY, RotZ : Double; out Dz : Integer)`**
-The same four, read back. OUT parameters: pass plain locals.
+The same four, read back. **Does not work from DelphiScript** (measured
+2026-10-04): the call returns without faulting and leaves every local
+at 0, beside a saved file holding ROTX 90 / ROTZ 45. An OUT parameter of
+an Altium method does not come back through a script local. Do not call
+it; read the saved file instead (`lib_read_pcblib_file`).
 
 **`ModelType : T3DModelType`**  *(property)*
 `0` extruded, `1` generic (an imported model file such as STEP), `2`
@@ -809,4 +820,14 @@ The model's source file name.
 **`Rotation : TAngle`**  *(property)*
 The model's planar rotation, paired with `Origin : TCoordPoint` in the
 binding: on the file layout, `MODEL.2D.ROTATION` and `MODEL.2D.X/Y`, a
-different number from the 3D rotation about Z.
+different number from the 3D rotation about Z. `Origin` is not used
+anywhere here (unproven, and a record-typed property).
+
+**Where a new model lands (measured 2026-10-04).** A body made with
+`ModelFactory_FromFilename` and added to a library footprint has its
+model origin at ABSOLUTE (0, 0) of the library board, not at the
+footprint origin (`Footprint.X/Y`, which read (50000, 50000) mils on the
+carrier library). The saved `MODEL.2D.X/Y` is relative to the footprint
+origin, so a model left there is stored about -50000mil away from its
+pads. `lib_link_3d_model` moves it by the footprint origin plus the
+offsets for `align='none'`.

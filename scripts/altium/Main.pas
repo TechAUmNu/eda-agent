@@ -13,7 +13,15 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.10.04.9';
+    SCRIPT_VERSION = '2026.10.04.10';
+
+    // How far a linked 3D body's box may sit from its footprint's pads (or
+    // origin, with no pads) before lib_link_3d_model reports placement_ok
+    // false. A model is drawn around its package, so 1000 mil (25.4 mm) of
+    // clear space between the two is a body that is not on its footprint.
+    // Measured case it exists for: 2026-10-04, a STEP placed 50,000 mil from
+    // its pads passed the old self-check.
+    PlaceFarMils = 1000;
 
     // How far up the mechanical layers a pair tidy looks. Altium allows 1024,
     // and checking every combination of those is a million probes for a stack

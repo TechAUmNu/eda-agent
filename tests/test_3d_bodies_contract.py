@@ -6,13 +6,24 @@ lib_link_3d_model, lib_get_footprint_bodies and pcb_place_3d_body share
 the Body3D_ helpers in Library.pas. What these guards pin is the part a
 review cannot see failing, because the Pascal cannot run here:
 
-* The IPCB_Model members (SetState, GetState, ModelType, FileName,
-  Rotation) are declared by the AD26 script binding and exercised by no
-  earlier code. An undeclared identifier halts the polling loop where no
-  Try reaches, so each is confined to one small helper, and every helper
-  runs only on an explicit request: a rotation, or model_state=true on
-  the body list (off by default). A plain link and a default list then
-  run only members that have run live before.
+* The IPCB_Model members (SetState, ModelType, FileName, Rotation) are
+  declared by the AD26 script binding. An undeclared identifier halts
+  the polling loop where no Try reaches, so each is confined to one
+  small helper, and every helper runs only on an explicit request: a
+  rotation or a Z offset, or model_state=true on the body list (off by
+  default). A plain link and a default list then run only members that
+  have run live before.
+* GetState is NEVER called. Measured live 2026-10-04 it returns its OUT
+  parameters as 0 beside a saved ROTX=90 / ROTZ=45, so its read-back
+  was a false mismatch; the rotation read-back is reported unavailable
+  and the saved file (lib_read_pcblib_file) is the proof.
+* align='none' puts the model origin on the FOOTPRINT origin: the move
+  adds the footprint origin, because the factory drops the model origin
+  at absolute (0, 0) (measured 2026-10-04: 50,000 mil from its pads),
+  and a placement check compares the body with the footprint, not with
+  itself.
+* offset_z is the model's Dz (MODEL.3D.DZ), not StandoffHeight, which
+  was measured not to lift a STEP model.
 * The rotation is written BEFORE the body derives its outline and before
   it is added. Setting body properties on an unowned body crashed
   ADVPCB.DLL once; this writes the model, and the order is what makes
@@ -63,8 +74,7 @@ def handlers(library, pcb) -> dict[str, str]:
 
 #: Helper -> the unproven IPCB_Model members it alone may touch.
 _MODEL_HELPERS = {
-    "Body3D_ApplyRotation": ("SetState",),
-    "Body3D_ModelStateJson": ("GetState",),
+    "Body3D_ApplyModelState": ("SetState",),
     "Body3D_ModelTypeId": ("ModelType",),
     "Body3D_ModelInfoJson": ("FileName", "Rotation"),
 }
@@ -93,10 +103,29 @@ def test_set_and_get_state_are_called_only_inside_their_helpers(
                     continue
                 offenders.append(f"{module}:{name} calls .{member}(")
     assert not offenders, (
-        "IPCB_Model.SetState/GetState are unproven on a live session and "
-        "must stay inside their one-purpose helpers, which run only when "
-        "a rotation was asked for; a fault in one stops the polling loop, "
-        "so no default path may reach them: " + "; ".join(offenders))
+        "IPCB_Model.SetState must stay inside Body3D_ApplyModelState, which "
+        "runs only when a rotation or a Z offset was asked for, and "
+        "GetState is called nowhere (it returns zeros, measured "
+        "2026-10-04): " + "; ".join(offenders))
+
+
+def test_get_state_is_called_nowhere(library, pcb):
+    """Mutation: bring back Model.GetState(RX, RY, RZ, DzC).
+
+    MEASURED 2026-10-04: it returned 0, 0, 0 beside a saved file holding
+    MODEL.3D.ROTX=90 / ROTZ=45, and the link reported
+    rotation_readback_matches=false on a rotation that had landed.
+    """
+    for module, funcs in (("Library.pas", library), ("PCB.pas", pcb)):
+        for name, body in funcs.items():
+            assert not re.search(r"\.\s*GetState\s*\(", body), (
+                f"{module}:{name} calls GetState, whose OUT parameters do "
+                f"not come back in DelphiScript")
+    readback = library["Body3D_RotationReadbackJson"]
+    assert "JsonBool('available', False)" in readback
+    assert "lib_read_pcblib_file" in readback
+    assert not re.search(r"\bModel\b", readback.split("Begin", 1)[1]), (
+        "the unavailable read-back must touch no IPCB_Model member")
 
 
 def test_the_body_list_reads_models_only_when_asked(handlers):
@@ -111,8 +140,7 @@ def test_the_body_list_reads_models_only_when_asked(handlers):
                      r"\(Params,\s*'model_state'\)\)\)\s*=\s*'true'\)", body), (
         "model_state must be an explicit opt-in: only 'true' turns it on")
     assert "<> 'false'" not in body
-    for helper in ("Body3D_ModelTypeId(", "Body3D_ModelInfoJson(",
-                   "Body3D_ModelStateJson("):
+    for helper in ("Body3D_ModelTypeId(", "Body3D_ModelInfoJson("):
         for hit in re.finditer(re.escape(helper), body):
             guard = body.rfind("If WantModel Then", 0, hit.start())
             assert guard >= 0 and hit.start() - guard < 400, (
@@ -134,9 +162,9 @@ def test_model_reads_go_through_helpers(handlers):
 @pytest.mark.parametrize("name", ["Lib_Link3DModel", "PCB_Place3DBody"])
 def test_rotation_is_applied_before_the_body_derives_its_outline(
         handlers, name):
-    """Mutation: move the Body3D_ApplyRotation call below the AddPCBObject."""
+    """Mutation: move the Body3D_ApplyModelState call below the AddPCBObject."""
     body = handlers[name]
-    rot = body.find("Body3D_ApplyRotation(")
+    rot = body.find("Body3D_ApplyModelState(")
     derive = body.find("SetState_FromModel")
     add = body.find("AddPCBObject(")
     assert rot > 0 and derive > 0 and add > 0, (
@@ -147,25 +175,81 @@ def test_rotation_is_applied_before_the_body_derives_its_outline(
         f"outline follows the turned model")
 
 
-@pytest.mark.parametrize("name", ["Lib_Link3DModel", "PCB_Place3DBody"])
-def test_the_unproven_calls_run_only_when_a_rotation_was_asked_for(
-        handlers, name):
-    """Mutation: drop the `If WantRotation Then` in front of either call.
+def test_the_model_state_is_written_only_when_asked_for(handlers):
+    """Mutation: drop the `If WantModelState Then` / `If WantRotation Then`.
 
-    That guard is the whole safety argument: without it every link, with
-    or without a rotation, would depend on an identifier no live session
-    has confirmed.
+    A link with neither a rotation nor a Z offset must run the sequence
+    that has always run: factory, load, SetState_FromModel, assign, add.
     """
-    body = handlers[name]
+    link = handlers["Lib_Link3DModel"]
+    assert re.search(r"WantModelState\s*:=\s*WantRotation\s+Or\s+"
+                     r"\(OffZ\s*<>\s*0\)", link)
+    assert re.search(r"If\s+WantModelState\s+Then\s+DidModelState\s*:=\s*"
+                     r"Body3D_ApplyModelState\(Model,\s*RotX,\s*RotY,\s*RotZ,"
+                     r"\s*MilsToCoordF\(OffZ\)\)", link), (
+        "lib_link_3d_model must write offset_z as the model's Dz, and only "
+        "when a rotation or a Z offset was asked for")
+    board = handlers["PCB_Place3DBody"]
     assert re.search(r"If\s+WantRotation\s+Then\s+DidRotation\s*:=\s*"
-                     r"Body3D_ApplyRotation\(", body), (
-        f"{name}: Body3D_ApplyRotation is reached without a requested "
-        f"rotation")
-    assert re.search(r"If\s+WantRotation\s+Then\s+Begin\s+StateJson\s*:=\s*"
-                     r"Body3D_ModelStateJson\(", body), (
-        f"{name}: the GetState read-back runs without a requested rotation")
-    assert body.count("Body3D_ApplyRotation(") == 1
-    assert body.count("Body3D_ModelStateJson(") == 1
+                     r"Body3D_ApplyModelState\(Model,\s*RotX,\s*RotY,\s*RotZ,"
+                     r"\s*0\)", board)
+    for body in (link, board):
+        assert body.count("Body3D_ApplyModelState(") == 1
+        assert "Body3D_RotationReadbackJson(0)" in body, (
+            "the reply must say the rotation read-back is unavailable")
+
+
+def test_offset_z_no_longer_writes_the_standoff(handlers):
+    """Mutation: put back Body.StandoffHeight := MilsToCoordF(OffZ).
+
+    MEASURED 2026-10-04: that stored STANDOFFHEIGHT=3mil beside
+    MODEL.3D.DZ=0 and an OVERALLHEIGHT equal to the turned model's own
+    top, i.e. the model did not move. Altium's own libraries place a STEP
+    with MODEL.3D.DZ.
+    """
+    assert "StandoffHeight :=" not in handlers["Lib_Link3DModel"]
+
+
+def test_align_none_puts_the_model_origin_on_the_footprint_origin(handlers):
+    """Mutation: compute the 'none' move as just the offsets again.
+
+    The factory drops the model origin at ABSOLUTE (0, 0) of the library
+    board; with the footprint at (50000, 50000) mils the old move left the
+    model 50,000 mil from its pads (measured 2026-10-04, MODEL.2D.X =
+    -49989.5mil in the saved file).
+    """
+    body = handlers["Lib_Link3DModel"]
+    at = body.index("If AlignStr = 'none' Then\n")
+    block = body[at:at + 300]
+    assert "DX := OrgX + MilsToCoordF(OffX);" in block
+    assert "DY := OrgY + MilsToCoordF(OffY);" in block
+
+
+def test_the_placement_is_checked_against_the_footprint(handlers):
+    """Mutation: drop the placement check, or compare the body with itself.
+
+    bbox_expected (pre-move box plus the move) passed a body 50,000 mil
+    from its footprint. The check that replaces it measures the gap
+    between the body's box and the PADS' box, and fails above
+    PlaceFarMils or when the box cannot be read.
+    """
+    body = handlers["Lib_Link3DModel"]
+    check = body.index("RX1 := PX1;")
+    gap = body.index("PlaceOk := (Gap <= MilsToCoordF(PlaceFarMils));", check)
+    readback = body.index("Body3D_ReadRect(Body, NX1, NY1, NX2, NY2, HaveNewRect)")
+    assert readback < check, (
+        "the check must measure the box read back AFTER the move")
+    assert "RX1 := OrgX;" in body[check:gap], (
+        "with no pads the reference is the footprint origin")
+    assert "NX2" in body[check:gap] and "RX2" in body[check:gap], (
+        "the gap must compare the body's box with the reference box")
+    assert "JsonBool('placement_ok', PlaceOk)" in body
+    assert "If HaveNewRect Then" in body[check:gap]
+
+
+def test_place_far_mils_is_a_declared_constant():
+    main = (_PAS / "Main.pas").read_text(encoding="utf-8-sig")
+    assert re.search(r"^\s*PlaceFarMils\s*=\s*1000;", main, re.M)
 
 
 def test_no_3d_code_reads_a_position_off_the_body(library, handlers):
@@ -470,7 +554,8 @@ def test_auto_link_names_the_library_on_every_link(monkeypatch, tmp_path):
     install_bridge_fake(monkeypatch, tmp_path, bridge)
     lib = r"C:\libs\carrier.PcbLib"
     asyncio.run(_tools()["lib_auto_link_3d_models"](
-        model_dir=str(models), library_path=lib, replace=True))
+        model_dir=str(models), library_path=lib, replace=True,
+        reload_first=False))
     links = [p for c, p in bridge.commands if c == "library.link_3d_model"]
     assert len(links) == 2
     assert all(p.get("library_path") == lib for p in links), links

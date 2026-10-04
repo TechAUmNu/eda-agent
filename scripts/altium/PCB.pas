@@ -4596,7 +4596,7 @@ End;
 { rotation and the read-backs are the Body3D_ helpers in Library.pas, so the   }
 { board and the library cannot drift apart on how a model is turned.           }
 {                                                                              }
-{ ROTATION goes through Body3D_ApplyRotation, on the MODEL. IPCB_ComponentBody }
+{ ROTATION goes through Body3D_ApplyModelState, on the MODEL. IPCB_ComponentBody }
 { exposes no Rotation on AD26 26.9.1.9: assigning one raised "Undeclared       }
 { identifier", which DelphiScript cannot catch, and it took the polling loop   }
 { down. The model's state is the rotation that exists; see the 3D block        }
@@ -4629,11 +4629,11 @@ Var
     Model : IPCB_Model;
     ModelPath, LayerStr, Why, AlignStr, Failure, FailCode : String;
     StateJson, MatchJson, ExpectJson, BboxJson : String;
-    BodyX, BodyY, Standoff, RotX, RotY, RotZ, ReadX, ReadY, ReadZ : Double;
+    BodyX, BodyY, Standoff, RotX, RotY, RotZ : Double;
     CentreX, CentreY : Double;
     Lyr : TLayer;
     WantRotation, DidRotation, DidStandoff, DidMove, DidLayer : Boolean;
-    HaveRect, HaveNewRect, Stale, StateOk : Boolean;
+    HaveRect, HaveNewRect, Stale : Boolean;
     X1, Y1, X2, Y2, NX1, NY1, NX2, NY2, DX, DY, Overall : TCoord;
 Begin
     ModelPath := ExtractJsonValue(Params, 'model_path');
@@ -4737,7 +4737,7 @@ Begin
         If Failure = '' Then
         Begin
             If WantRotation Then
-                DidRotation := Body3D_ApplyRotation(Model, RotX, RotY, RotZ);
+                DidRotation := Body3D_ApplyModelState(Model, RotX, RotY, RotZ, 0);
             Body.SetState_FromModel;
             Body.Model := Model;
 
@@ -4826,19 +4826,12 @@ Begin
     Overall := 0;
     Try Overall := Body.OverallHeight; Except Overall := 0; End;
 
+    { The 3D rotation is not read back: IPCB_Model.GetState returned its OUT }
+    { parameters as 0 on a live session (2026-10-04, see the 3D block comment }
+    { in Library.pas), so model_state stays null, rotation_readback_matches   }
+    { null, and rotation_readback says why instead of reporting a mismatch.   }
     StateJson := 'null';
     MatchJson := 'null';
-    StateOk := False;
-    ReadX := 0;
-    ReadY := 0;
-    ReadZ := 0;
-    If WantRotation Then
-    Begin
-        StateJson := Body3D_ModelStateJson(Model, ReadX, ReadY, ReadZ, StateOk);
-        If StateOk Then
-            MatchJson := BoolToJsonStr((Abs(ReadX - RotX) < 0.001)
-                And (Abs(ReadY - RotY) < 0.001) And (Abs(ReadZ - RotZ) < 0.001));
-    End;
 
     MarkDocDirtyByPath(Board.FileName);
 
@@ -4865,6 +4858,7 @@ Begin
                 + JsonFloat('y', RotY) + ',' + JsonFloat('z', RotZ))) + ',' +
             JsonRaw('model_state', StateJson) + ',' +
             JsonRaw('rotation_readback_matches', MatchJson) + ',' +
+            JsonRaw('rotation_readback', Body3D_RotationReadbackJson(0)) + ',' +
             JsonRaw('bbox', BboxJson) + ',' +
             JsonRaw('bbox_expected', ExpectJson) + ',' +
             JsonBool('bbox_readback_stale', Stale)

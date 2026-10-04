@@ -1961,6 +1961,44 @@ Begin
         + JsonInt('skipped_still_in_footprint', Skipped));
 End;
 
+{ LibBoardStillListsCount - how many recorded objects ('oid:addr|' entries,   }
+{ LibAddRemovalEntry's shape) the LIBRARY BOARD still lists. READ-ONLY: one   }
+{ LibBoardListsAddress walk per entry, nothing removed, so it can follow     }
+{ every delete, opt-in or not. The board iterator it uses ran live in        }
+{ LibBoardRemoveEntries on 2026-10-04 (board_removal listed_before 1).       }
+{                                                                              }
+{ WHY A DELETE REPORTS IT. Measured 2026-10-04 on carrier.PcbLib: a pad added }
+{ in the same session and removed from its footprint (still_listed 0) was    }
+{ written back by the next save, and listed in the footprint again after it. }
+{ A removed object the board still holds is the candidate for that, and this }
+{ count is what lets one live call show whether the board still holds it:   }
+{ 0 here with the pad back in the file would point somewhere else. Only the   }
+{ CURRENT footprint's primitives are on the board (rule 3), so for a         }
+{ footprint that is not current this is 0 by construction; the replies say   }
+{ which it was (target_was_current).                                         }
+Function LibBoardStillListsCount(Board : IPCB_Board; Entries : String) : Integer;
+Var
+    Rest, Token, Addr : String;
+    BarPos, ColonPos, Oid : Integer;
+Begin
+    Result := 0;
+    If Board = Nil Then Exit;
+    Rest := Entries;
+    While Rest <> '' Do
+    Begin
+        BarPos := Pos('|', Rest);
+        If BarPos = 0 Then Break;
+        Token := Copy(Rest, 1, BarPos - 1);
+        Rest := Copy(Rest, BarPos + 1, Length(Rest));
+        ColonPos := Pos(':', Token);
+        If ColonPos = 0 Then Continue;
+        Oid := StrToIntDef(Copy(Token, 1, ColonPos - 1), -1);
+        Addr := Copy(Token, ColonPos + 1, Length(Token));
+        If (Oid < 0) Or (Addr = '') Then Continue;
+        If LibBoardListsAddress(Board, Oid, Addr) Then Result := Result + 1;
+    End;
+End;
+
 {..............................................................................}
 { RemoveLibTextByAddress - take ONE text object out of a footprint: the        }
 { duplicate cleanup of Lib_AddFootprintText.                                   }
@@ -5496,6 +5534,37 @@ End;
 { of these reads stays OPT-IN until RELEASE_VERIFICATION step 5 has passed on }
 { a live session.                                                              }
 {                                                                              }
+{ MEASURED LIVE 2026-10-04 (AD26, bridge 2026.10.04.9, carrier.PcbLib,        }
+{ footprint ZZ_BRIDGE_TEST, rotation_x 90 / rotation_z 45):                   }
+{   * SetState RAN and PERSISTED: the saved ComponentBody record reads        }
+{     MODEL.3D.ROTX=90.000 MODEL.3D.ROTZ=45.000, and the body's box came back }
+{     as the 92.7 mil square the turned 2.5 x 2.0 mm crystal should give.     }
+{     SetState is a proven member now (Body3D_ApplyModelState).               }
+{   * GetState RAN without faulting and RETURNED ZEROS: model_state read      }
+{     (x 0, y 0, z 0, dz_mils 0) beside a file holding 90 and 45, both in the  }
+{     link reply and in lib_get_footprint_bodies(model_state=true). An OUT     }
+{     parameter of an Altium method does not come back through a DelphiScript }
+{     local. It is no longer called: a read that cannot return a value is     }
+{     reported as UNAVAILABLE (Body3D_RotationReadbackJson), never as a       }
+{     false mismatch, and the saved file is the proof (lib_read_pcblib_file). }
+{   * ModelType / FileName / Rotation ran under model_state=true without a    }
+{     fault (the reply carried them).                                         }
+{   * Where the model LANDS: with no move, the STEP's own origin sits at      }
+{     ABSOLUTE (0, 0) on the library board, not at the footprint origin. The  }
+{     footprint origin read (50000, 50000) mils, and after a move of (10.5,   }
+{     -20) the saved record held MODEL.2D.X=-49989.5mil MODEL.2D.Y=-50020mil, }
+{     while every other body in that library (126 generator bodies) stores    }
+{     MODEL.2D.X/Y=0mil: the file is relative to the footprint origin, and    }
+{     the model had been put 50,000 mil away from its footprint.              }
+{   * Z: a generic (STEP) body is placed in Z by MODEL.3D.DZ, the Dz argument }
+{     of SetState. Writing StandoffHeight stored STANDOFFHEIGHT=3mil beside   }
+{     DZ=0 and an OVERALLHEIGHT that was exactly the turned model's own top,  }
+{     i.e. the model was not lifted. Altium-authored libraries on this        }
+{     machine agree: the AD26 example MiniPC.PcbLib stores generic bodies     }
+{     with MODEL.3D.DZ=787.4016mil / STANDOFFHEIGHT=-184.0551mil and          }
+{     DZ=39.3701mil / STANDOFFHEIGHT=-40.3543mil, i.e. DZ is the placement    }
+{     and the two heights are the extent Altium DERIVES from the model.       }
+{                                                                              }
 { Body.x and Body.y are deliberately NOT used. Neither IPCB_ComponentBody nor }
 { its ancestors IPCB_Region and IPCB_Primitive declare a position in the AD26 }
 { SDK. Position comes from BoundingRectangle, which IPCB_Primitive declares.  }
@@ -5786,27 +5855,34 @@ Begin
     End;
 End;
 
-{ THE ROTATION, written on the MODEL. UNVERIFIED: see the block comment above }
-{ for what attests SetState.                                                  }
+{ THE ROTATION AND THE Z OFFSET, written on the MODEL. SetState is PROVEN     }
+{ LIVE for the rotation (2026-10-04, block comment above: ROTX/ROTZ persisted }
+{ in the saved file).                                                          }
 {                                                                              }
 { The arguments are RotX, RotY, RotZ in degrees and Dz in internal units:     }
 { the names come from the script binding's own signature for this method, and }
 { they are the MODEL.3D.ROTX, ROTY, ROTZ and DZ a saved PcbLib stores per     }
-{ body. Dz is left at 0 because the Z offset goes through StandoffHeight,     }
-{ which is confirmed live; writing both could lift the model twice.           }
+{ body. Dz WAS left at 0 because the Z offset went through StandoffHeight,    }
+{ and that was measured not to lift a STEP model (block comment above), so   }
+{ lib_link_3d_model's offset_z is now the Dz written here, the field          }
+{ Altium's own libraries use. pcb_place_3d_body still passes 0: its           }
+{ standoff_height route is a board placement this change does not touch.     }
+{ The Dz half is the same call with a non-zero fourth argument; whether it    }
+{ lands is read from the saved file (MODEL.3D.DZ), RELEASE_VERIFICATION 31.   }
 {                                                                              }
 { Called BEFORE the body is added and before SetState_FromModel, so the body  }
-{ derives its outline from the rotated model. AutoSTEPplacer.pas sets the     }
-{ model state before the model is attached, and a setter reaching for state   }
-{ an owning board provides is what crashed ADVPCB.DLL in PCB_Place3DBody;     }
-{ this writes the model, not the body, so it does not need an owner.          }
-Function Body3D_ApplyRotation(Model : IPCB_Model; RotX : Double;
-                              RotY : Double; RotZ : Double) : Boolean;
+{ derives its outline (and its standoff / overall heights) from the placed   }
+{ model. AutoSTEPplacer.pas sets the model state before the model is         }
+{ attached, and a setter reaching for state an owning board provides is what }
+{ crashed ADVPCB.DLL in PCB_Place3DBody; this writes the model, not the body, }
+{ so it does not need an owner.                                               }
+Function Body3D_ApplyModelState(Model : IPCB_Model; RotX : Double;
+                                RotY : Double; RotZ : Double; Dz : TCoord) : Boolean;
 Begin
     Result := False;
     If Model = Nil Then Exit;
     Try
-        Model.SetState(RotX, RotY, RotZ, 0);
+        Model.SetState(RotX, RotY, RotZ, Dz);
         Result := True;
     Except
         Result := False;
@@ -5867,47 +5943,29 @@ Begin
               JsonFloat('planar_rotation', Planar);
 End;
 
-{ The model's 3D rotation and Z offset READ BACK, as a JSON object, or 'null' }
-{ with Ok false. UNVERIFIED: GetState's four parameters are OUT parameters,   }
-{ and no shipped code here passes a variable by reference to an Altium        }
-{ method. Altium's own scripts do it with ChooseLocation, whose parameters    }
-{ are VAR, so the mechanism exists; whether an OUT Double comes back through  }
-{ it is what the first live call settles.                                     }
+{ The model's 3D rotation READ BACK: UNAVAILABLE, said so.                    }
 {                                                                              }
-{ Read into locals first and copied out, rather than handing the caller's VAR }
-{ parameters straight to GetState, so the by-reference path is one level deep. }
-Function Body3D_ModelStateJson(Model : IPCB_Model; Var RotX : Double;
-                               Var RotY : Double; Var RotZ : Double;
-                               Var Ok : Boolean) : String;
-Var
-    RX, RY, RZ : Double;
-    DzC : Integer;
+{ This used to call Model.GetState with four OUT parameters. MEASURED LIVE     }
+{ 2026-10-04: the call returns without faulting and leaves every local at 0,  }
+{ while the saved file holds MODEL.3D.ROTX=90 / ROTZ=45. An OUT parameter of  }
+{ an Altium method does not come back through a DelphiScript local, so the   }
+{ read reported (0, 0, 0) and rotation_readback_matches=false on a rotation   }
+{ that had been applied and saved: a false failure, from a read that cannot  }
+{ return a value at all. No other member of the binding returns the 3D        }
+{ rotation (Rotation is the planar MODEL.2D.ROTATION), so nothing replaces    }
+{ it here. The proof of a rotation is the saved file: lib_save_library, then  }
+{ lib_read_pcblib_file, whose bodies carry MODEL.3D.ROTX/Y/Z and DZ.          }
+{                                                                              }
+{ Touches no IPCB_Model member, so it is safe on every path.                  }
+Function Body3D_RotationReadbackJson(Dummy : Integer) : String;
 Begin
-    Result := 'null';
-    Ok := False;
-    RotX := 0;
-    RotY := 0;
-    RotZ := 0;
-    If Model = Nil Then Exit;
-    RX := 0;
-    RY := 0;
-    RZ := 0;
-    DzC := 0;
-    Try
-        Model.GetState(RX, RY, RZ, DzC);
-        Ok := True;
-    Except
-        Ok := False;
-    End;
-    If Not Ok Then Exit;
-    RotX := RX;
-    RotY := RY;
-    RotZ := RZ;
-    Result := JsonObj(
-        JsonFloat('x', RX) + ',' +
-        JsonFloat('y', RY) + ',' +
-        JsonFloat('z', RZ) + ',' +
-        JsonFloat('dz_mils', CoordToMilsF(DzC)));
+    Result := JsonObj(JsonBool('available', False) + ',' +
+        JsonStr('reason', 'IPCB_Model.GetState returns its OUT parameters as 0 '
+            + 'in DelphiScript (measured 2026-10-04), so the 3D rotation cannot '
+            + 'be read back in memory') + ',' +
+        JsonStr('verify_with', 'lib_save_library, then lib_read_pcblib_file: '
+            + 'the body''s model.rot_x/rot_y/rot_z/dz_mils are MODEL.3D.ROTX/'
+            + 'ROTY/ROTZ/DZ as saved'));
 End;
 
 { The proven half of a body's description, as JSON fields without braces:     }
@@ -5957,29 +6015,56 @@ End;
 {         bodies off the library board: the opt-in, unmeasured half of the   }
 {         shared removal rule beside RemoveLibTextByAddress).                }
 {                                                                              }
-{ align: 'none' moves the body by (offset_x, offset_y) from wherever the      }
-{ factory put it, which is the old behaviour. 'center' puts the centre of the }
-{ body's bounding box on the footprint origin plus the offsets, 'pads' on the }
-{ centre of the pads plus the offsets. The move is computed from the box READ }
-{ AFTER the add, so it works whatever origin the STEP was authored about.     }
+{ align: 'none' puts the STEP's OWN ORIGIN on the FOOTPRINT origin plus      }
+{ (offset_x, offset_y): what Altium's library editor does when a STEP body is }
+{ placed, and what a KiCad or maker model authored about its footprint origin }
+{ needs. It used to move the body by the offsets from wherever the factory    }
+{ put it, and the factory puts the model origin at ABSOLUTE (0, 0) on the     }
+{ library board, not at the footprint origin (MEASURED 2026-10-04, see the 3D }
+{ block comment): on a footprint whose origin reads (50000, 50000) mils the   }
+{ model landed 50,000 mil from its pads, and the old self-check, which        }
+{ compared the moved box with the pre-move box plus the move, passed it. The  }
+{ model origin cannot be read (IPCB_Model.Origin is not proven), so the move  }
+{ is (footprint origin + offsets) - (0, 0), the measured landing point, and   }
+{ the placement check below catches a build that lands it anywhere else.      }
+{ 'center' puts the centre of the body's bounding box on the footprint origin }
+{ plus the offsets, 'pads' on the centre of the pads plus the offsets. Those  }
+{ two are computed from the box READ AFTER the add, in absolute coordinates,  }
+{ so where the model landed never affected them.                              }
+{                                                                              }
+{ offset_z is the model's Z offset, MODEL.3D.DZ, written through SetState's   }
+{ Dz together with the rotation, before the body derives its heights. It used }
+{ to set StandoffHeight, which was measured not to lift a STEP model.         }
 {                                                                              }
 { EVERYTHING IS READ BACK. The reply carries the body's box, standoff and     }
 { overall height in the footprint's own frame, the pads' box in the same      }
-{ frame, the box the move should have produced, and, when a rotation was      }
-{ asked for, the rotation the model reports holding. A box that did not       }
-{ change across a move is flagged bbox_readback_stale: BoundingRectangle is   }
-{ CACHED on texts and nothing yet says whether a body's is.                   }
+{ frame, the box the move should have produced, and the PLACEMENT CHECK: the  }
+{ gap between the body's box and the pads' box (the footprint origin when    }
+{ there are no pads), in the footprint frame. A gap above PlaceFarMils, or a  }
+{ box that cannot be read, is placement_ok=false with the reason, and the    }
+{ Python wrapper turns that into ok=false. The 3D rotation cannot be read     }
+{ back in memory (GetState returns zeros, measured), so rotation_readback is  }
+{ 'unavailable' and the saved file is the proof (lib_read_pcblib_file). A box }
+{ that did not change across a move is flagged bbox_readback_stale:           }
+{ BoundingRectangle is CACHED on texts and nothing yet says whether a body's  }
+{ is.                                                                          }
+{                                                                              }
+{ replace=true also reports replaced.board_still_listed: how many of the      }
+{ removed bodies the LIBRARY BOARD still lists (a read-only walk, the        }
+{ LibBoardListsAddress shape that ran live in LibBoardRemoveEntries on        }
+{ 2026-10-04). See Lib_DeleteFootprintPads for why that number matters: a     }
+{ primitive the board still holds is one the save can write back.            }
 Function Lib_Link3DModel(Params : String; RequestId : String) : String;
 Var
     ModelPath, ComponentName, FpName, LibPath, FocusedPath, AlignStr : String;
     LayerStr, LayerSource : String;
-    Failure, FailCode, StateJson, PadsJson, ExpectJson, MatchJson : String;
+    Failure, FailCode, PadsJson, ExpectJson : String;
     AppliedJson, ReplacedJson, FrameJson, RotReqJson, MoveJson : String;
-    RemovedEntries, BoardJson : String;
-    OffX, OffY, OffZ, RotX, RotY, RotZ, ReadX, ReadY, ReadZ : Double;
-    WantRotation, DidRotation, DidStandoff, DidMove, Replace : Boolean;
-    FromBoard, MadeCurrent : Boolean;
-    HaveRect, HaveNewRect, Stale, StateOk, Aligned, DidLayer : Boolean;
+    RemovedEntries, BoardJson, PlaceJson, PlaceWhy, RefKind, ExpectFileJson : String;
+    OffX, OffY, OffZ, RotX, RotY, RotZ : Double;
+    WantRotation, WantModelState, DidModelState, DidMove, Replace : Boolean;
+    FromBoard, MadeCurrent, PlaceOk : Boolean;
+    HaveRect, HaveNewRect, Stale, Aligned, DidLayer : Boolean;
     WantLayer : TLayer;
     Workspace : IWorkspace;
     Doc : IDocument;
@@ -5990,7 +6075,8 @@ Var
     Model : IPCB_Model;
     OrgX, OrgY, DX, DY : TCoord;
     X1, Y1, X2, Y2, NX1, NY1, NX2, NY2, PX1, PY1, PX2, PY2 : TCoord;
-    PadCount, Removed, RemovedDistinct, Remaining, BoardRemoved : Integer;
+    RX1, RY1, RX2, RY2, GapX, GapY, Gap : TCoord;
+    PadCount, Removed, RemovedDistinct, Remaining, BoardRemoved, BoardStill : Integer;
 Begin
     ModelPath := ExtractJsonValue(Params, 'model_path');
     ComponentName := ExtractJsonValue(Params, 'component_name');
@@ -6012,14 +6098,17 @@ Begin
     RotY := StrToFloatDef(ExtractJsonValue(Params, 'rotation_y'), 0.0);
     RotZ := StrToFloatDef(ExtractJsonValue(Params, 'rotation_z'), 0.0);
     WantRotation := (RotX <> 0) Or (RotY <> 0) Or (RotZ <> 0);
+    { The model's state is written when a rotation OR a Z offset is asked    }
+    { for: offset_z is MODEL.3D.DZ, the fourth argument of the same call.     }
+    WantModelState := WantRotation Or (OffZ <> 0);
 
     { Refused before anything is touched, so a typo cannot half-apply. }
     If (AlignStr <> 'none') And (AlignStr <> 'center') And (AlignStr <> 'pads') Then
     Begin
         Result := BuildErrorResponse(RequestId, 'BAD_ALIGN',
-            'align must be "none" (move by the offsets from where the body '
-            + 'lands), "center" (box centre on the footprint origin) or '
-            + '"pads" (box centre on the pads). Got: ' + AlignStr);
+            'align must be "none" (the STEP origin on the footprint origin, '
+            + 'plus the offsets), "center" (box centre on the footprint '
+            + 'origin) or "pads" (box centre on the pads). Got: ' + AlignStr);
         Exit;
     End;
 
@@ -6155,12 +6244,12 @@ Begin
     If FromBoard Then MadeCurrent := LibMakeCurrentVerified(PcbLib, Footprint);
     RemovedEntries := '';
     BoardRemoved := 0;
+    BoardStill := 0;
     BoardJson := JsonObj(JsonBool('requested', False));
 
     Failure := '';
     FailCode := '';
-    DidRotation := False;
-    DidStandoff := False;
+    DidModelState := False;
     DidMove := False;
     Aligned := False;
     DidLayer := False;
@@ -6207,11 +6296,13 @@ Begin
 
         If Failure = '' Then
         Begin
-            { ROTATION FIRST, on the MODEL, and only when one was asked for. }
-            { A link with no rotation runs exactly the sequence that has    }
-            { always run: factory, load, SetState_FromModel, assign, add.   }
-            If WantRotation Then
-                DidRotation := Body3D_ApplyRotation(Model, RotX, RotY, RotZ);
+            { ROTATION AND Z OFFSET FIRST, on the MODEL, and only when one  }
+            { was asked for. A link with neither runs exactly the sequence  }
+            { that has always run: factory, load, SetState_FromModel,       }
+            { assign, add.                                                  }
+            If WantModelState Then
+                DidModelState := Body3D_ApplyModelState(Model, RotX, RotY, RotZ,
+                    MilsToCoordF(OffZ));
             Body.SetState_FromModel;
             Body.Model := Model;
 
@@ -6233,6 +6324,9 @@ Begin
                 If FromBoard Then
                     BoardJson := LibBoardRemoveEntries(PcbLib.Board, RemovedEntries,
                         Body3D_BodyAddresses(Footprint), MadeCurrent, BoardRemoved);
+                { What the library board still holds of the removed bodies, }
+                { read-only, before the new body joins it.                   }
+                BoardStill := LibBoardStillListsCount(PcbLib.Board, RemovedEntries);
             End;
 
             Footprint.AddPCBObject(Body);
@@ -6256,21 +6350,15 @@ Begin
                 Except End;
             End;
 
-            { Standoff is confirmed live. MilsToCoordF keeps sub-mil values. }
-            If OffZ <> 0 Then
-            Begin
-                Try
-                    Body.StandoffHeight := MilsToCoordF(OffZ);
-                    DidStandoff := True;
-                Except End;
-            End;
-
-            { The move, from the box as it stands after the add. }
+            { The move. 'none' is computed from the MEASURED landing point    }
+            { of the model origin, absolute (0, 0), so the origin goes to the }
+            { footprint origin plus the offsets; 'center' and 'pads' from the }
+            { box as it stands after the add.                                 }
             Body3D_ReadRect(Body, X1, Y1, X2, Y2, HaveRect);
             If AlignStr = 'none' Then
             Begin
-                DX := MilsToCoordF(OffX);
-                DY := MilsToCoordF(OffY);
+                DX := OrgX + MilsToCoordF(OffX);
+                DY := OrgY + MilsToCoordF(OffY);
                 Aligned := True;
             End
             Else If HaveRect Then
@@ -6328,23 +6416,87 @@ Begin
     Else
         PadsJson := 'null';
 
-    StateJson := 'null';
-    MatchJson := 'null';
-    StateOk := False;
-    ReadX := 0;
-    ReadY := 0;
-    ReadZ := 0;
-    If WantRotation Then
+    { THE PLACEMENT CHECK, in the FOOTPRINT frame. bbox_expected above only   }
+    { says the move was applied as computed (box before the move plus the    }
+    { move), which is true of a body put 50,000 mil from its footprint as     }
+    { much as of a right one: that is how the misplaced body of 2026-10-04    }
+    { passed. This compares the body's box with the footprint itself: the     }
+    { gap between it and the pads' box, or the footprint origin when there   }
+    { are no pads. 0 means they overlap. A model is drawn around its package, }
+    { so a gap above PlaceFarMils (1000 mil = 25.4 mm) is a body that is not  }
+    { on its footprint, whatever the offsets were.                            }
+    If PadCount > 0 Then
     Begin
-        StateJson := Body3D_ModelStateJson(Model, ReadX, ReadY, ReadZ, StateOk);
-        If StateOk Then
-            MatchJson := BoolToJsonStr((Abs(ReadX - RotX) < 0.001)
-                And (Abs(ReadY - RotY) < 0.001) And (Abs(ReadZ - RotZ) < 0.001));
+        RX1 := PX1;
+        RY1 := PY1;
+        RX2 := PX2;
+        RY2 := PY2;
+        RefKind := 'pads_bbox';
+    End
+    Else
+    Begin
+        RX1 := OrgX;
+        RY1 := OrgY;
+        RX2 := OrgX;
+        RY2 := OrgY;
+        RefKind := 'footprint_origin';
     End;
+    Gap := 0;
+    PlaceOk := False;
+    PlaceWhy := '';
+    If HaveNewRect Then
+    Begin
+        GapX := 0;
+        If RX1 - NX2 > GapX Then GapX := RX1 - NX2;
+        If NX1 - RX2 > GapX Then GapX := NX1 - RX2;
+        GapY := 0;
+        If RY1 - NY2 > GapY Then GapY := RY1 - NY2;
+        If NY1 - RY2 > GapY Then GapY := NY1 - RY2;
+        Gap := GapX;
+        If GapY > Gap Then Gap := GapY;
+        PlaceOk := (Gap <= MilsToCoordF(PlaceFarMils));
+        If Not PlaceOk Then
+            PlaceWhy := 'the body''s box is ' + FloatToJsonStr(CoordToMilsF(Gap))
+                + ' mil from the footprint''s ' + RefKind + ' (limit '
+                + IntToStr(PlaceFarMils) + ' mil): the model is not on its '
+                + 'footprint. Compare body.bbox with frame.pads_bbox. To '
+                + 'undo: lib_delete_footprint_primitives with object_type '
+                + 'componentbody and library_path (it saves and reloads '
+                + 'first, so the removal sticks), or link again with '
+                + 'replace=true and corrected offsets.';
+    End
+    Else
+        PlaceWhy := 'the body''s bounding box could not be read, so its '
+            + 'placement is unverified. Save, lib_reload_library and read it '
+            + 'with lib_get_footprint_bodies, or read the saved file with '
+            + 'lib_read_pcblib_file.';
+    PlaceJson := JsonObj(JsonBool('ok', PlaceOk) + ','
+        + JsonStr('reference', RefKind) + ','
+        + JsonFloat('gap_mils', CoordToMilsF(Gap)) + ','
+        + JsonInt('limit_mils', PlaceFarMils) + ','
+        + JsonStr('problem', PlaceWhy));
 
-    AppliedJson := JsonBool('standoff_height', DidStandoff) + ','
-        + JsonBool('rotation', DidRotation) + ','
-        + JsonBool('rotation_z', DidRotation And (RotZ <> 0)) + ','
+    { What the saved ComponentBody record should hold, RELATIVE TO THE      }
+    { FOOTPRINT ORIGIN as the file stores it. MODEL.2D.X/Y is the model       }
+    { origin, known only for align=none (the other modes move a box whose     }
+    { offset from the model origin depends on how the STEP was drawn).        }
+    If AlignStr = 'none' Then
+        ExpectFileJson := JsonFloat('model_2d_x_mils', OffX) + ','
+            + JsonFloat('model_2d_y_mils', OffY)
+    Else
+        ExpectFileJson := JsonNull('model_2d_x_mils') + ','
+            + JsonNull('model_2d_y_mils');
+    ExpectFileJson := JsonObj(ExpectFileJson + ','
+        + JsonFloat('model_3d_rotx', RotX) + ','
+        + JsonFloat('model_3d_roty', RotY) + ','
+        + JsonFloat('model_3d_rotz', RotZ) + ','
+        + JsonFloat('model_3d_dz_mils', OffZ));
+
+    AppliedJson := JsonBool('rotation', DidModelState And WantRotation) + ','
+        + JsonBool('rotation_z', DidModelState And (RotZ <> 0)) + ','
+        + JsonBool('z_offset', DidModelState And (OffZ <> 0)) + ','
+        + JsonFloat('z_offset_mils', OffZ) + ','
+        + JsonBool('standoff_height', False) + ','
         + JsonBool('offset_xy', DidMove) + ','
         + JsonStr('align', AlignStr) + ','
         + JsonBool('aligned', Aligned) + ','
@@ -6356,6 +6508,7 @@ Begin
         + JsonInt('removed_bodies', RemovedDistinct) + ','
         + JsonInt('remove_calls', Removed) + ','
         + JsonInt('remaining_before_add', Remaining) + ','
+        + JsonInt('board_still_listed', BoardStill) + ','
         + JsonRaw('board_removal', BoardJson));
     FrameJson := JsonObj(JsonFloat('origin_x_mils', CoordToMilsF(OrgX)) + ','
         + JsonFloat('origin_y_mils', CoordToMilsF(OrgY)) + ','
@@ -6370,20 +6523,25 @@ Begin
         + JsonStr('units', 'mils') + ','
         + JsonRaw('applied', JsonObj(AppliedJson)) + ','
         + JsonRaw('rotation_requested', RotReqJson) + ','
-        + JsonRaw('model_state', StateJson) + ','
-        + JsonRaw('rotation_readback_matches', MatchJson) + ','
+        + JsonNull('model_state') + ','
+        + JsonRaw('rotation_readback', Body3D_RotationReadbackJson(0)) + ','
+        + JsonNull('rotation_readback_matches') + ','
+        + JsonRaw('expected_in_file', ExpectFileJson) + ','
         + JsonRaw('replaced', ReplacedJson) + ','
         + JsonRaw('frame', FrameJson) + ','
         + JsonRaw('body', JsonObj(Body3D_BodyFieldsJson(Body, PcbLib.Board, OrgX, OrgY))) + ','
+        + JsonRaw('placement', PlaceJson) + ','
+        + JsonBool('placement_ok', PlaceOk) + ','
         + JsonRaw('bbox_expected', ExpectJson) + ','
         + JsonBool('bbox_readback_stale', Stale) + ','
         + JsonRaw('move_mils', MoveJson)));
 
     MarkDocDirtyByPath(PcbLib.Board.FileName);
     NoteNextStep('The PcbLib is changed in memory only; lib_save_library writes it. '
-        + 'Compare body.bbox with frame.pads_bbox (same frame, mils) before '
-        + 'trusting the placement, then look at it with obj_switch_view 3d. '
-        + 'lib_get_footprint_bodies lists every body on the footprint.');
+        + 'placement.ok is the check that the body sits on its footprint. After '
+        + 'the save, lib_read_pcblib_file(library_path, footprint_name) shows the '
+        + 'body as stored: model.x_mils/y_mils (= offset_x/offset_y for align=none), '
+        + 'rot_x/rot_y/rot_z and dz_mils (= offset_z).');
 End;
 
 { Lib_GetFootprintBodies - READ-ONLY list of the 3D bodies on a footprint.    }
@@ -6421,8 +6579,8 @@ End;
 Function Lib_GetFootprintBodies(Params : String; RequestId : String) : String;
 Var
     LibPath, FocusedPath, FpWanted, FpName, Addr : String;
-    ItemsJson, BodyJson, ModelJson, StateJson, PadsJson, FpsJson, CountsJson : String;
-    WantModel, StateOk, MadeCurrent : Boolean;
+    ItemsJson, BodyJson, ModelJson, PadsJson, FpsJson, CountsJson : String;
+    WantModel, MadeCurrent : Boolean;
     Workspace : IWorkspace;
     Doc : IDocument;
     PcbLib : IPCB_Library;
@@ -6433,7 +6591,6 @@ Var
     Model : IPCB_Model;
     Seen : TStringList;
     OrgX, OrgY, PX1, PY1, PX2, PY2 : TCoord;
-    ReadX, ReadY, ReadZ : Double;
     BodyN, PadCount, Offset, Limit, Total, Emitted, TypeId : Integer;
     NExtruded, NGeneric, NCylinder, NSphere, NUnknown : Integer;
 Begin
@@ -6636,10 +6793,13 @@ Begin
                 Model := Body3D_GetModel(Body);
                 If Model <> Nil Then
                 Begin
-                    StateJson := Body3D_ModelStateJson(Model, ReadX, ReadY,
-                        ReadZ, StateOk);
+                    { rotation is null and rotation_readback says why: the  }
+                    { GetState read returned zeros live (2026-10-04), so a  }
+                    { value here would be a false one. The saved file has   }
+                    { it: lib_read_pcblib_file.                              }
                     ModelJson := JsonObj(Body3D_ModelInfoJson(Model) + ','
-                        + JsonRaw('rotation', StateJson));
+                        + JsonNull('rotation') + ','
+                        + JsonRaw('rotation_readback', Body3D_RotationReadbackJson(0)));
                 End
                 Else
                     ModelJson := 'null';
@@ -13853,6 +14013,15 @@ End;
 { double_listed counts primitives added this session (listed twice): those are }
 { the ones a footprint-only delete has been seen to bring back after a save    }
 { and reload, and the note says what to do about it.                           }
+{                                                                              }
+{ MEASURED 2026-10-04 on lib_delete_footprint_pads, which removes call for    }
+{ call the way this does: a primitive created this session and removed from   }
+{ its footprint is written back by the save, and a disk-loaded one is not     }
+{ (the full record is above Lib_DeleteFootprintPads). The tool therefore     }
+{ saves and reloads first (reload_first, default on), and this reply carries  }
+{ the same diagnostics as the pad delete: target_was_current,                 }
+{ board_still_listed (LibBoardStillListsCount, read-only) and                 }
+{ marked_modified (marked through the given path and PcbLib.Board.FileName). }
 
 Function Lib_DeleteFootprintPrimitives(Params : String; RequestId : String) : String;
 Var
@@ -13872,8 +14041,9 @@ Var
     ObjFilter : Integer;
     WantLayer, MatchLayer : TLayer;
     IncludePads, Found, FromBoard, MadeCurrent : Boolean;
+    TargetWasCurrent, MarkedModified : Boolean;
     Removed, I, Examined, PrimOid, SameRun, RemoveCalls, DoubleListed : Integer;
-    StillListed, BoardRemoved : Integer;
+    StillListed, BoardRemoved, BoardStill : Integer;
 Begin
     LibPath := ExtractJsonValue(Params, 'library_path');
     FpWanted := ExtractJsonValue(Params, 'footprint_name');
@@ -13993,6 +14163,9 @@ Begin
             Exit;
         End;
     End;
+    { Read, never written (see the measured note above the function). }
+    TargetWasCurrent := False;
+    Try TargetWasCurrent := (PcbLib.CurrentComponent = Target); Except TargetWasCurrent := False; End;
 
     ObjFilter := ObjectTypeFromStringPCB(ObjTypeStr);
     If (ObjTypeStr <> '') And (ObjFilter = -1) Then
@@ -14197,14 +14370,23 @@ Begin
         End;
     End;
 
+    { What the LIBRARY BOARD still holds of the removed primitives. }
+    BoardStill := 0;
+    If Entries <> '' Then
+        BoardStill := LibBoardStillListsCount(PcbLib.Board, Entries);
+
+    MarkedModified := False;
     If (Removed > 0) Or (BoardRemoved > 0) Then
     Begin
         Try PcbLib.Board.ViewManager_FullUpdate; Except End;
         MarkDocDirtyByPath(LibPath);
+        MarkDocDirtyByPath(PcbLib.Board.FileName);
+        MarkedModified := DocIsModified(LibPath) Or DocIsModified(PcbLib.Board.FileName);
     End;
 
     NoteStr := 'Removed in memory; lib_save_library writes it. Proof it '
-        + 'persisted: lib_reload_library, then lib_probe_footprint.';
+        + 'persisted: lib_read_pcblib_file(library_path, footprint_name) '
+        + 'reads the saved file with no Altium involved.';
     If (DoubleListed > 0) And (Not FromBoard) Then
         NoteStr := NoteStr + ' ' + IntToStr(DoubleListed) + ' of these were '
             + 'added this session (listed twice). A footprint-only delete of '
@@ -14220,6 +14402,9 @@ Begin
         + '"remove_calls":' + IntToStr(RemoveCalls) + ','
         + '"double_listed":' + IntToStr(DoubleListed) + ','
         + '"still_listed":' + IntToStr(StillListed) + ','
+        + '"board_still_listed":' + IntToStr(BoardStill) + ','
+        + '"target_was_current":' + BoolToJsonStr(TargetWasCurrent) + ','
+        + '"marked_modified":' + BoolToJsonStr(MarkedModified) + ','
         + '"examined":' + IntToStr(Examined) + ','
         + '"layers":[' + RemovedJson + '],'
         + '"pads_included":' + BoolToJsonStr(IncludePads) + ','
@@ -15053,8 +15238,9 @@ Begin
         + JsonBool('written_to_disk', False) + ','
         + JsonBool('pending_save', AnyChange) + ','
         + JsonStr('note', 'Changed in memory and the library marked dirty. '
-            + 'lib_save_library writes it; lib_get_pad_geometry after the save '
-            + 'and lib_reload_library is the proof it persisted.')));
+            + 'lib_save_library writes it; lib_read_pcblib_file(library_path, '
+            + 'footprint_name) after the save reads the pads from the saved '
+            + 'file, with no Altium involved, and is the proof it persisted.')));
 End;
 
 {..............................................................................}
@@ -15083,6 +15269,45 @@ End;
 { FOOTPRINT, beside RemoveLibTextByAddress): the footprint is made current,    }
 { verified, before the snapshot, and the board is swept after the read-back,  }
 { never for a pad the footprint still lists.                                  }
+{                                                                              }
+{ MEASURED LIVE 2026-10-04 (AD26, bridge 2026.10.04.9, carrier.PcbLib,        }
+{ throwaway footprint ZZ_BRIDGE_TEST): A PAD ADDED IN THIS SESSION CAME BACK.  }
+{   1. lib_add_footprint_pads added pads 1, 2, '' and 3; other edits followed. }
+{   2. delete pad 3: removed 1, pads_before 4, pads_after 3, still_listed 0,   }
+{      double_listed 0. lib_save_library wrote the file. The saved file STILL }
+{      HELD pad 3.                                                             }
+{   3. delete again with remove_from_board=true: pads_before 4 (the save had  }
+{      put pad 3 back in the footprint), removed 1, and the board half found  }
+{      it (listed_before 1), removed it (remove_calls 2) and STILL LISTED it  }
+{      (still_listed 1). The save wrote pad 3 again, now FIRST among the pads. }
+{   4. lib_reload_library, then the same footprint-only delete: removed 1,    }
+{      and after lib_save_library the file NO LONGER held pad 3. That save    }
+{      reported was_modified FALSE: the delete had not left the document      }
+{      reading modified (the save writes regardless).                         }
+{ So a removal of a pad LOADED FROM DISK persists, and a removal of one this   }
+{ session created does not, even across a save: the in-memory object is still }
+{ the session-created one, registered with the footprint AND the library      }
+{ board (Lib_AddFootprintPads, RegisterLibPrimitive), and the board's copy     }
+{ survives both RemovePCBObject routes. No proven member removes that        }
+{ registration (Board.RemovePCBObject was tried and is the measured failure). }
+{ It is not known whether it matters that the footprint was the CURRENT one   }
+{ in steps 2-3 (the add made it current) and probably not in step 4 (a reload }
+{ opens whichever footprint Altium chooses).                                  }
+{                                                                              }
+{ THE FIX IS IN THE TOOL, not here: lib_delete_footprint_pads saves and       }
+{ reloads the library FIRST (reload_first, default on), so every pad it       }
+{ removes is a disk-loaded one, the case step 4 proved. This handler reports  }
+{ what one live call needs to tell the two cases apart:                       }
+{   target_was_current   was the footprint current during the removal;       }
+{   still_listed         removed pads the FOOTPRINT iterator still lists;    }
+{   board_still_listed   removed pads the LIBRARY BOARD iterator still lists }
+{                        (LibBoardStillListsCount, read-only);              }
+{   marked_modified      the document reads modified after the delete. It    }
+{                        is marked through the path given AND through        }
+{                        PcbLib.Board.FileName, the path every add handler   }
+{                        marks (step 4 found the first alone not enough).    }
+{ The persistence proof is the saved file: lib_save_library, then             }
+{ lib_read_pcblib_file, which reads the .PcbLib with no Altium involved.      }
 {..............................................................................}
 Function Lib_DeleteFootprintPads(Params : String; RequestId : String) : String;
 Var
@@ -15097,7 +15322,8 @@ Var
     SnapAddrs, SnapNames, Doomed, AfterAddrs : TStringList;
     I, J, WantIdx, Matches, Picked, OpCount, Removed, DoubleListed : Integer;
     Removals, StillListed, PadsBefore, PadsAfter, PadOid, BoardRemoved : Integer;
-    Found, TakeAll, FromBoard, MadeCurrent : Boolean;
+    BoardStill : Integer;
+    Found, TakeAll, FromBoard, MadeCurrent, TargetWasCurrent, MarkedModified : Boolean;
 Begin
     LibPath := ExtractJsonValue(Params, 'library_path');
     FpWanted := ExtractJsonValue(Params, 'footprint_name');
@@ -15151,6 +15377,10 @@ Begin
             Exit;
         End;
     End;
+    { Read, never written: whether the footprint is the current one while its }
+    { pads are removed (see the measured block above).                       }
+    TargetWasCurrent := False;
+    Try TargetWasCurrent := (PcbLib.CurrentComponent = Target); Except TargetWasCurrent := False; End;
 
     OpCount := 0;
     Removed := 0;
@@ -15158,6 +15388,8 @@ Begin
     StillListed := 0;
     PadsAfter := 0;
     BoardRemoved := 0;
+    BoardStill := 0;
+    MarkedModified := False;
     ResultsJson := '';
     RefusedJson := '';
     Entries := '';
@@ -15366,10 +15598,16 @@ Begin
         End;
     End;
 
+    { What the LIBRARY BOARD still holds of the removed pads, read-only. }
+    If Entries <> '' Then
+        BoardStill := LibBoardStillListsCount(PcbLib.Board, Entries);
+
     If (Removed > 0) Or (BoardRemoved > 0) Then
     Begin
         Try PcbLib.Board.ViewManager_FullUpdate; Except End;
         MarkDocDirtyByPath(LibPath);
+        MarkDocDirtyByPath(PcbLib.Board.FileName);
+        MarkedModified := DocIsModified(LibPath) Or DocIsModified(PcbLib.Board.FileName);
     End;
 
     Result := BuildSuccessResponse(RequestId, JsonObj(
@@ -15381,14 +15619,20 @@ Begin
         + JsonInt('pads_before', PadsBefore) + ','
         + JsonInt('pads_after', PadsAfter) + ','
         + JsonInt('still_listed', StillListed) + ','
+        + JsonInt('board_still_listed', BoardStill) + ','
+        + JsonBool('target_was_current', TargetWasCurrent) + ','
         + JsonInt('double_listed', DoubleListed) + ','
         + JsonRaw('board_removal', BoardJson) + ','
+        + JsonBool('marked_modified', MarkedModified) + ','
         + JsonBool('written_to_disk', False) + ','
         + JsonBool('pending_save', Removed > 0) + ','
         + JsonStr('note', 'Removed in memory and the library marked dirty. '
             + 'lib_save_library writes it. Proof it persisted: after the save, '
-            + 'lib_reload_library then lib_get_pad_geometry must not list the '
-            + 'pads. still_listed above must be 0.')));
+            + 'lib_read_pcblib_file(library_path, footprint_name) reads the '
+            + 'saved .PcbLib with no Altium involved and must not list the '
+            + 'pads. still_listed above must be 0; board_still_listed above 0 '
+            + 'is a pad the library board still holds, which a save can write '
+            + 'back.')));
 End;
 
 {..............................................................................}
