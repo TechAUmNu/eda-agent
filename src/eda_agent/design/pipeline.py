@@ -1756,6 +1756,19 @@ def build_best_canvas_from_plan(
                 "repair-port stub upgrade failed and was skipped: "
                 f"{type(stub_exc).__name__}: {stub_exc}"),
         ))
+    # LAST-MILE PIN CHECK on the finished winner, after the trim and the
+    # stub upgrade: every pin of a net that leaves its sheet (or is
+    # force_label) must end in that net's name. A warning, not a failure:
+    # it runs after selection, so it could not steer the choice anyway.
+    for _s in best_result.canvas.sheets:
+        for net_name, pin in _unnamed_pins(best_result.canvas, plan, _s.name):
+            best_result.notes.append(PipelineNote(
+                severity="warning",
+                text=(f"pin {pin} on sheet {_s.name!r} does not reach a "
+                      f"{net_name!r} label or port; the net leaves the sheet "
+                      f"or is force_label, so the pin would emit cut off "
+                      f"from it"),
+            ))
     # The counts were taken inside the candidate build; the two passes above
     # change the winner's wires afterwards.
     best_result.wire_count = len(best_result.canvas.wires)
@@ -2245,6 +2258,109 @@ def _point_on_segment(
         lo, hi = (x1, x2) if x1 <= x2 else (x2, x1)
         return lo <= px <= hi
     return False  # diagonal segments not used by the router
+
+
+def _name_anchor(net_actions, segs, stubs):
+    """Which pin's stub end carries a wire_named net's one label.
+
+    ``net_actions`` is the net's ``(pin_ref, stub_end, orientation)`` list
+    in plan pin order, ``segs`` its route and ``stubs`` its per-pin stubs as
+    ``(hot_x, hot_y, end_x, end_y, net)``. A stub end is a clean place for
+    the text when exactly two pieces of the net's copper meet there -- the
+    pin's own stub and one route segment -- so the label sits on a straight
+    run or a corner, never on a junction dot; AND when the pin's hotspot is
+    not itself on other copper of the net, because then the route reaches
+    the pin directly, the stub is surplus, and a label on it would keep a
+    spur _trim_dangling_wires otherwise removes (measured on PWR_3V3: a
+    first version labelled R120.2's spur and added a junction dot). Falls
+    back to the first stub end with at most two arms, then the first pin.
+    """
+    copper = [tuple(s[:4]) for s in segs] + [tuple(s[:4]) for s in stubs]
+
+    def _arms(pt) -> int:
+        n = 0
+        for (x1, y1, x2, y2) in copper:
+            if (x1, y1) == pt or (x2, y2) == pt:
+                n += 1
+            elif _point_on_segment(pt[0], pt[1], x1, y1, x2, y2):
+                n += 2
+        return n
+
+    def _surplus(end) -> bool:
+        for (hx, hy, ex, ey, _net) in stubs:
+            if (ex, ey) != end:
+                continue
+            if any(_point_on_segment(hx, hy, *c) for c in copper
+                   if c != (hx, hy, ex, ey)):
+                return True
+        return False
+
+    for act in net_actions:
+        if _arms(act[1]) == 2 and not _surplus(act[1]):
+            return act
+    for act in net_actions:
+        if _arms(act[1]) <= 2:
+            return act
+    return net_actions[0]
+
+
+def _unnamed_pins(canvas, plan, sheet_name):
+    """Pins of nets that must carry their name on this sheet but do not.
+
+    A net needs its name on a sheet when it leaves the sheet or is
+    force_label (rails excepted: their glyph is the name). Each of its pins
+    here must sit on that net's copper -- wires joined end to end or end on
+    span -- carrying a label or port of the same text, or have a port of
+    that text on the pin itself. Returns ``[(net, "REF.PIN"), ...]``.
+
+    Runs on the FINISHED canvas. The net-level check in
+    _validate_canvas_against_plan runs inside the candidate build, before
+    _trim_dangling_wires, and saw the bare stub the trim then removed
+    (PWR_EFUSE R105.2 / R146.2); it also cannot tell a named net from an
+    unnamed one, and the name is the whole cross-sheet connection.
+    """
+    r2s = {p.refdes: p.sheet for p in plan.parts}
+    wires = canvas.wires_on(sheet_name)
+    ports = canvas.power_ports_on(sheet_name)
+    named_objs = canvas.labels_on(sheet_name) + ports
+    bad: list[tuple[str, str]] = []
+    for net in plan.nets:
+        here = [pr for pr in net.pins if r2s.get(pr.refdes) == sheet_name]
+        if not here or _is_power_net(net) or _is_ground_net(net):
+            continue
+        if len(here) == len(net.pins) and not net.force_label:
+            continue
+        nw = [w for w in wires if w.net == net.name]
+        parent = list(range(len(nw)))
+
+        def find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        def on(px: int, py: int, w) -> bool:
+            return _point_on_segment(px, py, w.x1, w.y1, w.x2, w.y2)
+
+        for i, a in enumerate(nw):
+            for j in range(i + 1, len(nw)):
+                b = nw[j]
+                if (on(a.x1, a.y1, b) or on(a.x2, a.y2, b)
+                        or on(b.x1, b.y1, a) or on(b.x2, b.y2, a)):
+                    parent[find(i)] = find(j)
+        named = {find(i) for i, w in enumerate(nw) for t in named_objs
+                 if t.text == net.name and on(t.x, t.y, w)}
+        for pr in here:
+            ep = canvas.pin_world(pr.refdes, pr.pin)
+            if ep is None:
+                continue                  # reported elsewhere as a failure
+            if any(t.text == net.name and (t.x, t.y) == (ep.x, ep.y)
+                   for t in ports):
+                continue
+            comps = {find(i) for i, w in enumerate(nw) if on(ep.x, ep.y, w)}
+            if not comps & named:
+                bad.append((net.name, f"{pr.refdes}.{pr.pin}"))
+    return bad
 
 
 def _trim_dangling_wires(canvas: SchematicCanvas, sheet_name: str) -> int:
@@ -2778,8 +2894,9 @@ def _wire_sheet(
         pr.refdes for net in nets for pr in net.pins
         if refdes_to_sheet.get(pr.refdes) == sheet_name
     }
+    left_labelled: list[str] = []
     promoted = _apply_no_stranded_parts_rule(
-        nets, representations, sheet_refdes,
+        nets, representations, sheet_refdes, left_labelled,
     )
     for net_name in promoted:
         result.notes.append(PipelineNote(
@@ -2789,6 +2906,19 @@ def _wire_sheet(
                 f"would otherwise have every terminal on labels only"
             ),
         ))
+    if left_labelled:
+        result.notes.append(PipelineNote(
+            severity="info",
+            text=(
+                f"sheet {sheet_name!r}: {len(left_labelled)} part(s) keep "
+                f"every terminal on labels because their cheapest net has "
+                f"no second pin on this sheet to wire to: "
+                f"{', '.join(left_labelled)}"
+            ),
+        ))
+    # The one label each wire_named net gets, kept so the cross-net cull
+    # below can retire it when it relabels that net at every pin.
+    named_anchor: dict[str, NetLabel] = {}
 
     for net in nets:
         net_actions = sheet_net_actions.get(net.name)
@@ -2845,7 +2975,7 @@ def _wire_sheet(
                 sheet_width_mils=sw,
                 sheet_height_mils=sh,
             )
-        elif representation == "wire":
+        elif representation in ("wire", "wire_named"):
             segs = _route_signal_pins(stub_ends, routing_obstacles)
             # A routed segment passing through a pin NOT on this net is a
             # short Altium would auto-merge. At density the obstacle-aware
@@ -2869,6 +2999,23 @@ def _wire_sheet(
                 for seg in segs:
                     sheet_wire_segments.append(
                         (seg[0], seg[1], seg[2], seg[3], net.name))
+                if representation == "wire_named":
+                    # The net's name must survive on this sheet: it leaves
+                    # the sheet, or the planner asked for it. ONE label at a
+                    # stub end -- always this net's own copper, and
+                    # _trim_dangling_wires keeps wire up to a label, so it
+                    # cannot be left floating. (Only the stranded-parts rule
+                    # produces wire_named, and only for nets with two or
+                    # more pins here, so there is always a route to label.)
+                    _pr, (ax, ay), a_orient = _name_anchor(
+                        net_actions, segs,
+                        [st for st in stub_segments if st[4] == net.name])
+                    anchor = NetLabel(
+                        text=net.name, x=ax, y=ay, orientation=0,
+                        sheet=sheet_name,
+                        justification=_label_justification(a_orient))
+                    canvas.add_labels([anchor])
+                    named_anchor[net.name] = anchor
         else:  # "label_per_pin"
             for (_pr, (end_x, end_y), p_orient) in net_actions:
                 canvas.add_labels([NetLabel(
@@ -2965,6 +3112,12 @@ def _wire_sheet(
         worst, (others, label_points, stranded, is_rail) = _pick_cull_candidate(
             offenders, _try_cull)
         sheet_wire_segments[:] = others
+        # A culled wire_named net is relabelled at every kept stub below;
+        # its single anchor label would stay where routed copper used to
+        # be, so retire it.
+        _stale = named_anchor.pop(worst, None)
+        if _stale is not None:
+            canvas.labels[:] = [l for l in canvas.labels if l is not _stale]
 
         # Label each pin at its (possibly shortened) stub end so every
         # label sits on this net's own copper. Rails get no labels here;
