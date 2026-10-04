@@ -173,7 +173,7 @@ _RECIPES: tuple[dict[str, Any], ...] = (
         "document_kind": "library",
         "backends": ("altium",),
         "use": ["obj_query", "obj_modify", "lib_get_pin_list",
-                "sch_set_component_part_id"],
+                "sch_set_component_part_id", "lib_set_pin_properties"],
         "avoid": [],
         "note": (
             "Suffix the scope with @N, as lib_component:NAME@2, for both "
@@ -356,6 +356,64 @@ _RECIPES: tuple[dict[str, Any], ...] = (
         "note": (
             "Annotation is the supported route and keeps the schematic and "
             "board in step, which a direct rename would not."),
+    },
+    {
+        "task": "Rename, renumber or retype a pin in a LIBRARY symbol",
+        "keywords": ("pin", "rename", "renumber", "number", "designator",
+                     "electrical", "hidden", "symbol", "schlib"),
+        "document_kind": "library",
+        "backends": ("altium",),
+        "use": ["lib_set_pin_properties", "lib_get_pin_list"],
+        "avoid": [
+            ("lib_delete_component", "deleting and recreating the symbol "
+                                     "loses its parameters, models and "
+                                     "graphics; the pins can be edited in "
+                                     "place"),
+        ],
+        "note": (
+            "Name each pin by its CURRENT number and list only what changes. "
+            "Pins on every sub-part are reachable without an @N scope. A "
+            "renumber onto a number another pin holds is refused; swap "
+            "through a temporary number."),
+    },
+    {
+        "task": "Make a library symbol a net tie, graphical part or jumper",
+        "keywords": ("tie", "nettie", "graphical", "jumper", "componentkind",
+                     "bom"),
+        "when": (("net", "tie"), ("component", "type", "library")),
+        "document_kind": "library",
+        "backends": ("altium",),
+        "use": ["lib_set_component_kind", "lib_get_component_details"],
+        "avoid": [
+            ("sch_set_net_tie", "changes ONE placed part on the active "
+                                "sheet; the library symbol, and every new "
+                                "placement, keeps its type"),
+        ],
+        "note": (
+            "Kinds: standard, mechanical, graphical, net_tie_bom, "
+            "net_tie_no_bom, standard_no_bom, jumper. Placed parts follow on "
+            "the next Update From Libraries."),
+    },
+    {
+        "task": "ERC still reports pins with No-ERC markers, or deleted objects persist",
+        "keywords": ("noerc", "stale", "reopen", "reload", "suppress",
+                     "marker", "deleted"),
+        "when": (("no", "erc"), ("noerc",), ("still", "deleted"),
+                 ("stale", "netlist")),
+        "document_kind": "schematic",
+        "backends": ("altium",),
+        "use": ["sch_reload_document", "sch_get_no_erc_markers",
+                "proj_get_erc_violations"],
+        "avoid": [
+            ("proj_force_recompile", "recompiles the in-memory model, which "
+                                     "kept deleted net labels until the "
+                                     "sheet was reopened"),
+        ],
+        "note": (
+            "Reload the sheet, then read proj_get_erc_violations(limit=0): "
+            "the default limit of 100 hides most of a long list. "
+            "sch_get_no_erc_markers(cross_check_erc=True) names covered pins "
+            "still reported."),
     },
 )
 

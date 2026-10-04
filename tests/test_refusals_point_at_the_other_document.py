@@ -53,6 +53,14 @@ _NO_HINT_NEEDED = {
     "NOT_A_MEMBER": "the project resolved fine and the document simply is "
                     "not in it, so there is no other document to point at. "
                     "The message names the path that was asked for.",
+    # sch_reload_document is the sheet half of a pair whose library half
+    # is lib_reload_library, and its refusal names that tool already.
+    "NOT_A_SCHDOC": "the message already names lib_reload_library, the "
+                    "tool for the library case",
+    # No-ERC markers exist only on sheets; a library has no equivalent,
+    # so there is no sibling document to point at.
+    "NOT_A_SHEET": "a No-ERC marker has no library counterpart, so there "
+                   "is no other document to point at",
 }
 
 

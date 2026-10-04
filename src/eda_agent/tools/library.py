@@ -3,6 +3,7 @@
 """Library management tools for Altium Designer MCP Server."""
 
 import asyncio
+import difflib
 import math
 import re
 from pathlib import Path
@@ -901,6 +902,122 @@ def _pins_payload(pins: list[dict[str, Any]]) -> tuple[str, int]:
                 fields.append(f"{key}={'true' if p[key] else 'false'}")
         op_strs.append(";".join(fields))
     return "~~".join(op_strs), skipped_invalid
+
+
+#: Every key lib_set_pin_properties reads from one pin edit. A key outside
+#: this set is refused by name with the nearest valid one, the rule
+#: sch_place_components applies to placement dicts: a dropped key is an
+#: edit that silently did not happen.
+PIN_EDIT_KEYS = frozenset({
+    "designator", "owner_part_id", "name", "new_designator",
+    "electrical_type", "show_name", "show_designator", "hidden", "length",
+})
+
+#: The keys that CHANGE a pin. An edit naming none of them is a no-op and
+#: is refused rather than sent.
+_PIN_EDIT_CHANGES = PIN_EDIT_KEYS - {"designator", "owner_part_id"}
+
+
+def _pin_edits_payload(pins: Any) -> tuple[str, list[str]]:
+    """Build the ``pins`` payload for lib_set_pin_properties.
+
+    Returns ``(payload, problems)``; any problem refuses the whole call,
+    and nothing is sent. Same grammar as ``_pins_payload`` (ops on "~~",
+    fields on ";", key from value on the FIRST "="), with two differences
+    that both come from this being an EDIT:
+
+    * only the fields given are emitted, because an absent field must
+      leave the property alone. ``name=""`` is emitted as ``name=`` and
+      clears the name; the Pascal tells it apart from no name field.
+    * a separator inside ``designator``, ``new_designator`` or ``name`` is
+      refused, not substituted. The designator SELECTS the pin, and a
+      fragment such as ``1`` matches a real pin on most symbols, so the
+      edit would land on the wrong one.
+
+    Electrical words are NOT checked here: the Pascal asks the one shared
+    chain (StrToPinElectrical) and refuses an unknown word per op, so the
+    vocabulary is stated once.
+    """
+    problems: list[str] = []
+    ops: list[str] = []
+    if not isinstance(pins, list) or not pins:
+        return "", ["pins must be a non-empty list of pin edits"]
+    for i, p in enumerate(pins):
+        if not isinstance(p, dict):
+            problems.append(f"pins[{i}] is not an object")
+            continue
+        for key in sorted(set(p) - PIN_EDIT_KEYS):
+            near = difflib.get_close_matches(key, sorted(PIN_EDIT_KEYS), n=1)
+            hint = f" (did you mean {near[0]!r}?)" if near else ""
+            problems.append(f"pins[{i}]: unknown key {key!r}{hint}")
+        desig = str(p.get("designator", "")).strip()
+        if not desig:
+            problems.append(
+                f"pins[{i}]: designator is required (the pin's CURRENT number)")
+            continue
+        if not any(p.get(k) is not None for k in _PIN_EDIT_CHANGES):
+            problems.append(f"pins[{i}] ({desig}): names nothing to change")
+            continue
+        for key in ("designator", "new_designator", "name"):
+            value = p.get(key)
+            if value is not None and (";" in str(value) or "~~" in str(value)):
+                problems.append(
+                    f"pins[{i}]: {key} {value!r} contains ';' or '~~', the "
+                    f"wire-format separators; a fragment could select or "
+                    f"name a different pin, so the call is refused")
+        try:
+            owner = (None if p.get("owner_part_id") is None
+                     else int(p["owner_part_id"]))
+            length = (None if p.get("length") is None
+                      else int(round(float(p["length"]))))
+        except (TypeError, ValueError):
+            problems.append(
+                f"pins[{i}] ({desig}): owner_part_id and length must be numbers")
+            continue
+        fields = [f"designator={desig}"]
+        if owner is not None:
+            fields.append(f"owner_part_id={owner}")
+        if p.get("name") is not None:
+            fields.append(f"name={p['name']}")
+        if p.get("new_designator") is not None:
+            new_desig = str(p["new_designator"]).strip()
+            if not new_desig:
+                problems.append(f"pins[{i}] ({desig}): new_designator is empty")
+            fields.append(f"new_designator={new_desig}")
+        if p.get("electrical_type") is not None:
+            fields.append(
+                f"electrical_type={_payload_safe(p['electrical_type'])}")
+        for key in ("show_name", "show_designator", "hidden"):
+            if p.get(key) is not None:
+                fields.append(f"{key}={'true' if p[key] else 'false'}")
+        if length is not None:
+            fields.append(f"length={length}")
+        ops.append(";".join(fields))
+    return "~~".join(ops), problems
+
+
+#: Altium's Component Type, in the words its Properties panel uses, to the
+#: canonical word the Pascal accepts. Folded first: lower case, every run
+#: of non-alphanumerics to one underscore, so "Net Tie (In BOM)" arrives as
+#: net_tie_in_bom. "Net Tie" with no qualifier is Altium's no-BOM kind,
+#: the same default sch_set_net_tie uses.
+_COMPONENT_KINDS = {
+    "standard": "standard",
+    "mechanical": "mechanical",
+    "graphical": "graphical",
+    "net_tie_bom": "net_tie_bom",
+    "net_tie_in_bom": "net_tie_bom",
+    "net_tie": "net_tie_no_bom",
+    "net_tie_no_bom": "net_tie_no_bom",
+    "standard_no_bom": "standard_no_bom",
+    "jumper": "jumper",
+}
+
+
+def canonical_component_kind(kind: object) -> Optional[str]:
+    """The canonical Component Type word for ``kind``, or None."""
+    key = re.sub(r"[^a-z0-9]+", "_", str(kind).strip().lower()).strip("_")
+    return _COMPONENT_KINDS.get(key)
 
 
 def _safe_filename(name: str, fallback: str = "part") -> str:
@@ -2722,6 +2839,7 @@ def register_library_tools(mcp):
         footprint_name: str,
         footprint_library: str = "",
         replace: bool = True,
+        set_current: Optional[bool] = None,
     ) -> dict[str, Any]:
         """Link a footprint to a schematic component.
 
@@ -2730,6 +2848,11 @@ def register_library_tools(mcp):
         appends. Pass replace=False to keep prior footprint models and add
         another (the old append behaviour, which bloats a component with
         duplicate models).
+
+        WHICH FOOTPRINT IS CURRENT is decided by ``set_current``, not left
+        to chance. Measured before this parameter existed: replace=False
+        left BOTH the old and the new footprint flagged current, because
+        Altium does not clear the others by itself.
 
         Args:
             component_name: Name of the schematic component. Resolved by
@@ -2745,11 +2868,24 @@ def register_library_tools(mcp):
                 AD26 (see Lib_LinkFootprint in Library.pas). Install the
                 library and keep footprint names unambiguous instead.
             replace: remove existing footprint models before adding (default True)
+            set_current: None (default) makes the new footprint current
+                only when no other footprint model is, so an alternate
+                added with replace=False stays an alternate. True makes it
+                current and demotes the others. False adds it non-current.
+                To switch later, use lib_set_current_model.
 
         Returns:
-            Dictionary confirming link
+            Dictionary with footprint, replaced, is_current (read back),
+            demoted (how many other models lost the flag),
+            current_footprint_count and the component's models list. A
+            write whose flags did not land as asked is an error
+            (CURRENT_NOT_APPLIED) carrying the same read-back in details.
         """
         bridge = get_bridge()
+        if set_current is None:
+            current = "auto"
+        else:
+            current = "true" if set_current else "false"
         result = await bridge.send_command_async(
             "library.link_footprint",
             {
@@ -2759,6 +2895,7 @@ def register_library_tools(mcp):
                 # the Pascal side reads it, and the only place it could
                 # go is the datafile link location, which wedges AD26.
                 "replace": "true" if replace else "false",
+                "set_current": current,
             },
         )
         return result
@@ -3311,6 +3448,9 @@ def register_library_tools(mcp):
             Dict with:
               - name, library_path, description, alias_name,
                 part_count, pin_count
+              - component_kind (standard, mechanical, graphical,
+                net_tie_bom, net_tie_no_bom, standard_no_bom, jumper) and
+                component_kind_ordinal, the raw value Altium holds.
               - designator: {text, font_id, color, is_hidden, x, y,
                 orientation, justification} - the on-canvas designator
                 label (NOT just the prefix string).
@@ -4008,6 +4148,60 @@ def register_library_tools(mcp):
         return result
 
     @mcp.tool()
+    async def lib_set_component_kind(
+        component_name: str,
+        kind: str,
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Set a LIBRARY symbol's Component Type (net tie, graphical, jumper).
+
+        The library twin of sch_set_net_tie, which changes one PLACED part
+        on the active sheet. Setting the type on the symbol means every
+        new placement gets it; existing placements follow on the next
+        Update From Libraries.
+
+        kind takes Altium's own words, case and punctuation free:
+        standard, mechanical, graphical, net_tie_bom ("Net Tie (In BOM)"),
+        net_tie_no_bom ("Net Tie", the no-BOM kind), standard_no_bom
+        ("Standard (No BOM)"), jumper.
+
+        The two net-tie kinds are written by the constants sch_set_net_tie
+        already uses. The other five are written by their position in
+        Altium's enum, checked at run time against the two named ones, and
+        the value is read back: KIND_NOT_APPLIED means Altium holds
+        something else, ENUM_LAYOUT_MISMATCH means this build numbers the
+        enum differently and nothing was written. standard_no_bom and
+        jumper rest on that ordering alone until verified once in the
+        Properties panel (see RELEASE_VERIFICATION.md).
+
+        Args:
+            component_name: the component's LibReference.
+            kind: the Component Type, as above.
+            library_path: optional .SchLib path; defaults to the focused lib.
+
+        Returns:
+            {"component", "kind_requested", "kind_before", "kind_after",
+             "ordinal_after"}. The edit is in memory; app_save_all writes
+            it. lib_get_component_details reports component_kind too.
+        """
+        canonical = canonical_component_kind(kind)
+        if not str(component_name).strip():
+            return {"ok": False, "reason": "component_name is required"}
+        if canonical is None:
+            return {"ok": False,
+                    "reason": (f"unknown component kind {kind!r}; use one of "
+                               + ", ".join(sorted(set(_COMPONENT_KINDS.values()))))}
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.set_component_kind",
+            {
+                "component_name": str(component_name).strip(),
+                "kind": canonical,
+                "library_path": library_path,
+            },
+        )
+
+    @mcp.tool()
     async def lib_get_pin_list(
         component_name: str = "",
         output_path: str = "",
@@ -4119,6 +4313,73 @@ def register_library_tools(mcp):
             params["component_name"] = str(component_name).strip()
         return await bridge.send_command_async(
             "library.set_pin_owner_part", params
+        )
+
+    @mcp.tool()
+    async def lib_set_pin_properties(
+        component_name: str,
+        pins: list[dict[str, Any]],
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Edit pins of a LIBRARY symbol in place: name, number, type, flags.
+
+        Use this rather than deleting and recreating a symbol to fix a pin:
+        recreating loses the symbol's parameters, models and graphics. Each
+        edit names the pin by its CURRENT designator and lists only what
+        changes; anything not listed is left as it is.
+
+        Pins on every sub-part are reachable without an @N scope: the edit
+        walks the component's own pins, the walk lib_get_pin_list reads.
+        ``owner_part_id`` narrows an edit to one part when a number is
+        reused across parts.
+
+        Renumbering is refused, per edit, when the new number already
+        belongs to another pin (NEW_DESIGNATOR_EXISTS) or when two pins
+        share the old number on the same part and display mode
+        (AMBIGUOUS_DESIGNATOR). Edits apply in order, so swap two numbers
+        through a temporary one: 1->X, 2->1, X->2.
+
+        Args:
+            component_name: the symbol's LibReference.
+            pins: list of edits. Keys:
+                - designator (str, required): the pin's current number.
+                - owner_part_id (int, optional): only pins of this part
+                  (0 = Part Zero, the shared pins).
+                - name (str): new pin name; "" clears it.
+                - new_designator (str): new pin number.
+                - electrical_type (str): input, output, bidirectional (io),
+                  passive, power, open_collector, open_emitter, hiz. An
+                  unknown word is refused for that edit, never turned
+                  passive.
+                - show_name, show_designator (bool): label visibility.
+                - hidden (bool): hide the whole pin.
+                - length (number, mils, > 0).
+            library_path: optional .SchLib path; defaults to the focused lib.
+
+        Returns:
+            {"component", "total", "applied", "failed", "pins_changed",
+             "ops": [{"designator", "matched", "applied", "verified",
+             "reason", "pins": [read-back of every changed pin]}]}. No pin
+            changed at all is an error (NO_PIN_CHANGED) with the same
+            ops list in details. The edit is in memory until app_save_all.
+        """
+        if not str(component_name).strip():
+            return {"ok": False, "reason": "component_name is required"}
+        payload, problems = _pin_edits_payload(pins)
+        if problems:
+            return {"ok": False,
+                    "reason": ("refused, nothing was sent: "
+                               + "; ".join(problems[:5])),
+                    "problems": problems}
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.set_pin_properties",
+            {
+                "component_name": str(component_name).strip(),
+                "pins": payload,
+                "library_path": library_path,
+            },
+            timeout=60.0,
         )
 
     @mcp.tool()
@@ -5254,6 +5515,53 @@ def register_library_tools(mcp):
                 "component_name": component_name,
                 "model_name": model_name,
                 "keep_one": "true" if keep_one else "false",
+                "library_path": library_path,
+            },
+        )
+
+    @mcp.tool()
+    async def lib_set_current_model(
+        component_name: str,
+        model_name: str,
+        model_type: str = "PCBLIB",
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Choose which of a library symbol's models is the current one.
+
+        A placed part uses its symbol's CURRENT footprint. The flag lives
+        on each model separately and Altium does not keep it exclusive, so
+        a symbol can carry two current footprints or none, and nothing
+        complains until a board picks the wrong land pattern. This sets
+        the first model of ``model_type`` named ``model_name`` current and
+        clears every other model of that type, then reads all of them back.
+        Models of other types (SIM, PCB3DLib) are left alone.
+
+        Changes the library only (in memory; app_save_all writes it).
+        Placed instances follow on the next Update From Libraries.
+
+        Args:
+            component_name: the component's LibReference.
+            model_name: the model to make current, e.g. the footprint name.
+            model_type: PCBLIB (default) for footprints; SIM for simulation.
+            library_path: optional .SchLib path; defaults to the focused lib.
+
+        Returns:
+            {"component", "model_name", "model_type", "changed",
+             "duplicates", "current_count", "models"}. ``duplicates`` > 0
+            means several models share this name; lib_remove_model with
+            keep_one=True removes the extras. MODEL_NOT_FOUND lists the
+            models the symbol does have.
+        """
+        if not str(component_name).strip() or not str(model_name).strip():
+            return {"ok": False,
+                    "reason": "component_name and model_name are required"}
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.set_current_model",
+            {
+                "component_name": str(component_name).strip(),
+                "model_name": str(model_name).strip(),
+                "model_type": str(model_type).strip() or "PCBLIB",
                 "library_path": library_path,
             },
         )

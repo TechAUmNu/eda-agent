@@ -71,6 +71,11 @@ _CASES = [
     ("pcb_lock_net_routing", {"nets": ["VCC|GND"], "lock": True}),
     ("pcb_clear_source_footprint_library",
      {"designator_filter": ["R|1"]}),
+    ("lib_set_pin_properties", {
+        "component_name": "U1",
+        "pins": [{"designator": "1~~designator=2", "name": "X"}]}),
+    ("sch_place_no_ercs", {"targets": [{"designator": "R1;pin=2",
+                                        "pin": "1"}]}),
 ]
 
 

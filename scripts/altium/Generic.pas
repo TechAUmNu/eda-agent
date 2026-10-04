@@ -733,6 +733,7 @@ Var
     R : ISch_Rectangle;
     L : ISch_Line;
     Comp : ISch_Component;
+    PinObj : ISch_Pin;
     Matched : Boolean;
     { Separate from Matched on purpose. Matched says the property NAME is
       one this build writes; WroteOK says the value actually landed, read
@@ -884,7 +885,19 @@ Begin
         // same way GetSchProperty dispatches the read.
         Else If (PropName = 'Designator') Or (PropName = 'Designator.Text') Then
         Begin
-            If Obj.ObjectId = eSheetSymbol Then
+            If Obj.ObjectId = ePin Then
+            Begin
+                { A pin's number IS ISch_Pin.Designator, a plain string. The
+                  component-text helper below exits on anything that is not
+                  a component, so a pin renumber used to report handled and
+                  change nothing. Narrowed to a typed local the way Comp is
+                  above, and written with the assignment Lib_AddPins makes
+                  on every pin it creates. }
+                PinObj := Obj;
+                PinObj.Designator := Value;
+                WroteOK := (PinObj.Designator = Value);
+            End
+            Else If Obj.ObjectId = eSheetSymbol Then
                 WroteOK := SetSheetSymbolText(Obj, 'Designator', Value)
             Else
                 SetSchComponentSubText(Obj, 'Designator', Value);
@@ -5845,24 +5858,251 @@ Begin
 End;
 
 {..............................................................................}
-{ Place a No-ERC marker at coordinates on active schematic                    }
-{ Params: x, y                                                                }
+{ FindSheetPinEnd - the ELECTRICAL END of one drawn pin of one placed part.    }
+{                                                                              }
+{ ERC attaches a No-ERC marker to the point a wire would connect, which is     }
+{ PinLength away from Pin.Location (PinEndX / PinEndY at the top of this       }
+{ file). A marker on the root is as inert as a net label there.                }
+{                                                                              }
+{ MULTI-PART PARTS: every placed instance of a multi-part symbol iterates the  }
+{ pins of ALL its sub-parts, each carried at that instance's transform.        }
+{ Measured 2026-10-03 on the carrier's two-part connector symbols, where every }
+{ pin came back once per placed part. Only pins owned by the instance's        }
+{ CurrentPartID (or by part 0, shared) in its DisplayMode are drawn there; the }
+{ rest are phantoms nothing connects to, and are skipped.                      }
+{                                                                              }
+{ True with the end in CX / CY (internal units). Info gets a JSON fragment     }
+{ with the pin's name and electrical type.                                     }
+{..............................................................................}
+Function FindSheetPinEnd(SchDoc : ISch_Document; Desig, PinNum : String;
+    Var CX : Integer; Var CY : Integer; Var Info : String) : Boolean;
+Var
+    CompIter, PinIter : ISch_Iterator;
+    Comp : ISch_Component;
+    Pin : ISch_Pin;
+    Loc : TLocation;
+    CompDesig : String;
+    CompPart, CompMode, PinOwner, PinMode, PinLen, PinOri : Integer;
+    IsReal : Boolean;
+Begin
+    Result := False;
+    Info := '';
+    CompIter := SchDoc.SchIterator_Create;
+    Try
+        CompIter.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Comp := CompIter.FirstSchObject;
+        While (Comp <> Nil) And (Not Result) Do
+        Begin
+            CompDesig := '';
+            Try CompDesig := Comp.Designator.Text; Except End;
+            If CompDesig = Desig Then
+            Begin
+                CompPart := 0;
+                CompMode := 0;
+                Try CompPart := Comp.CurrentPartID; Except End;
+                Try CompMode := Comp.DisplayMode; Except End;
+                PinIter := Comp.SchIterator_Create;
+                Try
+                    PinIter.AddFilter_ObjectSet(MkSet(ePin));
+                    Pin := PinIter.FirstSchObject;
+                    While (Pin <> Nil) And (Not Result) Do
+                    Begin
+                        If Pin.Designator = PinNum Then
+                        Begin
+                            PinOwner := 0;
+                            PinMode := 0;
+                            Try PinOwner := Pin.OwnerPartId; Except End;
+                            Try PinMode := Pin.OwnerPartDisplayMode; Except End;
+                            IsReal := ((PinOwner = 0) Or (PinOwner = CompPart) Or (CompPart <= 0))
+                                And (PinMode = CompMode);
+                            If IsReal Then
+                            Begin
+                                PinLen := 0;
+                                PinOri := 0;
+                                Try PinLen := Pin.PinLength; Except End;
+                                Try PinOri := Pin.Orientation; Except End;
+                                Loc := Pin.GetState_Location;
+                                CX := PinEndX(Loc.X, PinOri, PinLen);
+                                CY := PinEndY(Loc.Y, PinOri, PinLen);
+                                Info := '"pin_name":"' + EscapeJsonString(Pin.Name)
+                                    + '","electrical_type":"'
+                                    + PinElectricalToStr(Pin.Electrical) + '"';
+                                Result := True;
+                            End;
+                        End;
+                        If Not Result Then Pin := PinIter.NextSchObject;
+                    End;
+                Finally
+                    Comp.SchIterator_Destroy(PinIter);
+                End;
+            End;
+            If Not Result Then Comp := CompIter.NextSchObject;
+        End;
+    Finally
+        SchDoc.SchIterator_Destroy(CompIter);
+    End;
+End;
+
+{..............................................................................}
+{ NoErcPinHitsJson - which pins a point touches, and how.                       }
+{                                                                              }
+{ Three answers, because each means something different for a No-ERC marker:  }
+{   on_pin_end       a drawn pin's electrical end: the marker covers that pin }
+{   on_pin_root      a drawn pin's body end: the marker suppresses nothing    }
+{   phantom_pin_end  the end of a pin of a sub-part this instance does NOT    }
+{                    draw: nothing connects there either                      }
+{ EXACT coordinates, not a tolerance: a connection point in Altium is a point. }
+{ Returns a JSON fragment, three named arrays, for the caller to embed.        }
+{..............................................................................}
+Function NoErcPinHitsJson(SchDoc : ISch_Document; PX, PY : Integer) : String;
+Var
+    CompIter, PinIter : ISch_Iterator;
+    Comp : ISch_Component;
+    Pin : ISch_Pin;
+    Loc : TLocation;
+    CompDesig, Entry, EndJson, RootJson, PhantomJson : String;
+    CompPart, CompMode, PinOwner, PinMode, PinLen, PinOri, EX, EY : Integer;
+    IsReal, AtEnd, AtRoot : Boolean;
+Begin
+    EndJson := '';
+    RootJson := '';
+    PhantomJson := '';
+    CompIter := SchDoc.SchIterator_Create;
+    Try
+        CompIter.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Comp := CompIter.FirstSchObject;
+        While Comp <> Nil Do
+        Begin
+            CompDesig := '';
+            CompPart := 0;
+            CompMode := 0;
+            Try CompDesig := Comp.Designator.Text; Except End;
+            Try CompPart := Comp.CurrentPartID; Except End;
+            Try CompMode := Comp.DisplayMode; Except End;
+            PinIter := Comp.SchIterator_Create;
+            Try
+                PinIter.AddFilter_ObjectSet(MkSet(ePin));
+                Pin := PinIter.FirstSchObject;
+                While Pin <> Nil Do
+                Begin
+                    PinLen := 0;
+                    PinOri := 0;
+                    Try PinLen := Pin.PinLength; Except End;
+                    Try PinOri := Pin.Orientation; Except End;
+                    Loc := Pin.GetState_Location;
+                    EX := PinEndX(Loc.X, PinOri, PinLen);
+                    EY := PinEndY(Loc.Y, PinOri, PinLen);
+                    AtEnd := (EX = PX) And (EY = PY);
+                    AtRoot := (Loc.X = PX) And (Loc.Y = PY);
+                    If AtEnd Or AtRoot Then
+                    Begin
+                        PinOwner := 0;
+                        PinMode := 0;
+                        Try PinOwner := Pin.OwnerPartId; Except End;
+                        Try PinMode := Pin.OwnerPartDisplayMode; Except End;
+                        IsReal := ((PinOwner = 0) Or (PinOwner = CompPart) Or (CompPart <= 0))
+                            And (PinMode = CompMode);
+                        Entry := '{"designator":"' + EscapeJsonString(CompDesig) + '"'
+                            + ',"pin":"' + EscapeJsonString(Pin.Designator) + '"'
+                            + ',"name":"' + EscapeJsonString(Pin.Name) + '"'
+                            + ',"electrical_type":"' + PinElectricalToStr(Pin.Electrical) + '"'
+                            + ',"owner_part_id":' + IntToStr(PinOwner)
+                            + ',"part_shown":' + IntToStr(CompPart) + '}';
+                        If AtEnd And IsReal Then
+                        Begin
+                            If EndJson <> '' Then EndJson := EndJson + ',';
+                            EndJson := EndJson + Entry;
+                        End
+                        Else If AtEnd Then
+                        Begin
+                            If PhantomJson <> '' Then PhantomJson := PhantomJson + ',';
+                            PhantomJson := PhantomJson + Entry;
+                        End
+                        Else If IsReal Then
+                        Begin
+                            If RootJson <> '' Then RootJson := RootJson + ',';
+                            RootJson := RootJson + Entry;
+                        End;
+                    End;
+                    Pin := PinIter.NextSchObject;
+                End;
+            Finally
+                Comp.SchIterator_Destroy(PinIter);
+            End;
+            Comp := CompIter.NextSchObject;
+        End;
+    Finally
+        SchDoc.SchIterator_Destroy(CompIter);
+    End;
+    Result := '"on_pin_end":[' + EndJson + '],"on_pin_root":[' + RootJson
+        + '],"phantom_pin_end":[' + PhantomJson + ']';
+End;
+
+{..............................................................................}
+{ Place a No-ERC marker, on a pin's electrical end or at coordinates.          }
+{                                                                              }
+{ WHAT THE MARKER NEEDS WAS CHECKED AGAINST SAVED FILES, NOT GUESSED. Every    }
+{ marker this handler and obj_batch_create placed on the carrier sheets        }
+{ (146 of them, six sheets) saved as IsActive=T, SuppressAll=T, Symbol=Thin    }
+{ Cross, Orientation=1, and every one sat exactly on a drawn pin's electrical  }
+{ end. So no ISch_NoERC property beyond Location is written here: the object   }
+{ was never the problem, and writing those would add identifiers nothing in    }
+{ this codebase has executed.                                                  }
+{                                                                              }
+{ What the reply now proves is WHERE it landed: the read-back Location and the }
+{ pins under it (NoErcPinHitsJson). designator + pin places it on that pin's   }
+{ electrical end, computed here instead of by the caller.                      }
+{                                                                              }
+{ Params: x, y (mils) OR designator + pin.                                     }
 {..............................................................................}
 
 Function Gen_PlaceNoERC(Params : String; RequestId : String) : String;
 Var
-    X, Y : Integer;
+    X, Y, PX, PY : Integer;
+    Desig, PinNum, Info, HitsJson, InfoJson : String;
+    Snapped : Boolean;
     SchDoc : ISch_Document;
     NoERC : ISch_GraphicalObject;
+    Loc : TLocation;
 Begin
     X := StrToIntDef(ExtractJsonValue(Params, 'x'), 0);
     Y := StrToIntDef(ExtractJsonValue(Params, 'y'), 0);
+    Desig := ExtractJsonValue(Params, 'designator');
+    PinNum := ExtractJsonValue(Params, 'pin');
 
     SchDoc := SchServer.GetCurrentSchDocument;
     If SchDoc = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active');
         Exit;
+    End;
+    If SchDoc.ObjectId = eSchLib Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_A_SHEET',
+            'A No-ERC marker belongs on a schematic sheet, and the active '
+            + 'document is a library.');
+        Exit;
+    End;
+
+    PX := MilsToCoord(X);
+    PY := MilsToCoord(Y);
+    Snapped := False;
+    Info := '';
+    If (Desig <> '') Or (PinNum <> '') Then
+    Begin
+        If (Desig = '') Or (PinNum = '') Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'BAD_PARAMS',
+                'designator and pin go together: name the part AND the pin number');
+            Exit;
+        End;
+        If Not FindSheetPinEnd(SchDoc, Desig, PinNum, PX, PY, Info) Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'PIN_NOT_FOUND',
+                'No drawn pin ' + PinNum + ' on ' + Desig + ' on the active sheet');
+            Exit;
+        End;
+        Snapped := True;
     End;
 
     NoERC := SchServer.SchObjectFactory(eNoERC, eCreate_Default);
@@ -5872,7 +6112,7 @@ Begin
         Exit;
     End;
 
-    NoERC.Location := Point(MilsToCoord(X), MilsToCoord(Y));
+    NoERC.Location := Point(PX, PY);
 
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(NoERC);
@@ -5888,8 +6128,390 @@ Begin
       the file and still listed as violations until the project was
       reopened. }
     If SchDoc <> Nil Then MarkDocDirtyByPath(SchDoc.DocumentName);
+
+    Loc := NoERC.Location;
+    HitsJson := NoErcPinHitsJson(SchDoc, Loc.X, Loc.Y);
+
+    { DIRTYING HAS NOT BEEN ENOUGH. The carrier's markers were in the file,
+      on the right pins, and still did not suppress in the ERC read. Deleted
+      net labels were measured staying in the compiled model until the
+      sheet was reopened (2026-10-04); an added marker is suspected of the
+      same. }
+    NoteNextStep('ERC answers from the COMPILED model. If this pin is still '
+        + 'reported after proj_compile, run sch_reload_document on this sheet '
+        + 'and read proj_get_erc_violations(limit=0) again.');
+
+    InfoJson := '';
+    If Snapped Then
+        InfoJson := ',"designator":"' + EscapeJsonString(Desig) + '","pin":"'
+            + EscapeJsonString(PinNum) + '",' + Info;
     Result := BuildSuccessResponse(RequestId,
-        '{"success":true,"x":' + IntToStr(X) + ',"y":' + IntToStr(Y) + '}');
+        '{"success":true,"x":' + IntToStr(CoordToMils(Loc.X))
+        + ',"y":' + IntToStr(CoordToMils(Loc.Y))
+        + ',"snapped_to_pin":' + BoolToJsonStr(Snapped) + InfoJson
+        + ',' + HitsJson + '}');
+End;
+
+{..............................................................................}
+{ Gen_PlaceNoERCs - MANY No-ERC markers in one call, each on a pin or a point. }
+{                                                                              }
+{ The carrier sheets needed 3 to 65 markers each, and they went through        }
+{ obj_batch_create with coordinates worked out by hand. This takes pins by     }
+{ designator + number and computes each electrical end with FindSheetPinEnd,   }
+{ so a marker cannot land on a root or on a phantom sub-part pin. A point      }
+{ that already carries a marker is skipped, so a re-run does not stack them.   }
+{                                                                              }
+{ Params: targets = '~~'-separated ops; fields designator + pin, or x + y      }
+{         (mils).                                                              }
+{..............................................................................}
+Function Gen_PlaceNoERCs(Params : String; RequestId : String) : String;
+Var
+    TargetsStr, Remaining, Op, Desig, PinNum, XStr, YStr, Info : String;
+    Existing, Key, Reason, ItemsJson : String;
+    SchDoc : ISch_Document;
+    Iter : ISch_Iterator;
+    Obj, NoERC : ISch_GraphicalObject;
+    Loc : TLocation;
+    PX, PY, OpCount, Placed, Skipped, Failed : Integer;
+    Snapped : Boolean;
+Begin
+    TargetsStr := ExtractJsonValue(Params, 'targets');
+    If TargetsStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'targets is required');
+        Exit;
+    End;
+    SchDoc := SchServer.GetCurrentSchDocument;
+    If SchDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active');
+        Exit;
+    End;
+    If SchDoc.ObjectId = eSchLib Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_A_SHEET',
+            'No-ERC markers belong on a schematic sheet, and the active '
+            + 'document is a library.');
+        Exit;
+    End;
+
+    { Markers already on the sheet, so a re-run does not stack duplicates. }
+    Existing := '|';
+    Iter := SchDoc.SchIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eNoERC));
+        Obj := Iter.FirstSchObject;
+        While Obj <> Nil Do
+        Begin
+            Loc := Obj.Location;
+            Existing := Existing + IntToStr(Loc.X) + ',' + IntToStr(Loc.Y) + '|';
+            Obj := Iter.NextSchObject;
+        End;
+    Finally
+        SchDoc.SchIterator_Destroy(Iter);
+    End;
+
+    ItemsJson := '';
+    OpCount := 0;
+    Placed := 0;
+    Skipped := 0;
+    Failed := 0;
+    Remaining := TargetsStr;
+    SchServer.ProcessControl.PreProcess(SchDoc, '');
+    Try
+        While True Do
+        Begin
+            Op := NextBatchOp(Remaining);
+            If Op = '' Then Break;
+            Inc(OpCount);
+            Desig := GetBatchField(Op, 'designator');
+            PinNum := GetBatchField(Op, 'pin');
+            XStr := GetBatchField(Op, 'x');
+            YStr := GetBatchField(Op, 'y');
+            Reason := '';
+            Snapped := False;
+            Info := '';
+            PX := 0;
+            PY := 0;
+            If (Desig <> '') Or (PinNum <> '') Then
+            Begin
+                If (Desig = '') Or (PinNum = '') Then Reason := 'BAD_TARGET'
+                Else If FindSheetPinEnd(SchDoc, Desig, PinNum, PX, PY, Info) Then Snapped := True
+                Else Reason := 'PIN_NOT_FOUND';
+            End
+            Else If IsIntStr(XStr) And IsIntStr(YStr) Then
+            Begin
+                PX := MilsToCoord(StrToIntDef(XStr, 0));
+                PY := MilsToCoord(StrToIntDef(YStr, 0));
+            End
+            Else
+                Reason := 'BAD_TARGET';
+
+            Key := '|' + IntToStr(PX) + ',' + IntToStr(PY) + '|';
+            If (Reason = '') And (Pos(Key, Existing) > 0) Then Reason := 'ALREADY_MARKED';
+
+            If Reason = '' Then
+            Begin
+                NoERC := SchServer.SchObjectFactory(eNoERC, eCreate_Default);
+                If NoERC = Nil Then
+                    Reason := 'CREATE_FAILED'
+                Else
+                Begin
+                    NoERC.Location := Point(PX, PY);
+                    SchDoc.RegisterSchObjectInContainer(NoERC);
+                    SchRegisterObject(SchDoc, NoERC);
+                    Existing := Existing + IntToStr(PX) + ',' + IntToStr(PY) + '|';
+                    Inc(Placed);
+                End;
+            End;
+            If Reason = 'ALREADY_MARKED' Then Inc(Skipped)
+            Else If Reason <> '' Then Inc(Failed);
+
+            If ItemsJson <> '' Then ItemsJson := ItemsJson + ',';
+            ItemsJson := ItemsJson + '{"index":' + IntToStr(OpCount - 1)
+                + ',"designator":"' + EscapeJsonString(Desig) + '"'
+                + ',"pin":"' + EscapeJsonString(PinNum) + '"'
+                + ',"x":' + IntToStr(CoordToMils(PX))
+                + ',"y":' + IntToStr(CoordToMils(PY))
+                + ',"snapped_to_pin":' + BoolToJsonStr(Snapped)
+                + ',"placed":' + BoolToJsonStr(Reason = '')
+                + ',"reason":"' + Reason + '"}';
+        End;
+    Finally
+        SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
+        SchDoc.GraphicallyInvalidate;
+    End;
+
+    If SchDoc <> Nil Then MarkDocDirtyByPath(SchDoc.DocumentName);
+    If Placed > 0 Then
+        NoteNextStep('ERC answers from the COMPILED model. If covered pins are '
+            + 'still reported after proj_compile, run sch_reload_document on '
+            + 'this sheet and check with sch_get_no_erc_markers(cross_check_erc=True).');
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"placed":' + IntToStr(Placed)
+        + ',"skipped":' + IntToStr(Skipped)
+        + ',"failed":' + IntToStr(Failed)
+        + ',"total":' + IntToStr(OpCount)
+        + ',"items":[' + ItemsJson + ']}');
+End;
+
+{..............................................................................}
+{ Gen_GetNoErcMarkers - every No-ERC marker on a sheet and what it sits on.     }
+{                                                                              }
+{ Read only. One pass indexes every pin by its electrical end ('E|x|y'), its   }
+{ body end ('R|x|y') and, for pins of undrawn sub-parts, their end ('P|x|y'); }
+{ a second pass looks each marker up. Per-marker walks of every pin would be  }
+{ markers x pins property reads, which on the FX5 sheet (65 markers, 845 pin  }
+{ records) is tens of thousands of COM calls.                                  }
+{                                                                              }
+{ status per marker: on_pin_end | phantom_pin_only | on_pin_root | no_pin.     }
+{ no_pin is right for a marker on a wire; on a bare pin it suppresses nothing. }
+{                                                                              }
+{ Params: doc_path (optional, default the active sheet; must already be open), }
+{         limit (markers listed, default 500, 0 = all; counts cover all).     }
+{..............................................................................}
+Function Gen_GetNoErcMarkers(Params : String; RequestId : String) : String;
+Var
+    DocPath, ResolvedPath, KeyE, KeyR, KeyP, Entry, CompDesig : String;
+    EndJson, RootJson, PhantomJson, MarkersJson, Status : String;
+    SchDoc : ISch_Document;
+    Iter, CompIter, PinIter : ISch_Iterator;
+    Obj : ISch_GraphicalObject;
+    Comp : ISch_Component;
+    Pin : ISch_Pin;
+    Loc : TLocation;
+    Keys, Vals : TStringList;
+    J, J0, Limit, Total, Listed, NEnd, NPhantom, NRoot, NNone : Integer;
+    CompPart, CompMode, PinOwner, PinMode, PinLen, PinOri, EX, EY : Integer;
+    IsReal : Boolean;
+Begin
+    DocPath := ExtractJsonValue(Params, 'doc_path');
+    Limit := StrToIntDef(ExtractJsonValue(Params, 'limit'), 500);
+    SchDoc := Nil;
+    Try
+        If DocPath <> '' Then SchDoc := SchServer.GetSchDocumentByPath(DocPath)
+        Else SchDoc := SchServer.GetCurrentSchDocument;
+    Except
+        SchDoc := Nil;
+    End;
+    If SchDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC',
+            'No schematic document is active, or doc_path is not open: ' + DocPath);
+        Exit;
+    End;
+    If SchDoc.ObjectId = eSchLib Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_A_SHEET',
+            'No-ERC markers live on schematic sheets, and this document is a library.');
+        Exit;
+    End;
+    If DocPath = '' Then DocPath := SchDoc.DocumentName;
+    ResolvedPath := ResolveLoadedDocPath(DocPath);
+    If ResolvedPath <> '' Then DocPath := ResolvedPath;
+
+    Total := 0;
+    Listed := 0;
+    NEnd := 0;
+    NPhantom := 0;
+    NRoot := 0;
+    NNone := 0;
+    MarkersJson := '';
+    Keys := TStringList.Create;
+    Vals := TStringList.Create;
+    Try
+        CompIter := SchDoc.SchIterator_Create;
+        Try
+            CompIter.AddFilter_ObjectSet(MkSet(eSchComponent));
+            Comp := CompIter.FirstSchObject;
+            While Comp <> Nil Do
+            Begin
+                CompDesig := '';
+                CompPart := 0;
+                CompMode := 0;
+                Try CompDesig := Comp.Designator.Text; Except End;
+                Try CompPart := Comp.CurrentPartID; Except End;
+                Try CompMode := Comp.DisplayMode; Except End;
+                PinIter := Comp.SchIterator_Create;
+                Try
+                    PinIter.AddFilter_ObjectSet(MkSet(ePin));
+                    Pin := PinIter.FirstSchObject;
+                    While Pin <> Nil Do
+                    Begin
+                        PinOwner := 0;
+                        PinMode := 0;
+                        PinLen := 0;
+                        PinOri := 0;
+                        Try PinOwner := Pin.OwnerPartId; Except End;
+                        Try PinMode := Pin.OwnerPartDisplayMode; Except End;
+                        Try PinLen := Pin.PinLength; Except End;
+                        Try PinOri := Pin.Orientation; Except End;
+                        Loc := Pin.GetState_Location;
+                        EX := PinEndX(Loc.X, PinOri, PinLen);
+                        EY := PinEndY(Loc.Y, PinOri, PinLen);
+                        IsReal := ((PinOwner = 0) Or (PinOwner = CompPart) Or (CompPart <= 0))
+                            And (PinMode = CompMode);
+                        Entry := '{"designator":"' + EscapeJsonString(CompDesig) + '"'
+                            + ',"pin":"' + EscapeJsonString(Pin.Designator) + '"'
+                            + ',"name":"' + EscapeJsonString(Pin.Name) + '"'
+                            + ',"electrical_type":"' + PinElectricalToStr(Pin.Electrical) + '"'
+                            + ',"owner_part_id":' + IntToStr(PinOwner)
+                            + ',"part_shown":' + IntToStr(CompPart) + '}';
+                        If IsReal Then
+                        Begin
+                            Keys.Add('E|' + IntToStr(EX) + '|' + IntToStr(EY));
+                            Vals.Add(Entry);
+                            Keys.Add('R|' + IntToStr(Loc.X) + '|' + IntToStr(Loc.Y));
+                            Vals.Add(Entry);
+                        End
+                        Else
+                        Begin
+                            Keys.Add('P|' + IntToStr(EX) + '|' + IntToStr(EY));
+                            Vals.Add(Entry);
+                        End;
+                        Pin := PinIter.NextSchObject;
+                    End;
+                Finally
+                    Comp.SchIterator_Destroy(PinIter);
+                End;
+                Comp := CompIter.NextSchObject;
+            End;
+        Finally
+            SchDoc.SchIterator_Destroy(CompIter);
+        End;
+
+        Iter := SchDoc.SchIterator_Create;
+        Try
+            Iter.AddFilter_ObjectSet(MkSet(eNoERC));
+            Obj := Iter.FirstSchObject;
+            While Obj <> Nil Do
+            Begin
+                Inc(Total);
+                Loc := Obj.Location;
+                KeyE := 'E|' + IntToStr(Loc.X) + '|' + IntToStr(Loc.Y);
+                KeyR := 'R|' + IntToStr(Loc.X) + '|' + IntToStr(Loc.Y);
+                KeyP := 'P|' + IntToStr(Loc.X) + '|' + IntToStr(Loc.Y);
+                EndJson := '';
+                RootJson := '';
+                PhantomJson := '';
+                J0 := Keys.IndexOf(KeyE);
+                J := Keys.IndexOf(KeyR);
+                If (J >= 0) And ((J0 < 0) Or (J < J0)) Then J0 := J;
+                J := Keys.IndexOf(KeyP);
+                If (J >= 0) And ((J0 < 0) Or (J < J0)) Then J0 := J;
+                If J0 >= 0 Then
+                Begin
+                    For J := J0 To Keys.Count - 1 Do
+                    Begin
+                        If Keys[J] = KeyE Then
+                        Begin
+                            If EndJson <> '' Then EndJson := EndJson + ',';
+                            EndJson := EndJson + Vals[J];
+                        End
+                        Else If Keys[J] = KeyR Then
+                        Begin
+                            If RootJson <> '' Then RootJson := RootJson + ',';
+                            RootJson := RootJson + Vals[J];
+                        End
+                        Else If Keys[J] = KeyP Then
+                        Begin
+                            If PhantomJson <> '' Then PhantomJson := PhantomJson + ',';
+                            PhantomJson := PhantomJson + Vals[J];
+                        End;
+                    End;
+                End;
+                If EndJson <> '' Then
+                Begin
+                    Status := 'on_pin_end';
+                    Inc(NEnd);
+                End
+                Else If PhantomJson <> '' Then
+                Begin
+                    Status := 'phantom_pin_only';
+                    Inc(NPhantom);
+                End
+                Else If RootJson <> '' Then
+                Begin
+                    Status := 'on_pin_root';
+                    Inc(NRoot);
+                End
+                Else
+                Begin
+                    Status := 'no_pin';
+                    Inc(NNone);
+                End;
+                If (Limit <= 0) Or (Listed < Limit) Then
+                Begin
+                    If MarkersJson <> '' Then MarkersJson := MarkersJson + ',';
+                    MarkersJson := MarkersJson + '{"x":' + IntToStr(CoordToMils(Loc.X))
+                        + ',"y":' + IntToStr(CoordToMils(Loc.Y))
+                        + ',"status":"' + Status + '"'
+                        + ',"on_pin_end":[' + EndJson + ']'
+                        + ',"on_pin_root":[' + RootJson + ']'
+                        + ',"phantom_pin_end":[' + PhantomJson + ']}';
+                    Inc(Listed);
+                End;
+                Obj := Iter.NextSchObject;
+            End;
+        Finally
+            SchDoc.SchIterator_Destroy(Iter);
+        End;
+    Finally
+        Keys.Free;
+        Vals.Free;
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"document":"' + EscapeJsonString(DocPath) + '"'
+        + ',"total":' + IntToStr(Total)
+        + ',"counts":{"on_pin_end":' + IntToStr(NEnd)
+        + ',"phantom_pin_only":' + IntToStr(NPhantom)
+        + ',"on_pin_root":' + IntToStr(NRoot)
+        + ',"no_pin":' + IntToStr(NNone) + '}'
+        + ',"listed":' + IntToStr(Listed)
+        + ',"truncated":' + BoolToJsonStr(Listed < Total)
+        + ',"markers":[' + MarkersJson + ']}');
 End;
 
 {..............................................................................}
@@ -10875,10 +11497,306 @@ Begin
         SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     End;
     Try SchDoc.GraphicallyInvalidate; Except End;
+    { Same rule as every other schematic write: an undirtied edit is
+      skipped by SmartCompile and by the deferred save. }
+    If SchDoc <> Nil Then MarkDocDirtyByPath(SchDoc.DocumentName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"designator":"' + EscapeJsonString(Desig) + '","component_kind":"'
         + KindStr + '"}');
+End;
+
+{..............................................................................}
+{ ProjectHoldingDoc - the open project that lists FullPath as a member.        }
+{ Nil for a free document. Compared by full path, never by file name.          }
+{..............................................................................}
+Function ProjectHoldingDoc(FullPath : String) : IProject;
+Var
+    Workspace : IWorkspace;
+    Project : IProject;
+    Doc : IDocument;
+    I, J : Integer;
+    P : String;
+Begin
+    Result := Nil;
+    If FullPath = '' Then Exit;
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Exit;
+    For I := 0 To Workspace.DM_ProjectCount - 1 Do
+    Begin
+        Project := Nil;
+        Try Project := Workspace.DM_Projects(I); Except End;
+        If Project = Nil Then Continue;
+        For J := 0 To Project.DM_LogicalDocumentCount - 1 Do
+        Begin
+            Doc := Nil;
+            Try Doc := Project.DM_LogicalDocuments(J); Except End;
+            If Doc = Nil Then Continue;
+            P := '';
+            Try P := Doc.DM_FullPath; Except End;
+            If UpperCase(P) = UpperCase(FullPath) Then
+            Begin
+                Result := Project;
+                Exit;
+            End;
+        End;
+    End;
+End;
+
+{ A few object counts on a sheet, so a reload can show what the in-memory     }
+{ copy held against what the file reopened with.                              }
+Function SchDocObjectCountsJson(SchDoc : ISch_Document) : String;
+Var
+    Iter : ISch_Iterator;
+    Obj : ISch_GraphicalObject;
+    Kind, NLabels, NWires, NNoErc, NComps, NPower, NJunctions, NPorts : Integer;
+Begin
+    NLabels := 0;
+    NWires := 0;
+    NNoErc := 0;
+    NComps := 0;
+    NPower := 0;
+    NJunctions := 0;
+    NPorts := 0;
+    Iter := SchDoc.SchIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eNetLabel, eWire, eNoERC, eSchComponent,
+            ePowerObject, eJunction, ePort));
+        Obj := Iter.FirstSchObject;
+        While Obj <> Nil Do
+        Begin
+            Kind := Obj.ObjectId;
+            If Kind = eNetLabel Then Inc(NLabels)
+            Else If Kind = eWire Then Inc(NWires)
+            Else If Kind = eNoERC Then Inc(NNoErc)
+            Else If Kind = eSchComponent Then Inc(NComps)
+            Else If Kind = ePowerObject Then Inc(NPower)
+            Else If Kind = eJunction Then Inc(NJunctions)
+            Else If Kind = ePort Then Inc(NPorts);
+            Obj := Iter.NextSchObject;
+        End;
+    Finally
+        SchDoc.SchIterator_Destroy(Iter);
+    End;
+    Result := '{"net_labels":' + IntToStr(NLabels)
+        + ',"wires":' + IntToStr(NWires)
+        + ',"no_erc":' + IntToStr(NNoErc)
+        + ',"components":' + IntToStr(NComps)
+        + ',"power_ports":' + IntToStr(NPower)
+        + ',"junctions":' + IntToStr(NJunctions)
+        + ',"ports":' + IntToStr(NPorts) + '}';
+End;
+
+{..............................................................................}
+{ Gen_ReloadSchDocument - save, close and reopen ONE sheet, then recompile.    }
+{                                                                              }
+{ THE COMPILED MODEL IS NOT REBUILT FROM THE DOCUMENT ON A RECOMPILE. Two     }
+{ measurements from the carrier work, both cured only by closing and          }
+{ reopening the sheet:                                                        }
+{   2026-10-03  after sch_set_component_part_id every multi-part instance     }
+{               still compiled as part A, even after proj_force_recompile     }
+{   2026-10-04  deleted net labels kept naming merged nets after a forced     }
+{               recompile, while the saved file was clean                     }
+{ This makes that cure one call instead of three.                             }
+{                                                                              }
+{ ORDER AND REFUSALS. Save first, verified by file age OR by the modified    }
+{ flag clearing (FileAge has two-second resolution, so a second save inside  }
+{ two seconds would otherwise read as failed). A save that cannot be shown   }
+{ to have happened stops here with the document still open: closing it would }
+{ lose the edits or raise a prompt nothing here can answer. With save=false  }
+{ a document reading modified is refused the same way.                        }
+{                                                                              }
+{ The close is by OBJECT (Client.CloseDocument, as App_CloseDocument does),   }
+{ never WorkspaceManager:CloseObject, which acts on whatever has the focus.   }
+{ The reopen is WorkspaceManager:OpenObject, the route the owner's manual    }
+{ cure used; whether it came back inside its project or as a free document   }
+{ is READ BACK and reported, because an open route that detaches a sheet     }
+{ from its project has been recorded on recent builds (Proj_SetDocumentParameter). }
+{                                                                              }
+{ Params: file_path (default: the focused document), save (default true),    }
+{         recompile (default true).                                          }
+{..............................................................................}
+Function Gen_ReloadSchDocument(Params : String; RequestId : String) : String;
+Var
+    FilePath, RestorePath, SaveStr, RecompileStr, ProjPath, FreePath : String;
+    CountsBefore, CountsAfter, Details : String;
+    DoSave, DoRecompile, WasModified, StillModified, Saved, FreeAfter, Recompiled : Boolean;
+    ServerDoc, Again : IServerDocument;
+    SchDoc : ISch_Document;
+    Workspace : IWorkspace;
+    OwnerProject : IProject;
+    AgeBefore, AgeAfter : Integer;
+Begin
+    FilePath := ExtractJsonValue(Params, 'file_path');
+    SaveStr := LowerCase(ExtractJsonValue(Params, 'save'));
+    RecompileStr := LowerCase(ExtractJsonValue(Params, 'recompile'));
+    DoSave := SaveStr <> 'false';
+    DoRecompile := RecompileStr <> 'false';
+
+    RestorePath := CurrentFocusedDocPath(0);
+    If FilePath = '' Then FilePath := RestorePath;
+    If FilePath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_DOCUMENT',
+            'No file_path given and no document is focused');
+        Exit;
+    End;
+    FilePath := ResolveLoadedDocPath(FilePath);
+    If FilePath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_RESOLVED',
+            'file_path did not resolve to the absolute path of an open document');
+        Exit;
+    End;
+    If UpperCase(ExtractFileExt(FilePath)) <> '.SCHDOC' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_A_SCHDOC',
+            FilePath + ' is not a .SchDoc. For a .PcbLib use lib_reload_library.');
+        Exit;
+    End;
+
+    ServerDoc := Nil;
+    Try ServerDoc := Client.GetDocumentByPath(FilePath); Except ServerDoc := Nil; End;
+    If ServerDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_LOADED',
+            FilePath + ' is not open, so there is no in-memory copy to reload. '
+            + 'Open it (proj_load_sheets) and compile; a closed sheet already '
+            + 'compiles from the file.');
+        Exit;
+    End;
+
+    CountsBefore := 'null';
+    SchDoc := Nil;
+    Try SchDoc := SchServer.GetSchDocumentByPath(FilePath); Except SchDoc := Nil; End;
+    If SchDoc <> Nil Then CountsBefore := SchDocObjectCountsJson(SchDoc);
+    SchDoc := Nil;
+
+    OwnerProject := ProjectHoldingDoc(FilePath);
+    ProjPath := '';
+    If OwnerProject <> Nil Then
+        Try ProjPath := OwnerProject.DM_ProjectFullPath; Except ProjPath := ''; End;
+
+    WasModified := False;
+    Try WasModified := ServerDoc.Modified; Except WasModified := False; End;
+
+    { 1. Save, and prove it. }
+    Saved := False;
+    AgeBefore := -1;
+    AgeAfter := -1;
+    StillModified := WasModified;
+    If DoSave Then
+    Begin
+        Try AgeBefore := FileAge(FilePath); Except AgeBefore := -1; End;
+        Try ServerDoc.SetModified(True); Except End;
+        Try ServerDoc.DoFileSave(''); Except End;
+        Try Application.ProcessMessages; Except End;
+        Try AgeAfter := FileAge(FilePath); Except AgeAfter := -1; End;
+        StillModified := True;
+        Try StillModified := ServerDoc.Modified; Except StillModified := True; End;
+        Saved := (AgeAfter <> AgeBefore) Or (Not StillModified);
+        If Not Saved Then
+        Begin
+            Result := BuildErrorResponseDetailed(RequestId, 'SAVE_FAILED',
+                'The save could not be shown to have happened (file age '
+                + 'unchanged and the document still reads modified), so the '
+                + 'sheet was NOT closed. Altium declines a save while a command '
+                + 'is active; app_exit_active_command, then retry.',
+                '{"file_path":"' + EscapeJsonString(FilePath) + '"'
+                + ',"age_before":' + IntToStr(AgeBefore)
+                + ',"age_after":' + IntToStr(AgeAfter) + '}');
+            Exit;
+        End;
+    End
+    Else If WasModified Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MODIFIED',
+            FilePath + ' has unsaved changes and save=false, so it was not '
+            + 'closed. Pass save=true to write them first.');
+        Exit;
+    End;
+
+    { 2. Close THIS document, by object. }
+    Client.CloseDocument(ServerDoc);
+    ServerDoc := Nil;
+    Try Application.ProcessMessages; Except End;
+    Again := Nil;
+    Try Again := Client.GetDocumentByPath(FilePath); Except Again := Nil; End;
+    If Again <> Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'CLOSE_FAILED',
+            FilePath + ' was saved but is still open; a prompt may be waiting. '
+            + 'Check app_list_open_dialogs.');
+        Exit;
+    End;
+
+    { 3. Reopen it. }
+    ResetParameters;
+    AddStringParameter('ObjectKind', 'Document');
+    AddStringParameter('FileName', FilePath);
+    RunProcess('WorkspaceManager:OpenObject');
+    Try Application.ProcessMessages; Except End;
+    ServerDoc := Nil;
+    Try ServerDoc := Client.GetDocumentByPath(FilePath); Except ServerDoc := Nil; End;
+    If ServerDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'REOPEN_FAILED',
+            FilePath + ' was saved and closed but did not reopen. Open it from '
+            + 'the project tree (proj_load_sheets); nothing was lost.');
+        Exit;
+    End;
+
+    CountsAfter := 'null';
+    SchDoc := Nil;
+    Try SchDoc := SchServer.GetSchDocumentByPath(FilePath); Except SchDoc := Nil; End;
+    If SchDoc <> Nil Then CountsAfter := SchDocObjectCountsJson(SchDoc);
+
+    FreeAfter := False;
+    Workspace := GetWorkspace;
+    If Workspace <> Nil Then
+    Begin
+        FreePath := '';
+        Try
+            FreePath := MatchDocPathInProject(Workspace.DM_FreeDocumentsProject,
+                ExtractFileName(FilePath));
+        Except
+            FreePath := '';
+        End;
+        FreeAfter := (FreePath <> '') And (UpperCase(FreePath) = UpperCase(FilePath));
+    End;
+
+    { 4. Drop the cached compile; recompile the project that owns the sheet. }
+    InvalidateCompileCache(0);
+    Recompiled := False;
+    If DoRecompile And (OwnerProject <> Nil) Then
+    Begin
+        Try
+            SmartCompile(OwnerProject);
+            Recompiled := True;
+        Except
+            Recompiled := False;
+        End;
+    End;
+
+    { 5. Give the caller their focus back. }
+    If (RestorePath <> '') And (UpperCase(RestorePath) <> UpperCase(FilePath)) Then
+        RestoreFocusedDoc(RestorePath);
+
+    If FreeAfter And (OwnerProject <> Nil) Then
+        NoteNextStep('The sheet reopened as a FREE document, outside ' + ProjPath
+            + '. Close it and open it from the project tree before editing, '
+            + 'or edits will not compile with the project.');
+
+    Details := '{"file_path":"' + EscapeJsonString(FilePath) + '"'
+        + ',"project":"' + EscapeJsonString(ProjPath) + '"'
+        + ',"was_modified":' + BoolToJsonStr(WasModified)
+        + ',"saved":' + BoolToJsonStr(Saved)
+        + ',"closed":true,"reopened":true'
+        + ',"free_document_after":' + BoolToJsonStr(FreeAfter)
+        + ',"recompiled":' + BoolToJsonStr(Recompiled)
+        + ',"objects_before":' + CountsBefore
+        + ',"objects_after":' + CountsAfter + '}';
+    Result := BuildSuccessResponse(RequestId, Details);
 End;
 
 {..............................................................................}
@@ -11261,6 +12179,9 @@ Begin
         'copy_objects':     Result := Gen_CopyObjects(Params, RequestId);
         'get_object_count': Result := Gen_GetObjectCount(Params, RequestId);
         'place_no_erc':     Result := Gen_PlaceNoERC(Params, RequestId);
+        'place_no_ercs':    Result := Gen_PlaceNoERCs(Params, RequestId);
+        'get_no_erc_markers': Result := Gen_GetNoErcMarkers(Params, RequestId);
+        'reload_sch_document': Result := Gen_ReloadSchDocument(Params, RequestId);
         'place_junction':   Result := Gen_PlaceJunction(Params, RequestId);
         'place_junctions':  Result := Gen_PlaceJunctions(Params, RequestId);
         'get_document_info': Result := Gen_GetDocumentInfo(Params, RequestId);

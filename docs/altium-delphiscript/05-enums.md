@@ -149,3 +149,12 @@ The schematic sheet-size presets: `eSheetA` … `eSheetE` (ANSI A-E),
 `eSmall`, `eMedium`, `eLarge` (the schematic line-width enum, `0..3`: a small
 fixed set, not a coordinate; contrast the PCB `Width`/`LineWidth` coordinates on
 [page 6](06-types-and-coordinates.md)).
+
+---
+
+## 5.15 Component kind (`TComponentKind`)
+
+`eComponentKind_NetTie_BOM`, `eComponentKind_NetTie_NoBOM`. The other five
+members (Standard, Mechanical, Graphical, Standard_NoBOM, Jumper) are not
+spelled in this codebase; they are written by ordinal 0, 1, 2, 5, 6, with
+the two names above read at run time as the 3 and 4 anchors.

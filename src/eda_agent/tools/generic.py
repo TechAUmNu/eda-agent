@@ -8,6 +8,7 @@ a pass-through layer for object iteration, property access, and process executio
 """
 
 import difflib
+import re
 from typing import Any, Optional
 from ..bridge.payload import payload_safe
 from ..bridge import get_bridge
@@ -138,6 +139,230 @@ async def _refuse_manual_sheet_layout(
         "use_instead": "design_execute_plan",
         "existing_components": existing,
     }
+
+
+#: The keys sch_place_no_ercs reads from one target.
+NO_ERC_TARGET_KEYS = frozenset({"designator", "pin", "x", "y"})
+
+
+def no_erc_targets_payload(targets: Any) -> tuple[str, list[str]]:
+    """Build the ``targets`` payload for sch_place_no_ercs.
+
+    Each target is a pin (designator + pin, preferred: the Pascal puts
+    the marker on that pin's electrical end) or a point (x + y, mils).
+    A separator in a designator or pin number is refused: a fragment
+    could name a real pin, and a marker on the wrong pin silently hides
+    a real disconnection.
+    """
+    problems: list[str] = []
+    ops: list[str] = []
+    if not isinstance(targets, list) or not targets:
+        return "", ["targets must be a non-empty list"]
+    for i, t in enumerate(targets):
+        if not isinstance(t, dict):
+            problems.append(f"targets[{i}] is not an object")
+            continue
+        unknown = sorted(set(t) - NO_ERC_TARGET_KEYS)
+        if unknown:
+            problems.append(f"targets[{i}]: unknown keys {unknown}; use "
+                            f"designator + pin, or x + y")
+            continue
+        desig = str(t.get("designator", "")).strip()
+        pin = str(t.get("pin", "")).strip()
+        if desig or pin:
+            if not (desig and pin):
+                problems.append(f"targets[{i}]: designator and pin go together")
+                continue
+            if any(";" in v or "~~" in v for v in (desig, pin)):
+                problems.append(
+                    f"targets[{i}]: {desig!r}/{pin!r} contains ';' or '~~', "
+                    f"the wire-format separators; refused")
+                continue
+            ops.append(f"designator={desig};pin={pin}")
+            continue
+        try:
+            ops.append(f"x={int(t['x'])};y={int(t['y'])}")
+        except (KeyError, TypeError, ValueError):
+            problems.append(
+                f"targets[{i}]: give designator + pin, or integer x + y")
+    return "~~".join(ops), problems
+
+
+def annotate_no_erc_placement(result: Any) -> Any:
+    """Say plainly when a placed No-ERC marker touches no drawn pin."""
+    if not isinstance(result, dict) or "on_pin_end" not in result:
+        return result
+    if result.get("on_pin_end"):
+        return result
+    if result.get("phantom_pin_end"):
+        result["warning"] = (
+            "The marker is on the end of a pin belonging to a sub-part this "
+            "instance does not draw; nothing connects there. Place it with "
+            "designator + pin instead.")
+    elif result.get("on_pin_root"):
+        result["warning"] = (
+            "The marker is on a pin's ROOT, the body end. ERC attaches at the "
+            "electrical end, PinLength away, so this marker suppresses "
+            "nothing. Place it with designator + pin instead.")
+    else:
+        result["warning"] = (
+            "The marker is on no pin's electrical end. That is right on a "
+            "wire, where it covers the net; on a bare pin it does nothing.")
+    return result
+
+
+def _schdoc_mils(rec: dict[str, str], key: str) -> float:
+    """A .SchDoc coordinate in mils.
+
+    The integer field is in 10-mil units and the optional ``_Frac`` field
+    adds 1/100000 of one, so ``Location.X=600`` is 6000 mil. Checked
+    against saved carrier sheets: every bridge-placed No-ERC converted
+    this way lands exactly on a pin's electrical end.
+    """
+    up = {k.upper(): v for k, v in rec.items()}
+    try:
+        whole = int(up.get(key.upper(), "0"))
+        frac = int(up.get(key.upper() + "_FRAC", "0"))
+    except ValueError:
+        return float("nan")
+    return whole * 10 + frac / 10000.0
+
+
+#: Fields of a saved No-ERC record that are its identity or position,
+#: not its configuration.
+_NO_ERC_POSITION_KEYS = frozenset({
+    "LOCATION.X", "LOCATION.Y", "LOCATION.X_FRAC", "LOCATION.Y_FRAC",
+    "INDEXINSHEET", "UNIQUEID",
+})
+
+
+def saved_no_erc_report(path: str, live: list[dict[str, Any]],
+                        truncated: bool = False) -> dict[str, Any]:
+    """What the SAVED .SchDoc says about every No-ERC marker on a sheet.
+
+    The only way to read IsActive / SuppressAll / Symbol without putting
+    ISch_NoERC members into the script: the file holds them verbatim.
+    ``field_variants`` groups markers by everything except position, so
+    a marker configured differently from the rest stands out.
+    """
+    from ..fileio.altium_sch import read_schdoc_records
+
+    if not path or not str(path).lower().endswith(".schdoc"):
+        return {"available": False, "reason": f"not a .SchDoc path: {path!r}"}
+    try:
+        records = read_schdoc_records(path)
+    except (OSError, ValueError) as exc:
+        return {"available": False,
+                "reason": f"could not read the saved file: {exc}"}
+    saved: set[tuple[int, int]] = set()
+    variants: dict[str, int] = {}
+    for rec in records:
+        if rec.get("RECORD") != "22":
+            continue
+        x = _schdoc_mils(rec, "Location.X")
+        y = _schdoc_mils(rec, "Location.Y")
+        if x == x and y == y:          # not NaN
+            saved.add((round(x), round(y)))
+        fields = {k: v for k, v in rec.items()
+                  if k.upper() not in _NO_ERC_POSITION_KEYS}
+        sig = "|".join(f"{k}={fields[k]}" for k in sorted(fields))
+        variants[sig] = variants.get(sig, 0) + 1
+    in_memory = {(int(m.get("x", 0)), int(m.get("y", 0)))
+                 for m in live or [] if isinstance(m, dict)}
+    report: dict[str, Any] = {
+        "available": True,
+        "path": path,
+        "saved_count": sum(variants.values()),
+        "field_variants": variants,
+        "in_memory_not_saved": sorted([list(p) for p in in_memory - saved]),
+        "saved_not_in_memory": sorted([list(p) for p in saved - in_memory]),
+    }
+    if truncated:
+        report["note"] = ("the live list was truncated by limit, so "
+                          "saved_not_in_memory may name listed-out markers; "
+                          "rerun with limit=0")
+    return report
+
+
+def _token_in(token: str, text: str) -> bool:
+    """``token`` as a whole word in ``text``: '1' is in 'U5-1', not in 'U1'."""
+    return bool(re.search(r"(?<![A-Za-z0-9_])" + re.escape(token)
+                          + r"(?![A-Za-z0-9_])", text))
+
+
+def no_erc_erc_cross_check(markers: list[dict[str, Any]],
+                           erc: Any) -> dict[str, Any]:
+    """Which pins carrying a No-ERC marker are still named by a violation.
+
+    HEURISTIC, stated as such: a violation is matched to a covered pin
+    when ONE of its texts (description, detail, or a related object's
+    cross_probe) contains both the designator and the pin number as whole
+    words. The raw strings come back with every match so the match can be
+    checked by eye; the format of DM_PrimaryCrossProbeString has not been
+    pinned for this build.
+    """
+    covered: list[tuple[str, str]] = []
+    for m in markers or []:
+        if not isinstance(m, dict):
+            continue
+        for p in m.get("on_pin_end") or []:
+            if isinstance(p, dict) and p.get("designator") and p.get("pin"):
+                covered.append((str(p["designator"]), str(p["pin"])))
+    violations = erc.get("violations", []) if isinstance(erc, dict) else []
+    still: list[dict[str, Any]] = []
+    for v in violations:
+        if not isinstance(v, dict):
+            continue
+        texts = [str(v.get("description", "")), str(v.get("detail", ""))]
+        texts += [str(r.get("cross_probe", ""))
+                  for r in (v.get("related_objects") or [])
+                  if isinstance(r, dict)]
+        for desig, pin in covered:
+            if any(t and _token_in(desig, t) and _token_in(pin, t)
+                   for t in texts):
+                still.append({"designator": desig, "pin": pin,
+                              "violation_index": v.get("index"),
+                              "description": v.get("description"),
+                              "evidence": [t for t in texts if t]})
+    return {
+        "covered_pins": len(covered),
+        "violation_count": (erc.get("violation_count")
+                            if isinstance(erc, dict) else None),
+        "violations_read": len(violations),
+        "still_reported": still,
+        "matching": ("designator AND pin number as whole words in one "
+                     "violation text; heuristic, check the evidence"),
+    }
+
+
+def summarise_erc_violations(result: Any) -> Any:
+    """Add ``listed`` and per-prefix counts to a violation read.
+
+    The prefix is the description up to its first ':' when one appears
+    in the first 80 characters, else the first 60 characters: Altium's
+    ERC descriptions lead with the violation class. Approximate by
+    construction; read ``description`` for the exact form.
+    """
+    if not isinstance(result, dict):
+        return result
+    violations = result.get("violations")
+    if not isinstance(violations, list):
+        return result
+    counts: dict[str, int] = {}
+    for v in violations:
+        desc = str(v.get("description", "")) if isinstance(v, dict) else ""
+        cut = desc.find(":")
+        prefix = desc[:cut].strip() if 0 <= cut < 80 else desc[:60].strip()
+        counts[prefix] = counts.get(prefix, 0) + 1
+    result["listed"] = len(violations)
+    result["by_description_prefix"] = dict(
+        sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+    total = result.get("violation_count")
+    if isinstance(total, int) and total > len(violations):
+        result["truncated"] = True
+        result["note"] = (f"{len(violations)} of {total} violations listed; "
+                          f"pass limit=0 to read them all before counting")
+    return result
 
 
 def register_generic_tools(mcp):
@@ -901,7 +1126,7 @@ def register_generic_tools(mcp):
             "generic.set_sch_components_parameters", params, timeout=60.0)
 
     @mcp.tool()
-    async def proj_get_erc_violations() -> dict[str, Any]:
+    async def proj_get_erc_violations(limit: int = 100) -> dict[str, Any]:
         """Return the ERC violation list produced by the last
         ``proj_run_erc()`` invocation.
 
@@ -928,14 +1153,27 @@ def register_generic_tools(mcp):
         that genuinely exposes no objects is distinguishable from one
         whose objects could not be read.
 
+        THE LIST STOPS AT ``limit`` (default 100) in Altium's internal
+        order, not sorted, while ``violation_count`` is the whole total.
+        Counting categories, or concluding a violation is gone, from a
+        truncated list is wrong; pass limit=0 for all of them.
+        ``by_description_prefix`` counts the listed ones by the start of
+        their description (approximate; see the description itself).
+
+        Args:
+            limit: most violations to list; 0 lists every one.
+
         Returns:
-            ``{"violation_count", "violations": [{"index",
+            ``{"violation_count", "listed", "truncated"?,
+            "by_description_prefix", "violations": [{"index",
             "description", "detail", "related_object_count",
             "related_objects": [{"kind", "document", "cross_probe"}]}]}``
         """
         bridge = get_bridge()
-        return await bridge.send_command_async(
-            "generic.get_erc_violations", {})
+        result = await bridge.send_command_async(
+            "generic.get_erc_violations",
+            {"limit": str(max(0, int(limit)))}, timeout=60.0)
+        return summarise_erc_violations(result)
 
     @mcp.tool()
     async def obj_highlight_net(
@@ -1644,27 +1882,199 @@ def register_generic_tools(mcp):
 
     @mcp.tool()
     async def sch_place_no_erc(
-        x: int,
-        y: int,
+        x: Optional[int] = None,
+        y: Optional[int] = None,
+        designator: str = "",
+        pin: str = "",
     ) -> dict[str, Any]:
-        """Place a No-ERC marker at coordinates to suppress specific ERC violations.
+        """Place a No-ERC marker on a pin's electrical end, or at coordinates.
 
-        Use this after running ERC to suppress known-good violations at specific
-        pin or wire locations.
+        Prefer designator + pin: the marker goes on that pin's ELECTRICAL
+        end, computed from the pin itself, which is the only point ERC
+        attaches it to. A marker on the pin's root (its body end) or on a
+        phantom pin of an undrawn sub-part suppresses nothing. For several
+        pins use sch_place_no_ercs.
+
+        The reply reads the marker back: its location and every pin it
+        touches (``on_pin_end``, ``on_pin_root``, ``phantom_pin_end``),
+        plus a ``warning`` when it covers no drawn pin.
+
+        ERC reads the COMPILED model. Markers saved correctly on the right
+        pins have still been reported as violations; if that happens, run
+        sch_reload_document on the sheet and re-read with
+        proj_get_erc_violations(limit=0) or
+        sch_get_no_erc_markers(cross_check_erc=True).
 
         Args:
-            x: X coordinate in mils
+            x: X coordinate in mils (with y, when not using a pin)
             y: Y coordinate in mils
+            designator: placed part, e.g. "U7" (with pin)
+            pin: pin NUMBER on that part, e.g. "23"
 
         Returns:
-            Dictionary confirming placement with coordinates
+            {"x", "y", "snapped_to_pin", "designator"?, "pin"?,
+             "pin_name"?, "electrical_type"?, "on_pin_end", "on_pin_root",
+             "phantom_pin_end", "warning"?}
+        """
+        params: dict[str, Any] = {}
+        if str(designator).strip() or str(pin).strip():
+            if not (str(designator).strip() and str(pin).strip()):
+                return {"ok": False, "reason":
+                        "designator and pin go together: name the part AND "
+                        "the pin number"}
+            params["designator"] = str(designator).strip()
+            params["pin"] = str(pin).strip()
+        elif x is None or y is None:
+            return {"ok": False, "reason":
+                    "give x and y in mils, or designator and pin to put the "
+                    "marker on that pin's electrical end"}
+        if x is not None:
+            params["x"] = str(int(x))
+        if y is not None:
+            params["y"] = str(int(y))
+        bridge = get_bridge()
+        result = await bridge.send_command_async("generic.place_no_erc", params)
+        return annotate_no_erc_placement(result)
+
+    @mcp.tool()
+    async def sch_place_no_ercs(
+        targets: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Place MANY No-ERC markers in ONE call, each on a pin or a point.
+
+        Each target is {"designator": "U7", "pin": "23"} (preferred: the
+        marker lands on that pin's electrical end, and never on a phantom
+        pin of an undrawn sub-part) or {"x": ..., "y": ...} in mils. A
+        point that already carries a marker is skipped, so a re-run does
+        not stack duplicates. Use this rather than obj_batch_create with
+        hand-computed coordinates.
+
+        Args:
+            targets: list of pin or point targets, as above.
+
+        Returns:
+            {"placed", "skipped", "failed", "total", "items": [{"index",
+             "designator", "pin", "x", "y", "snapped_to_pin", "placed",
+             "reason"}]}. reason is PIN_NOT_FOUND, BAD_TARGET,
+            ALREADY_MARKED or CREATE_FAILED when placed is false.
+        """
+        payload, problems = no_erc_targets_payload(targets)
+        if problems:
+            return {"ok": False,
+                    "reason": ("refused, nothing was sent: "
+                               + "; ".join(problems[:5])),
+                    "problems": problems}
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "generic.place_no_ercs", {"targets": payload}, timeout=60.0)
+
+    @mcp.tool()
+    async def sch_get_no_erc_markers(
+        doc_path: str = "",
+        compare_saved_file: bool = False,
+        cross_check_erc: bool = False,
+        limit: int = 500,
+    ) -> dict[str, Any]:
+        """List a sheet's No-ERC markers and the pin each one actually sits on.
+
+        Per marker: its location and a status. ``on_pin_end`` covers that
+        drawn pin. ``on_pin_root`` sits on a pin's body end and suppresses
+        nothing. ``phantom_pin_only`` sits where a pin of an UNDRAWN
+        sub-part would be, which nothing connects to. ``no_pin`` is right
+        on a wire and wrong on a bare pin. Read only.
+
+        compare_saved_file=True also reads the SAVED .SchDoc and reports
+        every marker's stored configuration (IsActive, SuppressAll,
+        Symbol, ...) grouped as ``field_variants``, and which markers are
+        in memory but unsaved or saved but no longer in memory.
+
+        cross_check_erc=True reads the last compile's violations (all of
+        them) and lists covered pins that a violation still names. Run
+        proj_compile or run_erc first. If covered pins are still named
+        after sch_reload_document and a fresh compile, compare with the
+        Messages panel: that separates a marker Altium ignores from a
+        violation list that includes suppressed items.
+
+        Args:
+            doc_path: an OPEN .SchDoc; default the active sheet.
+            compare_saved_file: also read the saved file (no Altium call).
+            cross_check_erc: also correlate with the ERC violation list.
+            limit: markers listed (counts always cover all); 0 = all.
+
+        Returns:
+            {"document", "total", "counts": {"on_pin_end",
+             "phantom_pin_only", "on_pin_root", "no_pin"}, "listed",
+             "truncated", "markers": [{"x", "y", "status", "on_pin_end",
+             "on_pin_root", "phantom_pin_end"}], "saved_file"?,
+             "erc_cross_check"?}
         """
         bridge = get_bridge()
+        params: dict[str, Any] = {"limit": str(max(0, int(limit)))}
+        if str(doc_path).strip():
+            params["doc_path"] = str(doc_path).strip()
         result = await bridge.send_command_async(
-            "generic.place_no_erc",
-            {"x": str(x), "y": str(y)},
-        )
+            "generic.get_no_erc_markers", params, timeout=60.0)
+        if not isinstance(result, dict):
+            return result
+        markers = result.get("markers")
+        if not isinstance(markers, list):
+            markers = []
+        if compare_saved_file:
+            result["saved_file"] = saved_no_erc_report(
+                str(result.get("document") or doc_path), markers,
+                truncated=bool(result.get("truncated")))
+        if cross_check_erc:
+            erc = await bridge.send_command_async(
+                "generic.get_erc_violations", {"limit": "0"}, timeout=60.0)
+            result["erc_cross_check"] = no_erc_erc_cross_check(markers, erc)
         return result
+
+    @mcp.tool()
+    async def sch_reload_document(
+        file_path: str = "",
+        save: bool = True,
+        recompile: bool = True,
+    ) -> dict[str, Any]:
+        """Save, close and reopen one schematic sheet so Altium re-reads it.
+
+        The compiled model is not always rebuilt from the sheet on a
+        recompile. Measured on this bridge: deleted net labels kept naming
+        nets after proj_force_recompile until the sheet was reopened, and
+        after a sub-part change every multi-part instance compiled as part
+        A until the same. No-ERC markers saved on the right pins have also
+        failed to suppress in the ERC read. This is the cure in one call:
+        save (verified), close by path, reopen, drop the compile cache and
+        recompile the owning project.
+
+        Refuses, leaving the sheet open, when the save cannot be shown to
+        have happened, or when save=False and the sheet reads modified. A
+        saved sheet is rewritten with fresh parameter UniqueIDs, which
+        churns version control; save=False skips the write for a sheet
+        you just saved (the modified flag is a floor, so only use it then).
+
+        Args:
+            file_path: the open .SchDoc; default the focused document.
+            save: write the sheet first (default True).
+            recompile: recompile the project holding it (default True).
+
+        Returns:
+            {"file_path", "project", "was_modified", "saved", "closed",
+             "reopened", "free_document_after", "recompiled",
+             "objects_before", "objects_after"}. ``free_document_after``
+            true means the sheet came back outside its project; the
+            reply's next_step says what to do. Object counts (labels,
+            wires, No-ERC, ...) before and after show anything the
+            in-memory copy held that the file does not.
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {
+            "save": "true" if save else "false",
+            "recompile": "true" if recompile else "false",
+        }
+        if str(file_path).strip():
+            params["file_path"] = str(file_path).strip()
+        return await bridge.send_command_async(
+            "generic.reload_sch_document", params, timeout=120.0)
 
     @mcp.tool()
     async def sch_place_junction(

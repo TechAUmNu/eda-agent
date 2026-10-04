@@ -122,6 +122,10 @@ is `Designator.Text` (e.g. `'U?'`). **`NameOn : Boolean`** toggles its visibilit
 **`Comment : ISch_Parameter`**: the comment sub-object (`Comment.Text`).
 **`CommentOn : Boolean`** toggles its visibility.
 **`ComponentDescription : String`**: the human-readable description.
+**`ComponentKind : TComponentKind`**: the Component Type (Standard,
+Mechanical, Graphical, Net Tie (In BOM), Net Tie, Standard (No BOM),
+Jumper). Written by name only for the two net-tie kinds (5.15); the
+bridge writes the others by ordinal and reads the value back.
 
 ### Multi-part scaffold
 **`CurrentPartID : Integer`**: the active part of a multi-part symbol; **set to 1
@@ -315,6 +319,12 @@ FN := Sym.GetState_SchSheetFileName;   FN.SetState_Text(FileNameStr);   { ISch_S
 NM := Sym.GetState_SchSheetName;       NM.SetState_Text(NameStr);       { ISch_SheetName }
 ```
 
+### No-ERC marker (`eNoERC`)
+Created with `SchServer.SchObjectFactory(eNoERC, eCreate_Default)`; the
+bridge sets only `Location`, at a pin's ELECTRICAL end. A factory marker
+saves as IsActive=T, SuppressAll=T, Symbol=Thin Cross (read from saved
+files); the bridge reads and writes none of those properties.
+
 ### Selection
 SCH objects carry **`Selection : Boolean`**; the PCB equivalent is **`Selected : Boolean`**.
 `ISch_Document` has no document-level clear: deselect the active sheet with
@@ -341,3 +351,9 @@ backs the model).
 **`UseComponentLibrary : Boolean`**: whether the model is resolved from the
 component's own library.
 **`LibraryIdentifier : String`**: the library the model is resolved from.
+**`IsCurrent : Boolean`**: whether this model is the current one of its
+type. Per implementation and NOT exclusive: setting one True leaves the
+others as they were (measured). Clear the others explicitly.
+**`AddSchImplementation : ISch_Implementation`** / **`RemoveSchImplementation(Impl)`**
+(on ISch_Component): the model factory and remover. Never SchObjectFactory
++ AddSchObject for a model (see Lib_LinkFootprint).

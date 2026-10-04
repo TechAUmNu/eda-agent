@@ -1,4 +1,4 @@
-# Release verification: 2026.10.04.3
+# Release verification: 2026.10.04.4
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -47,6 +47,10 @@ works elsewhere cannot be an undeclared identifier:
 | 24, fill in a footprint | `X1Location` | yes, `PCB_PlaceFill` | low |
 | 24, choosing the footprint | `CurrentComponent` | yes, `Lib_SetDesignator` | low |
 | 24, delete from the library board | `RemovePCBObject` | yes, `PCBGeneric.pas` on boards | medium, first use on a library board |
+| 25, component kind | `ComponentKind` | yes, `Gen_SetNetTie` | low for the net-tie kinds, medium for the five written by ordinal |
+| 26, pin properties | `Designator` | yes, `Lib_AddPins` | low |
+| 27, current model | `IsCurrent` | yes, `Lib_NormalizeImplementations` | low |
+| 28, No-ERC on a pin | `Location` | yes, `Gen_PlaceNetLabel` | low |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -227,7 +231,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.04.3`, `version_match` =
+Expect `altium_script_version` = `2026.10.04.4`, `version_match` =
 `true`, and `mcp_server_version` = `0.6.1`.
 
 Those are two different versions and they fail differently.
@@ -1434,6 +1438,75 @@ Sub-mil: `lib_add_footprint_tracks` with `x1: 12.5`, and
 `lib_add_footprint_arc` with `radius: 12.5`, must read back 12.5 through
 `obj_query` or the saved file, not 12 or 13, and not the 100 mil
 default the old integer parse returned for any decimal.
+
+---
+
+## 25. Component kind on a library symbol
+
+On scratch documents only. New scratch SchLib with one symbol `KIND_TEST`.
+`lib_set_component_kind KIND_TEST net_tie_no_bom` -> `kind_after:
+net_tie_no_bom`. Then `graphical`, `jumper`, `standard_no_bom`,
+`standard`. After each: Properties panel Component Type must show the same
+words. ENUM_LAYOUT_MISMATCH on the first numbered kind means the anchors
+moved (record `details`). `app_save_all`, then
+`lib_get_component_details` reports `component_kind`. Mismatch between
+panel and reply for 5 or 6 = the ordinal assumption is wrong: remove those
+two from `ComponentKindOrdinal`.
+
+---
+
+## 26. Pin properties on a library symbol
+
+On scratch documents only. On `KIND_TEST` with pins 1 and 2:
+
+    lib_set_pin_properties  component_name KIND_TEST
+        pins [{designator "1", name "EN", electrical_type "input", length 300},
+              {designator "2", new_designator "1"}]
+
+-> op 1 applied+verified, op 2 `NEW_DESIGNATOR_EXISTS`, pin 2 unchanged.
+`electrical_type: "inptu"` -> `BAD_ELECTRICAL_TYPE`, pin unchanged.
+Multi-part symbol: edit a part-2 pin with no scope -> applied; the editor's
+displayed part does not move. Then `obj_modify` (lib scope, ePin, filter
+`Designator=1`, set `Designator=9`) -> matched 1 AND `lib_get_pin_list`
+shows 9 (the pin `Designator` write in `SetSchProperty`, which used to
+report handled and change nothing).
+
+---
+
+## 27. Current model
+
+On scratch documents only. Symbol with footprint A:
+`lib_link_footprint replace=false footprint=B` -> `is_current: false,
+current_footprint_count: 1`; `lib_set_current_model model_name=B` ->
+`current_count: 1`, models list shows only B current; `lib_link_footprint
+replace=false footprint=C set_current=true` -> `demoted: 1`. The Properties
+panel Footprint list must agree each time.
+
+---
+
+## 28. No-ERC on a pin
+
+On scratch documents only. Scratch sheet with an op-amp, input pin
+unconnected: `run_erc` / `proj_get_erc_violations(limit=0)` lists the
+floating input. `sch_place_no_erc designator=U1 pin=3` -> `on_pin_end`
+names U1/3. `sch_get_no_erc_markers(cross_check_erc=True)` immediately (no
+reload): record whether `still_reported` names U1/3. Then step 29, then
+recompile and re-read. Then the Messages panel. Record all three: this is
+the measurement that resolves the open No-ERC question.
+
+---
+
+## 29. Reload a sheet
+
+On the step-28 sheet: `sch_reload_document` -> `saved, closed, reopened:
+true`, `free_document_after: false`, `recompiled: true`, `objects_before ==
+objects_after`. Then delete a net label with `obj_delete`,
+`sch_reload_document`, and confirm `objects_after.net_labels` dropped by one
+and `proj_get_nets` no longer names the label's net. Make an edit, then
+`sch_reload_document save=false` -> `MODIFIED`, sheet still open.
+
+Live session order for steps 25 to 29: 25 first (one ordinal-risk write on
+a scratch library), then 27, 26, 29, 28.
 
 ---
 

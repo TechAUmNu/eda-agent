@@ -474,6 +474,89 @@ Begin
     End;
 End;
 
+{..............................................................................}
+{ Component Type (ISch_Component.ComponentKind) by name.                        }
+{                                                                              }
+{ ONLY TWO MEMBERS OF TComponentKind ARE PROVEN BY NAME here:                  }
+{ eComponentKind_NetTie_BOM and eComponentKind_NetTie_NoBOM, written by        }
+{ Gen_SetNetTie. Spelling the other five as identifiers would put names in     }
+{ the script that nothing in this codebase has executed, and an undeclared     }
+{ identifier faults where Try/Except cannot reach and stops the polling loop.  }
+{ So they are reached by ORDINAL, the way Pin.Electrical is written from       }
+{ ElectricalOrdinal in SetSchProperty.                                         }
+{                                                                              }
+{ The order is Altium's declaration order: Standard, Mechanical, Graphical,    }
+{ NetTie_BOM, NetTie_NoBOM, Standard_NoBOM, Jumper. Two pieces of evidence     }
+{ back it rather than memory. Lib_SetComponentKind reads the two named         }
+{ constants at run time and refuses the numbered kinds unless they are 3 and   }
+{ 4. And a saved vendor sheet stores its title block, a Graphical part, as     }
+{ ComponentKind=2. Standard_NoBOM (5) and Jumper (6) rest on the order alone   }
+{ until a live read-back confirms them.                                        }
+{..............................................................................}
+
+Function ComponentKindName(Ordinal : Integer) : String;
+Begin
+    If Ordinal = 0 Then Result := 'standard'
+    Else If Ordinal = 1 Then Result := 'mechanical'
+    Else If Ordinal = 2 Then Result := 'graphical'
+    Else If Ordinal = 3 Then Result := 'net_tie_bom'
+    Else If Ordinal = 4 Then Result := 'net_tie_no_bom'
+    Else If Ordinal = 5 Then Result := 'standard_no_bom'
+    Else If Ordinal = 6 Then Result := 'jumper'
+    Else If Ordinal < 0 Then Result := 'unreadable'
+    Else Result := 'ordinal_' + IntToStr(Ordinal);
+End;
+
+{ The word Altium's Properties panel shows, folded: "Net Tie (In BOM)" and    }
+{ "Standard (No BOM)" arrive as net_tie_in_bom and standard_no_bom. A bare    }
+{ ordinal 0..6 is accepted too. -1 for anything else.                         }
+Function ComponentKindOrdinal(KindText : String) : Integer;
+Var
+    N : String;
+Begin
+    N := LowerCase(Trim(KindText));
+    N := StringReplace(N, ' ', '_', MkSet(rfReplaceAll));
+    N := StringReplace(N, '-', '_', MkSet(rfReplaceAll));
+    N := StringReplace(N, '(', '', MkSet(rfReplaceAll));
+    N := StringReplace(N, ')', '', MkSet(rfReplaceAll));
+    Result := -1;
+    If N = 'standard' Then Result := 0
+    Else If N = 'mechanical' Then Result := 1
+    Else If N = 'graphical' Then Result := 2
+    Else If (N = 'net_tie_bom') Or (N = 'net_tie_in_bom') Then Result := 3
+    Else If (N = 'net_tie_no_bom') Or (N = 'net_tie') Then Result := 4
+    Else If N = 'standard_no_bom' Then Result := 5
+    Else If N = 'jumper' Then Result := 6
+    Else If IsIntStr(N) Then
+    Begin
+        Result := StrToIntDef(N, -1);
+        If (Result < 0) Or (Result > 6) Then Result := -1;
+    End;
+End;
+
+{..............................................................................}
+{ RefetchSchLib - the library at LibPath, taken again.                         }
+{                                                                              }
+{ LookupLibComponent falls back to RefreshSchLibFromDisk on an index miss,     }
+{ which saves, CLOSES and reopens the library. Any ISch_Lib the caller took    }
+{ before that lookup then points into a closed document, and the edit's       }
+{ PreProcess / PostProcess / MarkLibDirty would act on it. Every new edit      }
+{ handler re-takes the library by path after the lookup. Nil when the          }
+{ document at LibPath is not a SchLib any more.                                }
+{..............................................................................}
+
+Function RefetchSchLib(LibPath : String) : ISch_Lib;
+Begin
+    Result := Nil;
+    If LibPath = '' Then Exit;
+    Try Result := SchServer.GetSchDocumentByPath(LibPath); Except Result := Nil; End;
+    If Result = Nil Then
+        Try Result := SchServer.GetCurrentSchDocument; Except Result := Nil; End;
+    If Result <> Nil Then
+        If Result.ObjectId <> eSchLib Then Result := Nil;
+    If Not SchLibIsAtPath(Result, LibPath) Then Result := Nil;
+End;
+
 Function Lib_CreateSymbol(Params : String; RequestId : String) : String;
 Var
     Name, DesignatorPrefix, Description : String;
@@ -4777,18 +4860,28 @@ End;
 
 Function Lib_LinkFootprint(Params : String; RequestId : String) : String;
 Var
-    FootprintName, ComponentName, ReplaceStr, MT : String;
-    Replace : Boolean;
+    FootprintName, ComponentName, ReplaceStr, SetCurStr, MT, RespJson : String;
+    Replace, MakeCurrent, OtherCurrent, IsCur, NewIsCurrent : Boolean;
     SchLib : ISch_Lib;
     Component : ISch_Component;
     Impl, Impl2, Found : ISch_Implementation;
     ImplIter : ISch_Iterator;
-    Guard : Integer;
+    Guard, CurCount, Demoted : Integer;
 Begin
     FootprintName := ExtractJsonValue(Params, 'footprint_name');
     ComponentName := ExtractJsonValue(Params, 'component_name');
     ReplaceStr := ExtractJsonValue(Params, 'replace');
     Replace := (ReplaceStr = '') Or (ReplaceStr = 'true') Or (ReplaceStr = 'True') Or (ReplaceStr = '1');
+    { '' or 'auto': current only when no other footprint model is. 'true':
+      take over, demoting the others. 'false': add it non-current. }
+    SetCurStr := LowerCase(Trim(ExtractJsonValue(Params, 'set_current')));
+    If SetCurStr = '' Then SetCurStr := 'auto';
+    If (SetCurStr <> 'auto') And (SetCurStr <> 'true') And (SetCurStr <> 'false') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM',
+            'set_current must be true, false or auto, got: ' + SetCurStr);
+        Exit;
+    End;
 
     SchLib := SchServer.GetCurrentSchDocument;
     If (SchLib = Nil) Or (SchLib.ObjectId <> eSchLib) Then
@@ -4848,13 +4941,75 @@ Begin
         End;
     End;
 
+    { WHICH FOOTPRINT IS CURRENT IS A CHOICE, NOT A SIDE EFFECT.
+      MEASURED (owner, 2026-10-04): replace=false added a second footprint
+      model and left BOTH flagged current, because this handler set the
+      new one current and Altium does not clear the others by itself. So
+      first find out whether another footprint model already is. }
+    OtherCurrent := False;
+    ImplIter := Component.SchIterator_Create;
+    Try
+        ImplIter.AddFilter_ObjectSet(MkSet(eImplementation));
+        Impl2 := ImplIter.FirstSchObject;
+        While Impl2 <> Nil Do
+        Begin
+            MT := '';
+            Try MT := Impl2.ModelType; Except End;
+            If UpperCase(MT) = 'PCBLIB' Then
+            Begin
+                IsCur := False;
+                Try IsCur := Impl2.IsCurrent; Except End;
+                If IsCur Then OtherCurrent := True;
+            End;
+            Impl2 := ImplIter.NextSchObject;
+        End;
+    Finally
+        Component.SchIterator_Destroy(ImplIter);
+    End;
+
+    If SetCurStr = 'true' Then MakeCurrent := True
+    Else If SetCurStr = 'false' Then MakeCurrent := False
+    Else MakeCurrent := Not OtherCurrent;
+
+    { Taking over: demote the others BEFORE the add, so nothing below has
+      to tell the new implementation apart from the old ones. }
+    Demoted := 0;
+    If MakeCurrent And OtherCurrent Then
+    Begin
+        ImplIter := Component.SchIterator_Create;
+        Try
+            ImplIter.AddFilter_ObjectSet(MkSet(eImplementation));
+            Impl2 := ImplIter.FirstSchObject;
+            While Impl2 <> Nil Do
+            Begin
+                MT := '';
+                Try MT := Impl2.ModelType; Except End;
+                If UpperCase(MT) = 'PCBLIB' Then
+                Begin
+                    IsCur := False;
+                    Try IsCur := Impl2.IsCurrent; Except End;
+                    If IsCur Then
+                    Begin
+                        SchBeginModify(Impl2);
+                        Try Impl2.IsCurrent := False; Except End;
+                        SchEndModify(Impl2);
+                        Inc(Demoted);
+                    End;
+                End;
+                Impl2 := ImplIter.NextSchObject;
+            End;
+        Finally
+            Component.SchIterator_Destroy(ImplIter);
+        End;
+    End;
+
     Impl := Component.AddSchImplementation;
     If Impl <> Nil Then
     Begin
         Try Impl.ClearAllDatafileLinks; Except End;
         Impl.ModelName := FootprintName;
         Impl.ModelType := cDocKind_PcbLib;
-        Try Impl.IsCurrent := True; Except End;
+        Try Impl.IsCurrent := MakeCurrent; Except End;
         { A footprint implementation MUST carry a datafile link (entity name =   }
         { the footprint) or the compiler reports "Missing Component Models".     }
         { Bind by name: entity = footprint, EMPTY location. Never pass a full    }
@@ -4864,12 +5019,56 @@ Begin
     End;
 
     SchServer.ProcessControl.PostProcess(SchLib, 'Link footprint');
+
+    If Impl = Nil Then
+    Begin
+        MarkLibDirty(SchLib);
+        Result := BuildErrorResponse(RequestId, 'LINK_FAILED', 'Failed to link footprint');
+        Exit;
+    End;
+
+    { Read back: what is current now, as Altium holds it. }
+    NewIsCurrent := False;
+    Try NewIsCurrent := Impl.IsCurrent; Except End;
+    CurCount := 0;
+    ImplIter := Component.SchIterator_Create;
+    Try
+        ImplIter.AddFilter_ObjectSet(MkSet(eImplementation));
+        Impl2 := ImplIter.FirstSchObject;
+        While Impl2 <> Nil Do
+        Begin
+            MT := '';
+            Try MT := Impl2.ModelType; Except End;
+            If UpperCase(MT) = 'PCBLIB' Then
+            Begin
+                IsCur := False;
+                Try IsCur := Impl2.IsCurrent; Except End;
+                If IsCur Then Inc(CurCount);
+            End;
+            Impl2 := ImplIter.NextSchObject;
+        End;
+    Finally
+        Component.SchIterator_Destroy(ImplIter);
+    End;
     MarkLibDirty(SchLib);
 
-    If Impl <> Nil Then
-        Result := BuildSuccessResponse(RequestId, '{"success":true,"footprint":"' + EscapeJsonString(FootprintName) + '","replaced":' + BoolToJsonStr(Replace) + '}')
-    Else
-        Result := BuildErrorResponse(RequestId, 'LINK_FAILED', 'Failed to link footprint');
+    RespJson := '{"success":true,"footprint":"' + EscapeJsonString(FootprintName) + '"'
+        + ',"replaced":' + BoolToJsonStr(Replace)
+        + ',"set_current":"' + SetCurStr + '"'
+        + ',"is_current":' + BoolToJsonStr(NewIsCurrent)
+        + ',"demoted":' + IntToStr(Demoted)
+        + ',"current_footprint_count":' + IntToStr(CurCount)
+        + ',"models":' + BuildImplementationsJson(Component) + '}';
+    If (NewIsCurrent <> MakeCurrent) Or (CurCount > 1) Then
+    Begin
+        Result := BuildErrorResponseDetailed(RequestId, 'CURRENT_NOT_APPLIED',
+            'The footprint was linked, but the current-model flags did not '
+            + 'land as asked: is_current reads ' + BoolToJsonStr(NewIsCurrent)
+            + ' and ' + IntToStr(CurCount) + ' footprint models are current. '
+            + 'lib_set_current_model chooses one explicitly.', RespJson);
+        Exit;
+    End;
+    Result := BuildSuccessResponse(RequestId, RespJson);
 End;
 
 {..............................................................................}
@@ -6624,6 +6823,7 @@ End;
 
 Function Lib_GetComponentDetails(Params : String; RequestId : String) : String;
 Var
+    KindOrd : Integer;
     ComponentName, LibPath, FocusedPath : String;
     ResErrCode, ResErrMsg : String;
     LibReader : ILibCompInfoReader;
@@ -6747,6 +6947,11 @@ Begin
     { Component already resolved above (by name or index). }
     If Description = '' Then
         Try Description := Component.ComponentDescription; Except End;
+    { Component Type, read with the same member Gen_SetNetTie writes. The
+      raw ordinal rides beside the name so a reader can check the name
+      table against what Altium's Properties panel shows. }
+    KindOrd := -1;
+    Try KindOrd := Component.ComponentKind; Except End;
 
     { Designator + Comment full-style records. The sub-objects ARE        }
     { ISch_Label-derived so they expose Text + FontId + Color + IsHidden  }
@@ -6845,6 +7050,8 @@ Begin
     Data := Data + ',"designator":' + DesignatorJson;
     Data := Data + ',"comment":' + CommentJson;
     Data := Data + ',"description":"' + EscapeJsonString(Description) + '"';
+    Data := Data + ',"component_kind":"' + ComponentKindName(KindOrd) + '"';
+    Data := Data + ',"component_kind_ordinal":' + IntToStr(KindOrd);
     Data := Data + ',"alias_name":"' + EscapeJsonString(AliasName) + '"';
     Data := Data + ',"part_count":' + IntToStr(PartCount);
     Data := Data + ',"pin_count":' + IntToStr(PinCount);
@@ -7486,6 +7693,117 @@ Begin
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"component":"' + EscapeJsonString(CompName) +
         '","description":"' + EscapeJsonString(Description) + '"}');
+End;
+
+{..............................................................................}
+{ Lib_SetComponentKind - set a LIBRARY symbol's Component Type.                }
+{                                                                              }
+{ The placed-part twin is Gen_SetNetTie, which writes                          }
+{ ISch_Component.ComponentKind on a component found on the active sheet. A     }
+{ library symbol is the same interface reached through the library, so the    }
+{ write is the same and only the lookup differs. Before this the only route   }
+{ to a net-tie symbol was to place it and convert each instance, which left   }
+{ the library saying Standard and every new placement wrong.                  }
+{                                                                              }
+{ Read back after the write and refused when the value did not stick, so a     }
+{ success is the property as Altium holds it, not the request echoed.        }
+{                                                                              }
+{ Params: component_name (required), kind (required: standard, mechanical,    }
+{         graphical, net_tie_bom, net_tie_no_bom, standard_no_bom, jumper, or  }
+{         an ordinal 0..6), library_path (optional).                           }
+{..............................................................................}
+Function Lib_SetComponentKind(Params : String; RequestId : String) : String;
+Var
+    LibPath, CompName, KindStr, Details : String;
+    SchLib, Fresh : ISch_Lib;
+    Component : ISch_Component;
+    Want, Before, After, AnchorBom, AnchorNoBom : Integer;
+Begin
+    LibPath := ExtractJsonValue(Params, 'library_path');
+    CompName := ExtractJsonValue(Params, 'component_name');
+    KindStr := ExtractJsonValue(Params, 'kind');
+    If (CompName = '') Or (KindStr = '') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS',
+            'component_name and kind are required');
+        Exit;
+    End;
+    Want := ComponentKindOrdinal(KindStr);
+    If Want < 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_KIND',
+            'Unknown component kind "' + KindStr + '". Use standard, '
+            + 'mechanical, graphical, net_tie_bom, net_tie_no_bom, '
+            + 'standard_no_bom or jumper.');
+        Exit;
+    End;
+
+    { The two kinds written by NAME anchor the five written by number. If
+      this build numbers the enum differently, the anchors move and the
+      numbered kinds are refused rather than written as something else. }
+    AnchorBom := eComponentKind_NetTie_BOM;
+    AnchorNoBom := eComponentKind_NetTie_NoBOM;
+    If ((AnchorBom <> 3) Or (AnchorNoBom <> 4)) And (Want <> 3) And (Want <> 4) Then
+    Begin
+        Result := BuildErrorResponseDetailed(RequestId, 'ENUM_LAYOUT_MISMATCH',
+            'This Altium build numbers the net-tie kinds differently from the '
+            + 'order the other kinds are written in, so '
+            + ComponentKindName(Want) + ' was not written. The two net-tie '
+            + 'kinds still work.',
+            '{"net_tie_bom":' + IntToStr(AnchorBom)
+            + ',"net_tie_no_bom":' + IntToStr(AnchorNoBom) + '}');
+        Exit;
+    End;
+
+    SchLib := FocusSchLib(LibPath);
+    If SchLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB',
+            'No schematic library is active and library_path did not resolve');
+        Exit;
+    End;
+    Component := LookupLibComponent(SchLib, CompName);
+    If Component = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'COMPONENT_NOT_FOUND',
+            'Component not found in ' + LibPath + ': ' + CompName);
+        Exit;
+    End;
+    Fresh := RefetchSchLib(LibPath);
+    If Fresh <> Nil Then SchLib := Fresh;
+
+    Before := -1;
+    Try Before := Component.ComponentKind; Except End;
+
+    SchServer.ProcessControl.PreProcess(SchLib, '');
+    Try
+        SchBeginModify(Component);
+        If Want = 3 Then Component.ComponentKind := eComponentKind_NetTie_BOM
+        Else If Want = 4 Then Component.ComponentKind := eComponentKind_NetTie_NoBOM
+        Else Component.ComponentKind := Want;
+        SchEndModify(Component);
+    Finally
+        SchServer.ProcessControl.PostProcess(SchLib, 'Set component kind');
+    End;
+
+    After := -1;
+    Try After := Component.ComponentKind; Except End;
+    MarkLibDirty(SchLib);
+
+    Details := '{"library_path":"' + EscapeJsonString(LibPath) + '"'
+        + ',"component":"' + EscapeJsonString(CompName) + '"'
+        + ',"kind_requested":"' + ComponentKindName(Want) + '"'
+        + ',"kind_before":"' + ComponentKindName(Before) + '"'
+        + ',"kind_after":"' + ComponentKindName(After) + '"'
+        + ',"ordinal_after":' + IntToStr(After) + '}';
+    If After <> Want Then
+    Begin
+        Result := BuildErrorResponseDetailed(RequestId, 'KIND_NOT_APPLIED',
+            'ComponentKind reads back as ' + ComponentKindName(After)
+            + ' after writing ' + ComponentKindName(Want) + '.', Details);
+        Exit;
+    End;
+    Result := BuildSuccessResponse(RequestId, Details);
 End;
 
 {..............................................................................}
@@ -9621,6 +9939,311 @@ Begin
 End;
 
 {..............................................................................}
+{ BatchFieldPresent - True when Op carries Key at all, even with an empty      }
+{ value. GetBatchField returns '' for both "name=" and "no name field", and an }
+{ EDIT has to tell them apart: absent leaves the property alone, empty clears  }
+{ it. Same parse as GetBatchField (fields on ';', key on the first '=').       }
+{..............................................................................}
+Function BatchFieldPresent(Op : String; Key : String) : Boolean;
+Var
+    Remaining, Field, FKey : String;
+    SepPos, EqPos : Integer;
+Begin
+    Result := False;
+    Remaining := Op;
+    While Length(Remaining) > 0 Do
+    Begin
+        SepPos := Pos(';', Remaining);
+        If SepPos = 0 Then
+        Begin
+            Field := Remaining;
+            Remaining := '';
+        End
+        Else
+        Begin
+            Field := Copy(Remaining, 1, SepPos - 1);
+            Remaining := Copy(Remaining, SepPos + 1, Length(Remaining));
+        End;
+        EqPos := Pos('=', Field);
+        If EqPos > 0 Then
+        Begin
+            FKey := Copy(Field, 1, EqPos - 1);
+            If UpperCase(FKey) = UpperCase(Key) Then
+            Begin
+                Result := True;
+                Exit;
+            End;
+        End;
+    End;
+End;
+
+{ True when S is a word the shared electrical chain understands.               }
+{ StrToPinElectrical falls back to passive for ANY unknown word, which is the  }
+{ right default for authoring and the wrong one for an edit: a typo would turn }
+{ a pin passive and report success. Asked of the chain itself rather than of a }
+{ second word list, so the vocabulary is still stated once, in Utils.pas.     }
+Function PinElectricalWordKnown(S : String) : Boolean;
+Var
+    LS : String;
+Begin
+    LS := LowerCase(Trim(S));
+    LS := StringReplace(LS, '_', '', MkSet(rfReplaceAll));
+    Result := (StrToPinElectrical(S) <> eElectricPassive)
+        Or (LS = 'passive') Or (LS = 'eelectricpassive');
+End;
+
+{ One library pin as read back after an edit. Same vocabulary as             }
+{ lib_get_pin_list, so a read can be fed straight into the next write.        }
+Function LibPinStateJson(Pin : ISch_Pin) : String;
+Var
+    ElecStr : String;
+    ShowN, ShowD, Hid : Boolean;
+    Owner, Mode, LenMils : Integer;
+Begin
+    ElecStr := '';
+    ShowN := False;
+    ShowD := False;
+    Hid := False;
+    Owner := -1;
+    Mode := -1;
+    LenMils := 0;
+    Try ElecStr := PinElectricalToStr(Pin.Electrical); Except End;
+    If ElecStr = 'io' Then ElecStr := 'bidirectional';
+    Try ShowN := Pin.ShowName; Except End;
+    Try ShowD := Pin.ShowDesignator; Except End;
+    Try Hid := Pin.IsHidden; Except End;
+    Try Owner := Pin.OwnerPartId; Except End;
+    Try Mode := Pin.OwnerPartDisplayMode; Except End;
+    Try LenMils := CoordToMils(Pin.PinLength); Except End;
+    Result := '{"designator":"' + EscapeJsonString(Pin.Designator) + '"'
+        + ',"name":"' + EscapeJsonString(Pin.Name) + '"'
+        + ',"electrical_type":"' + ElecStr + '"'
+        + ',"show_name":' + BoolToJsonStr(ShowN)
+        + ',"show_designator":' + BoolToJsonStr(ShowD)
+        + ',"hidden":' + BoolToJsonStr(Hid)
+        + ',"length":' + IntToStr(LenMils)
+        + ',"owner_part_id":' + IntToStr(Owner)
+        + ',"display_mode":' + IntToStr(Mode) + '}';
+End;
+
+{..............................................................................}
+{ Lib_SetPinProperties - edit existing pins of a LIBRARY symbol in place.      }
+{                                                                              }
+{ The only route to a pin-name fix used to be deleting and recreating the      }
+{ whole symbol, which loses its parameters, models and graphics. Library-scope }
+{ obj_modify matched pins but could not renumber one: its Designator write     }
+{ went to the component-text helper, which ignores pins.                       }
+{                                                                              }
+{ Pins are reached through the COMPONENT's own iterator, which yields every    }
+{ part's pins at once (the same walk lib_get_pin_list reads), so a pin on      }
+{ part 3 needs no @3 scope. owner_part_id narrows an edit to one part.        }
+{                                                                              }
+{ Each op names the pin by its CURRENT designator and lists only the fields   }
+{ to change. Two passes per op: the first counts matches and refuses a        }
+{ renumber that would collide with another pin or that is ambiguous (two      }
+{ pins with this number on the same part and display mode); the second        }
+{ writes and reads every changed pin back. Ops apply in order, so op N sees   }
+{ the renumbers made by ops before it.                                        }
+{                                                                              }
+{ Params: component_name (required), library_path (optional), pins (required, }
+{   '~~'-separated ops, ';'-separated key=value fields): designator           }
+{   (required), owner_part_id, name, new_designator, electrical_type,        }
+{   show_name, show_designator, hidden, length (mils).                         }
+{..............................................................................}
+Function Lib_SetPinProperties(Params : String; RequestId : String) : String;
+Var
+    LibPath, CompName, PinsStr, Remaining, Op : String;
+    Desig, NewDesig, NewName, ElecStr, ShowNameStr, ShowDesigStr : String;
+    HiddenStr, LenStr, OwnerStr, Reason, SeenKeys, Key : String;
+    PinsJson, OpsJson, Details : String;
+    HasName, Ambiguous, FirstPin, Verified : Boolean;
+    OwnerFilter, Matched, Clashes, OpCount, OkOps, FailedOps : Integer;
+    PinsChanged, PinOwner, PinMode, WantLen : Integer;
+    SchLib, Fresh : ISch_Lib;
+    Component : ISch_Component;
+    Iter : ISch_Iterator;
+    Pin : ISch_Pin;
+Begin
+    LibPath := ExtractJsonValue(Params, 'library_path');
+    CompName := ExtractJsonValue(Params, 'component_name');
+    PinsStr := ExtractJsonValue(Params, 'pins');
+    If (CompName = '') Or (PinsStr = '') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS',
+            'component_name and pins are required');
+        Exit;
+    End;
+
+    SchLib := FocusSchLib(LibPath);
+    If SchLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB',
+            'No schematic library is active and library_path did not resolve');
+        Exit;
+    End;
+    Component := LookupLibComponent(SchLib, CompName);
+    If Component = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'COMPONENT_NOT_FOUND',
+            'Component not found in ' + LibPath + ': ' + CompName);
+        Exit;
+    End;
+    Fresh := RefetchSchLib(LibPath);
+    If Fresh <> Nil Then SchLib := Fresh;
+
+    OpsJson := '';
+    OpCount := 0;
+    OkOps := 0;
+    FailedOps := 0;
+    PinsChanged := 0;
+    Remaining := PinsStr;
+
+    SchServer.ProcessControl.PreProcess(SchLib, '');
+    Try
+        While True Do
+        Begin
+            Op := NextBatchOp(Remaining);
+            If Op = '' Then Break;
+            Inc(OpCount);
+
+            Desig := GetBatchField(Op, 'designator');
+            NewDesig := GetBatchField(Op, 'new_designator');
+            HasName := BatchFieldPresent(Op, 'name');
+            NewName := GetBatchField(Op, 'name');
+            ElecStr := GetBatchField(Op, 'electrical_type');
+            ShowNameStr := LowerCase(GetBatchField(Op, 'show_name'));
+            ShowDesigStr := LowerCase(GetBatchField(Op, 'show_designator'));
+            HiddenStr := LowerCase(GetBatchField(Op, 'hidden'));
+            LenStr := GetBatchField(Op, 'length');
+            OwnerStr := GetBatchField(Op, 'owner_part_id');
+
+            OwnerFilter := -1;
+            If OwnerStr <> '' Then OwnerFilter := StrToIntDef(OwnerStr, -1);
+            WantLen := StrToIntDef(LenStr, 0);
+
+            Reason := '';
+            If Desig = '' Then Reason := 'MISSING_DESIGNATOR'
+            Else If (OwnerStr <> '') And (OwnerFilter < 0) Then Reason := 'BAD_OWNER_PART_ID'
+            Else If (ElecStr <> '') And (Not PinElectricalWordKnown(ElecStr)) Then Reason := 'BAD_ELECTRICAL_TYPE'
+            Else If (LenStr <> '') And ((Not IsIntStr(LenStr)) Or (WantLen <= 0)) Then Reason := 'BAD_LENGTH';
+
+            { Pass 1: count matches, find renumber collisions and ambiguity. }
+            Matched := 0;
+            Clashes := 0;
+            Ambiguous := False;
+            SeenKeys := '|';
+            If Reason = '' Then
+            Begin
+                Iter := Component.SchIterator_Create;
+                Try
+                    Iter.AddFilter_ObjectSet(MkSet(ePin));
+                    Pin := Iter.FirstSchObject;
+                    While Pin <> Nil Do
+                    Begin
+                        PinOwner := -1;
+                        PinMode := -1;
+                        Try PinOwner := Pin.OwnerPartId; Except End;
+                        Try PinMode := Pin.OwnerPartDisplayMode; Except End;
+                        If Pin.Designator = Desig Then
+                        Begin
+                            If (OwnerFilter < 0) Or (PinOwner = OwnerFilter) Then
+                            Begin
+                                Inc(Matched);
+                                Key := IntToStr(PinOwner) + ':' + IntToStr(PinMode) + '|';
+                                If Pos('|' + Key, SeenKeys) > 0 Then Ambiguous := True
+                                Else SeenKeys := SeenKeys + Key;
+                            End;
+                        End
+                        Else If (NewDesig <> '') And (Pin.Designator = NewDesig) Then
+                            Inc(Clashes);
+                        Pin := Iter.NextSchObject;
+                    End;
+                Finally
+                    Component.SchIterator_Destroy(Iter);
+                End;
+
+                If Matched = 0 Then Reason := 'PIN_NOT_FOUND'
+                Else If (NewDesig <> '') And (NewDesig <> Desig) And (Clashes > 0) Then Reason := 'NEW_DESIGNATOR_EXISTS'
+                Else If (NewDesig <> '') And (NewDesig <> Desig) And Ambiguous Then Reason := 'AMBIGUOUS_DESIGNATOR';
+            End;
+
+            { Pass 2: write, then read every changed pin back. }
+            PinsJson := '';
+            FirstPin := True;
+            Verified := True;
+            If Reason = '' Then
+            Begin
+                Iter := Component.SchIterator_Create;
+                Try
+                    Iter.AddFilter_ObjectSet(MkSet(ePin));
+                    Pin := Iter.FirstSchObject;
+                    While Pin <> Nil Do
+                    Begin
+                        PinOwner := -1;
+                        Try PinOwner := Pin.OwnerPartId; Except End;
+                        If (Pin.Designator = Desig) And ((OwnerFilter < 0) Or (PinOwner = OwnerFilter)) Then
+                        Begin
+                            Try
+                                SchBeginModify(Pin);
+                                If HasName Then Pin.Name := NewName;
+                                If ElecStr <> '' Then Pin.Electrical := StrToPinElectrical(ElecStr);
+                                If ShowNameStr <> '' Then Pin.ShowName := (ShowNameStr = 'true') Or (ShowNameStr = '1');
+                                If ShowDesigStr <> '' Then Pin.ShowDesignator := (ShowDesigStr = 'true') Or (ShowDesigStr = '1');
+                                If HiddenStr <> '' Then Pin.IsHidden := (HiddenStr = 'true') Or (HiddenStr = '1');
+                                If LenStr <> '' Then Pin.PinLength := MilsToCoord(WantLen);
+                                If (NewDesig <> '') And (NewDesig <> Desig) Then Pin.Designator := NewDesig;
+                                SchEndModify(Pin);
+                            Except
+                                Reason := 'WRITE_RAISED';
+                            End;
+                            Inc(PinsChanged);
+                            If HasName And (Pin.Name <> NewName) Then Verified := False;
+                            If (ElecStr <> '') And (Pin.Electrical <> StrToPinElectrical(ElecStr)) Then Verified := False;
+                            If (LenStr <> '') And (CoordToMils(Pin.PinLength) <> WantLen) Then Verified := False;
+                            If (NewDesig <> '') And (Pin.Designator <> NewDesig) Then Verified := False;
+                            If Not FirstPin Then PinsJson := PinsJson + ',';
+                            FirstPin := False;
+                            PinsJson := PinsJson + LibPinStateJson(Pin);
+                        End;
+                        Pin := Iter.NextSchObject;
+                    End;
+                Finally
+                    Component.SchIterator_Destroy(Iter);
+                End;
+            End;
+
+            If (Reason = '') And Verified Then Inc(OkOps) Else Inc(FailedOps);
+            If OpsJson <> '' Then OpsJson := OpsJson + ',';
+            OpsJson := OpsJson + '{"designator":"' + EscapeJsonString(Desig) + '"'
+                + ',"matched":' + IntToStr(Matched)
+                + ',"applied":' + BoolToJsonStr(Reason = '')
+                + ',"verified":' + BoolToJsonStr((Reason = '') And Verified)
+                + ',"reason":"' + Reason + '"'
+                + ',"pins":[' + PinsJson + ']}';
+        End;
+    Finally
+        SchServer.ProcessControl.PostProcess(SchLib, 'Set pin properties');
+    End;
+
+    If PinsChanged > 0 Then MarkLibDirty(SchLib);
+
+    Details := '{"library_path":"' + EscapeJsonString(LibPath) + '"'
+        + ',"component":"' + EscapeJsonString(CompName) + '"'
+        + ',"total":' + IntToStr(OpCount)
+        + ',"applied":' + IntToStr(OkOps)
+        + ',"failed":' + IntToStr(FailedOps)
+        + ',"pins_changed":' + IntToStr(PinsChanged)
+        + ',"ops":[' + OpsJson + ']}';
+    If PinsChanged = 0 Then
+    Begin
+        Result := BuildErrorResponseDetailed(RequestId, 'NO_PIN_CHANGED',
+            'No pin was changed; each op in details says why.', Details);
+        Exit;
+    End;
+    Result := BuildSuccessResponse(RequestId, Details);
+End;
+
+{..............................................................................}
 { Lib_InstallLibrary / Lib_UninstallLibrary - register or unregister a library }
 { (.IntLib / .SchLib / .PcbLib) with the environment's Available Libraries.    }
 {..............................................................................}
@@ -10386,6 +11009,177 @@ Begin
         + ',"component":"' + EscapeJsonString(CompName) + '"'
         + ',"new_model_name":"' + EscapeJsonString(NewName) + '"}';
     Result := BuildSuccessResponse(RequestId, RespJson);
+End;
+
+{..............................................................................}
+{ Lib_SetCurrentModel - choose which of a symbol's models is the current one.  }
+{                                                                              }
+{ Exactly one model of each type should be current: it is the footprint a     }
+{ placed part uses. The flag is per implementation and Altium does not keep   }
+{ it exclusive, so a symbol can end up with two current footprints (measured, }
+{ lib_link_footprint replace=false before its fix) or none. This sets         }
+{ IsCurrent on the first model of model_type whose ModelName matches and      }
+{ clears it on every other model of that type, then reads all of them back.   }
+{ Models of other types are not touched.                                      }
+{                                                                              }
+{ Params: component_name, model_name (required), model_type (default         }
+{         PCBLIB), library_path (optional).                                   }
+{..............................................................................}
+Function Lib_SetCurrentModel(Params : String; RequestId : String) : String;
+Var
+    LibPath, CompName, ModelName, ModelType, MT, MN, Details : String;
+    SchLib, Fresh : ISch_Lib;
+    Component : ISch_Component;
+    ImplIter : ISch_Iterator;
+    Impl : ISch_Implementation;
+    Idx, MatchIdx, Matches, CurCount, Changed : Integer;
+    IsCur, Want, TargetCur : Boolean;
+Begin
+    LibPath := ExtractJsonValue(Params, 'library_path');
+    CompName := ExtractJsonValue(Params, 'component_name');
+    ModelName := ExtractJsonValue(Params, 'model_name');
+    ModelType := UpperCase(Trim(ExtractJsonValue(Params, 'model_type')));
+    If ModelType = '' Then ModelType := 'PCBLIB';
+    If (CompName = '') Or (ModelName = '') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS',
+            'component_name and model_name are required');
+        Exit;
+    End;
+    SchLib := FocusSchLib(LibPath);
+    If SchLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB',
+            'No schematic library is active and library_path did not resolve');
+        Exit;
+    End;
+    Component := LookupLibComponent(SchLib, CompName);
+    If Component = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'COMPONENT_NOT_FOUND',
+            'Component not found in ' + LibPath + ': ' + CompName);
+        Exit;
+    End;
+    Fresh := RefetchSchLib(LibPath);
+    If Fresh <> Nil Then SchLib := Fresh;
+
+    { Pass 1: the target's position among models of this type. }
+    MatchIdx := -1;
+    Matches := 0;
+    Idx := 0;
+    ImplIter := Component.SchIterator_Create;
+    Try
+        ImplIter.AddFilter_ObjectSet(MkSet(eImplementation));
+        Impl := ImplIter.FirstSchObject;
+        While Impl <> Nil Do
+        Begin
+            MT := '';
+            MN := '';
+            Try MT := Impl.ModelType; Except End;
+            Try MN := Impl.ModelName; Except End;
+            If UpperCase(MT) = ModelType Then
+            Begin
+                If MN = ModelName Then
+                Begin
+                    Inc(Matches);
+                    If MatchIdx < 0 Then MatchIdx := Idx;
+                End;
+                Inc(Idx);
+            End;
+            Impl := ImplIter.NextSchObject;
+        End;
+    Finally
+        Component.SchIterator_Destroy(ImplIter);
+    End;
+    If MatchIdx < 0 Then
+    Begin
+        Result := BuildErrorResponseDetailed(RequestId, 'MODEL_NOT_FOUND',
+            'No ' + ModelType + ' model named "' + ModelName + '" on '
+            + CompName + '. The models it has are listed in details.',
+            '{"models":' + BuildImplementationsJson(Component) + '}');
+        Exit;
+    End;
+
+    { Pass 2: exactly one current of this type. }
+    Changed := 0;
+    Idx := 0;
+    SchServer.ProcessControl.PreProcess(SchLib, '');
+    Try
+        ImplIter := Component.SchIterator_Create;
+        Try
+            ImplIter.AddFilter_ObjectSet(MkSet(eImplementation));
+            Impl := ImplIter.FirstSchObject;
+            While Impl <> Nil Do
+            Begin
+                MT := '';
+                Try MT := Impl.ModelType; Except End;
+                If UpperCase(MT) = ModelType Then
+                Begin
+                    Want := (Idx = MatchIdx);
+                    IsCur := False;
+                    Try IsCur := Impl.IsCurrent; Except End;
+                    If IsCur <> Want Then
+                    Begin
+                        SchBeginModify(Impl);
+                        Try Impl.IsCurrent := Want; Except End;
+                        SchEndModify(Impl);
+                        Inc(Changed);
+                    End;
+                    Inc(Idx);
+                End;
+                Impl := ImplIter.NextSchObject;
+            End;
+        Finally
+            Component.SchIterator_Destroy(ImplIter);
+        End;
+    Finally
+        SchServer.ProcessControl.PostProcess(SchLib, 'Set current model');
+    End;
+
+    { Pass 3: read back. }
+    CurCount := 0;
+    TargetCur := False;
+    Idx := 0;
+    ImplIter := Component.SchIterator_Create;
+    Try
+        ImplIter.AddFilter_ObjectSet(MkSet(eImplementation));
+        Impl := ImplIter.FirstSchObject;
+        While Impl <> Nil Do
+        Begin
+            MT := '';
+            Try MT := Impl.ModelType; Except End;
+            If UpperCase(MT) = ModelType Then
+            Begin
+                IsCur := False;
+                Try IsCur := Impl.IsCurrent; Except End;
+                If IsCur Then Inc(CurCount);
+                If Idx = MatchIdx Then TargetCur := IsCur;
+                Inc(Idx);
+            End;
+            Impl := ImplIter.NextSchObject;
+        End;
+    Finally
+        Component.SchIterator_Destroy(ImplIter);
+    End;
+    MarkLibDirty(SchLib);
+
+    Details := '{"library_path":"' + EscapeJsonString(LibPath) + '"'
+        + ',"component":"' + EscapeJsonString(CompName) + '"'
+        + ',"model_name":"' + EscapeJsonString(ModelName) + '"'
+        + ',"model_type":"' + EscapeJsonString(ModelType) + '"'
+        + ',"changed":' + IntToStr(Changed)
+        + ',"duplicates":' + IntToStr(Matches - 1)
+        + ',"current_count":' + IntToStr(CurCount)
+        + ',"models":' + BuildImplementationsJson(Component) + '}';
+    If (Not TargetCur) Or (CurCount <> 1) Then
+    Begin
+        Result := BuildErrorResponseDetailed(RequestId, 'CURRENT_NOT_APPLIED',
+            'After the write ' + IntToStr(CurCount) + ' ' + ModelType
+            + ' models read as current and the requested one reads '
+            + BoolToJsonStr(TargetCur) + '.', Details);
+        Exit;
+    End;
+    Result := BuildSuccessResponse(RequestId, Details);
 End;
 
 { Lib_NormalizeImplementations - whole-SchLib sweep that rebuilds every          }
@@ -14356,6 +15150,9 @@ Begin
         'set_component_description': Result := Lib_SetComponentDescription(Params, RequestId);
         'get_pin_list':       Result := Lib_GetPinList(Params, RequestId);
         'set_pin_owner_part': Result := Lib_SetPinOwnerPart(Params, RequestId);
+        'set_pin_properties':   Result := Lib_SetPinProperties(Params, RequestId);
+        'set_component_kind':   Result := Lib_SetComponentKind(Params, RequestId);
+        'set_current_model':    Result := Lib_SetCurrentModel(Params, RequestId);
         'copy_component':     Result := Lib_CopyComponent(Params, RequestId);
         'move_components':    Result := Lib_MoveComponents(Params, RequestId);
         'move_footprints':    Result := Lib_MoveFootprints(Params, RequestId);

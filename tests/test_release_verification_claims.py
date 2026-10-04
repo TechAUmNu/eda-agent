@@ -191,7 +191,10 @@ def test_every_step_that_writes_a_property_is_ranked():
 # Step 19 (the layout model read) only reads. Its undeclared-identifier
 # risk is listed in the step itself, identifier by identifier, for the
 # same reason step 8's is.
-_STEPS_WITHOUT_A_PROPERTY = {"0", "1", "8", "9", "10", "19", "21"}
+#
+# Step 29 (reload a sheet) saves, closes and reopens with method calls
+# only, like step 21; it writes no property.
+_STEPS_WITHOUT_A_PROPERTY = {"0", "1", "8", "9", "10", "19", "21", "29"}
 
 
 def _step_headings() -> list[tuple[str, str]]:
