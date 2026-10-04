@@ -326,6 +326,13 @@ def _payload_safe(value: object) -> str:
     return payload_safe(value)
 
 
+def _mil(v: object) -> str:
+    """Pad dimension in mils at Altium's 1/10000-mil resolution;
+    integers stay integers so existing payloads are unchanged."""
+    r = round(float(v), 4)
+    return str(int(r)) if r == int(r) else f"{r:.4f}".rstrip("0").rstrip(".")
+
+
 def _pads_payload(pads: list[dict[str, Any]]) -> tuple[str, int]:
     """Build the ``pads`` batch payload, and count what was dropped.
 
@@ -347,21 +354,31 @@ def _pads_payload(pads: list[dict[str, Any]]) -> tuple[str, int]:
         # designator or layer carrying ";", "=" or "~~" reshapes the
         # payload and lands the pad somewhere else.
         desig = _payload_safe(str(p.get("designator", "")).strip())
-        if not desig:
+        if not desig and p.get("plated") is not False:
             skipped_invalid += 1
             continue
         fields = [
             f"designator={desig}",
-            f"x={round(p.get('x', 0))}",
-            f"y={round(p.get('y', 0))}",
-            f"x_size={round(p.get('x_size', 60))}",
-            f"y_size={round(p.get('y_size', 60))}",
-            f"hole_size={round(p.get('hole_size', 0))}",
+            f"x={_mil(p.get('x', 0))}",
+            f"y={_mil(p.get('y', 0))}",
+            f"x_size={_mil(p.get('x_size', 60))}",
+            f"y_size={_mil(p.get('y_size', 60))}",
+            f"hole_size={_mil(p.get('hole_size', 0))}",
             f"shape={_payload_safe(p.get('shape', 'rectangular'))}",
             f"corner_radius={round(p.get('corner_radius', 25))}",
             f"rotation={_payload_safe(p.get('rotation', 0))}",
             f"layer={_payload_safe(p.get('layer', 'TopLayer'))}",
         ]
+        # optional pad features (patch 2): emitted only when given
+        if p.get('plated') is not None:
+            fields.append(f"plated={'true' if p['plated'] else 'false'}")
+        if p.get('hole_type'):
+            fields.append(f"hole_type={_payload_safe(p['hole_type'])}")
+        for key in ('slot_length', 'mask_expansion', 'paste_expansion'):
+            if p.get(key) is not None:
+                fields.append(f"{key}={_mil(p[key])}")
+        if p.get('hole_rotation') is not None:
+            fields.append(f"hole_rotation={float(p['hole_rotation'])}")
         op_strs.append(";".join(fields))
     return "~~".join(op_strs), skipped_invalid
 

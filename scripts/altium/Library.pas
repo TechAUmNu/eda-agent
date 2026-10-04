@@ -1331,7 +1331,8 @@ End;
 Function Lib_AddFootprintPad(Params : String; RequestId : String) : String;
 Var
     Designator, Shape, LayerStr : String;
-    X, Y, XSize, YSize, HoleSize, CornerRadius : Integer;
+    X, Y, XSize, YSize, HoleSize : Double;
+    CornerRadius : Integer;
     Rotation : Double;
     PcbLib : IPCB_Library;
     Footprint : IPCB_LibComponent;
@@ -1339,11 +1340,11 @@ Var
     PadLayer : TLayer;
 Begin
     Designator := ExtractJsonValue(Params, 'designator');
-    X := StrToIntDef(ExtractJsonValue(Params, 'x'), 0);
-    Y := StrToIntDef(ExtractJsonValue(Params, 'y'), 0);
-    XSize := StrToIntDef(ExtractJsonValue(Params, 'x_size'), 60);
-    YSize := StrToIntDef(ExtractJsonValue(Params, 'y_size'), 60);
-    HoleSize := StrToIntDef(ExtractJsonValue(Params, 'hole_size'), 0);
+    X := StrToFloatDef(ExtractJsonValue(Params, 'x'), 0);
+    Y := StrToFloatDef(ExtractJsonValue(Params, 'y'), 0);
+    XSize := StrToFloatDef(ExtractJsonValue(Params, 'x_size'), 60);
+    YSize := StrToFloatDef(ExtractJsonValue(Params, 'y_size'), 60);
+    HoleSize := StrToFloatDef(ExtractJsonValue(Params, 'hole_size'), 0);
     Shape := ExtractJsonValue(Params, 'shape');
     LayerStr := ExtractJsonValue(Params, 'layer');
     Rotation := StrToFloatDef(ExtractJsonValue(Params, 'rotation'), 0);
@@ -1384,11 +1385,11 @@ Begin
     If Pad <> Nil Then
     Begin
         Pad.Name := Designator;
-        Pad.X := FootprintOriginX(Footprint) + MilsToCoord(X);
-        Pad.Y := FootprintOriginY(Footprint) + MilsToCoord(Y);
-        Pad.TopXSize := MilsToCoord(XSize);
-        Pad.TopYSize := MilsToCoord(YSize);
-        Pad.HoleSize := MilsToCoord(HoleSize);
+        Pad.X := FootprintOriginX(Footprint) + Round(MilsToCoord(1) * X);
+        Pad.Y := FootprintOriginY(Footprint) + Round(MilsToCoord(1) * Y);
+        Pad.TopXSize := Round(MilsToCoord(1) * XSize);
+        Pad.TopYSize := Round(MilsToCoord(1) * YSize);
+        Pad.HoleSize := Round(MilsToCoord(1) * HoleSize);
         Pad.Rotation := Rotation;
 
         Pad.Layer := PadLayer;
@@ -1438,12 +1439,16 @@ Function Lib_AddFootprintPads(Params : String; RequestId : String) : String;
 Var
     PadsStr, Op, Remaining, Shape, LayerStr, BadLayers : String;
     OpCount, Added, Failed : Integer;
-    X, Y, XSize, YSize, HoleSize, CornerRadius : Integer;
+    X, Y, XSize, YSize, HoleSize : Double;
+    CornerRadius : Integer;
     Rotation : Double;
     PadLayer : TLayer;
     PcbLib : IPCB_Library;
     Footprint : IPCB_LibComponent;
     Pad : IPCB_Pad;
+    PlatedStr, HoleTypeStr, MaskStr, PasteStr : String;
+    SlotLen, HoleRot : Double;
+    Cache : TPadCache;
 Begin
     PadsStr := ExtractJsonValue(Params, 'pads');
     If PadsStr = '' Then
@@ -1479,15 +1484,21 @@ Begin
             Op := NextBatchOp(Remaining);
             If Op = '' Then Break;
             OpCount := OpCount + 1;
-            X := StrToIntDef(GetBatchField(Op, 'x'), 0);
-            Y := StrToIntDef(GetBatchField(Op, 'y'), 0);
-            XSize := StrToIntDef(GetBatchField(Op, 'x_size'), 60);
-            YSize := StrToIntDef(GetBatchField(Op, 'y_size'), 60);
-            HoleSize := StrToIntDef(GetBatchField(Op, 'hole_size'), 0);
+            X := StrToFloatDef(GetBatchField(Op, 'x'), 0);
+            Y := StrToFloatDef(GetBatchField(Op, 'y'), 0);
+            XSize := StrToFloatDef(GetBatchField(Op, 'x_size'), 60);
+            YSize := StrToFloatDef(GetBatchField(Op, 'y_size'), 60);
+            HoleSize := StrToFloatDef(GetBatchField(Op, 'hole_size'), 0);
             Rotation := StrToFloatDef(GetBatchField(Op, 'rotation'), 0);
             Shape := GetBatchField(Op, 'shape');
             LayerStr := GetBatchField(Op, 'layer');
             CornerRadius := StrToIntDef(GetBatchField(Op, 'corner_radius'), 25);
+            PlatedStr := LowerCase(GetBatchField(Op, 'plated'));
+            HoleTypeStr := LowerCase(GetBatchField(Op, 'hole_type'));
+            SlotLen := StrToFloatDef(GetBatchField(Op, 'slot_length'), 0);
+            HoleRot := StrToFloatDef(GetBatchField(Op, 'hole_rotation'), 0);
+            MaskStr := GetBatchField(Op, 'mask_expansion');
+            PasteStr := GetBatchField(Op, 'paste_expansion');
 
             { Resolve the layer BEFORE creating anything. GetLayerFromString    }
             { answered eTopLayer for every name it did not know, so one         }
@@ -1512,11 +1523,11 @@ Begin
             End;
 
             Pad.Name := GetBatchField(Op, 'designator');
-            Pad.X := FootprintOriginX(Footprint) + MilsToCoord(X);
-            Pad.Y := FootprintOriginY(Footprint) + MilsToCoord(Y);
-            Pad.TopXSize := MilsToCoord(XSize);
-            Pad.TopYSize := MilsToCoord(YSize);
-            Pad.HoleSize := MilsToCoord(HoleSize);
+            Pad.X := FootprintOriginX(Footprint) + Round(MilsToCoord(1) * X);
+            Pad.Y := FootprintOriginY(Footprint) + Round(MilsToCoord(1) * Y);
+            Pad.TopXSize := Round(MilsToCoord(1) * XSize);
+            Pad.TopYSize := Round(MilsToCoord(1) * YSize);
+            Pad.HoleSize := Round(MilsToCoord(1) * HoleSize);
             Pad.Rotation := Rotation;
 
             { Layer FIRST (roundrect setters are layer-aware): drilled ->       }
@@ -1531,6 +1542,31 @@ Begin
                 Pad.SetState_StackCRPctOnLayer(Pad.Layer, CornerRadius);
             End
             Else Pad.TopShape := eRounded;
+
+            { patch 2: optional hole / plating / expansion features }
+            If PlatedStr = 'false' Then Pad.Plated := False;
+            If HoleTypeStr = 'slot' Then
+            Begin
+                Pad.HoleType := eSlotHole;
+                Pad.HoleWidth := Round(MilsToCoord(1) * SlotLen);
+                Pad.HoleRotation := HoleRot;
+            End
+            Else If HoleTypeStr = 'square' Then Pad.HoleType := eSquareHole;
+            If (MaskStr <> '') Or (PasteStr <> '') Then
+            Begin
+                Cache := Pad.GetState_Cache;
+                If MaskStr <> '' Then
+                Begin
+                    Cache.SolderMaskExpansionValid := eCacheManual;
+                    Cache.SolderMaskExpansion := Round(MilsToCoord(1) * StrToFloatDef(MaskStr, 0));
+                End;
+                If PasteStr <> '' Then
+                Begin
+                    Cache.PasteMaskExpansionValid := eCacheManual;
+                    Cache.PasteMaskExpansion := Round(MilsToCoord(1) * StrToFloatDef(PasteStr, 0));
+                End;
+                Pad.SetState_Cache := Cache;
+            End;
 
             Footprint.AddPCBObject(Pad);
             { The primitive must be registered with the library's backing Board as
