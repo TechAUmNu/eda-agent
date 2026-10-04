@@ -387,6 +387,12 @@ def register_application_tools(mcp):
         Detach also triggers save_all automatically, so you don't need this
         as the very last step.
 
+        TO SAVE ONE LIBRARY, USE ``lib_save_library``. This writes every
+        open document, and each save rewrites open SchDocs and PcbDocs
+        with fresh parameter UniqueIDs (measured 2026-10-02), so a
+        one-footprint edit saved this way churns every open sheet in
+        version control.
+
         CHECK ``still_dirty``, DO NOT ASSUME. Altium refuses to save while
         a command is active in the editor and asks a human whether to
         write a copy instead; DoFileSave does not raise when it declines.

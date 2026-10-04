@@ -174,16 +174,103 @@ def test_edit_payload_keeps_sub_mil_values_and_the_selector():
     assert get_batch_field(op, "mask_expansion") == "rule"
 
 
-def test_a_hostile_designator_cannot_add_a_field():
+def test_a_hostile_designator_is_refused_not_sanitised():
+    """It used to be sanitised to '1,x=999~designator=2' and SENT: no field
+    was forged, but the edit selected a pad nobody named. A selector is
+    refused, as the pin and No-ERC builders refuse theirs."""
     from eda_agent.tools import library as lib
 
     payload, problems = lib._pad_edits_payload([
         {"designator": "1;x=999~~designator=2", "y": 5},
     ])
+    assert payload == ""
+    assert problems and "separator" in problems[0]
+
+
+@pytest.mark.parametrize("edit", [
+    {"designator": "A;B", "y": 1},
+    {"designator": "A~~B", "y": 1},
+    {"designator": "1~", "y": 1},
+    {"designator": "1", "new_designator": "A;B"},
+    {"designator": "1", "new_designator": "A~~B"},
+    {"designator": "1", "new_designator": "B~"},
+])
+def test_pad_edit_names_are_refused_never_rewritten(edit):
+    """Verified before the fix: new_designator 'A;B' went out as 'A,B'.
+    A trailing '~' runs into the '~~' op separator."""
+    from eda_agent.tools import library as lib
+
+    _payload, problems = lib._pad_edits_payload(
+        [edit, {"designator": "9", "y": 1}])
+    assert problems and ("separator" in problems[0]
+                         or "ends with '~'" in problems[0]), problems
+
+
+@pytest.mark.parametrize("pad", [{"designator": "A;B"},
+                                 {"designator": "A~~B"},
+                                 {"designator": "3~"}])
+def test_pad_delete_selectors_are_refused_never_rewritten(pad):
+    from eda_agent.tools import library as lib
+
+    payload, problems = lib._pad_selectors_payload([pad])
+    assert payload == "" and problems and (
+        "separator" in problems[0] or "ends with '~'" in problems[0])
+
+
+@pytest.mark.parametrize("value,wire", [
+    (False, "false"), ("false", "false"), ("0", "false"), (0, "false"),
+    (True, "true"), ("TRUE", "true"), ("1", "true")])
+def test_plated_parses_by_the_one_boolean_rule(value, wire):
+    from eda_agent.tools import library as lib
+
+    payload, problems = lib._pad_edits_payload(
+        [{"designator": "1", "plated": value}])
     assert problems == []
-    ops = _ops(payload)
-    assert len(ops) == 1, "a '~~' in the designator forged a second edit"
-    assert get_batch_field(ops[0], "x") == ""
+    (op,) = _ops(payload)
+    assert get_batch_field(op, "plated") == wire
+
+    payload, skipped = lib._pads_payload(
+        [{"designator": "1", "hole_size": 40, "plated": value}])
+    assert skipped == 0
+    (op,) = _ops(payload)
+    assert get_batch_field(op, "plated") == wire, (
+        "the add path read the string 'false' as plated")
+
+
+def test_a_flag_that_is_not_a_boolean_is_refused_or_dropped():
+    from eda_agent.tools import library as lib
+
+    _p, problems = lib._pad_edits_payload(
+        [{"designator": "1", "plated": "maybe"}])
+    assert problems and "plated must be true or false" in problems[0]
+    _p, problems = lib._pad_selectors_payload(
+        [{"designator": "1", "all": "sometimes"}])
+    assert problems and "all must be true or false" in problems[0]
+    payload, skipped = lib._pads_payload(
+        [{"designator": "1", "plated": "maybe"}])
+    assert payload == "" and skipped == 1
+
+
+def test_delete_selector_all_accepts_the_string_true():
+    from eda_agent.tools import library as lib
+
+    payload, problems = lib._pad_selectors_payload(
+        [{"designator": "1", "all": "true"}])
+    assert problems == []
+    (op,) = _ops(payload)
+    assert get_batch_field(op, "all") == "true"
+
+
+@pytest.mark.parametrize("bad", [{"x": float("nan")}, {"x_size": float("inf")},
+                                 {"rotation": True}, {"y": "left"}])
+def test_add_pads_drops_a_pad_with_a_non_number(bad):
+    """_mil on NaN raised a ValueError traceback out of the tool."""
+    from eda_agent.tools import library as lib
+
+    payload, skipped = lib._pads_payload([dict({"designator": "1"}, **bad),
+                                          {"designator": "2", "x": 1}])
+    assert skipped == 1
+    assert len(_ops(payload)) == 1
 
 
 @pytest.mark.parametrize("edit,fragment", [
@@ -274,6 +361,39 @@ def test_delete_needs_confirm_before_anything_is_sent(monkeypatch):
                      confirm=True))
     assert bridge.calls[0][0] == "library.delete_footprint_pads"
     assert bridge.calls[0][1]["confirm"] == "true"
+
+
+@pytest.mark.parametrize("kwargs,fragment", [
+    ({"x": float("nan")}, "not a finite number: x"),
+    ({"y": float("inf")}, "not a finite number: y"),
+    ({"rotation": float("nan")}, "not a finite number: rotation"),
+    ({"x_size": True}, "not a finite number: x_size"),
+    ({"x_size": 0}, "greater than zero"),
+    ({"hole_size": -1}, "cannot be negative"),
+    ({"corner_radius": 150}, "0 to 100"),
+    ({"corner_radius": 12.5}, "0 to 100"),
+])
+def test_single_pad_numbers_are_checked_before_sending(monkeypatch, kwargs,
+                                                       fragment):
+    """The track, arc and text siblings got _num in this branch; the pad
+    tool sent _mil(NaN) (a traceback) and a raw rotation."""
+    bridge = _Bridge()
+    tool = _tools(monkeypatch, bridge)["lib_add_footprint_pad"]
+    args = dict({"designator": "1", "x": 0, "y": 0}, **kwargs)
+    out = asyncio.run(tool(**args))
+    assert out["ok"] is False and fragment in out["reason"], out
+    assert bridge.calls == []
+
+
+def test_single_pad_sends_decimal_rotation_through_the_mil_formatter(
+        monkeypatch):
+    bridge = _Bridge()
+    tool = _tools(monkeypatch, bridge)["lib_add_footprint_pad"]
+    asyncio.run(tool(designator="1", x=1.25, y=0, rotation=45.5,
+                     corner_radius=30.0))
+    _cmd, params = bridge.calls[0]
+    assert params["x"] == "1.25" and params["rotation"] == "45.5"
+    assert params["corner_radius"] == 30
 
 
 def test_a_refused_edit_sends_nothing(monkeypatch):

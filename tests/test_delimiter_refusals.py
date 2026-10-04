@@ -76,6 +76,25 @@ _CASES = [
         "pins": [{"designator": "1~~designator=2", "name": "X"}]}),
     ("sch_place_no_ercs", {"targets": [{"designator": "R1;pin=2",
                                         "pin": "1"}]}),
+    # Pad edits were the odd ones out: they SANITISED the selector and the
+    # new name ('A;B' went out as 'A,B') where every sibling refuses.
+    ("lib_modify_footprint_pads", {
+        "footprint_name": "FP",
+        "edits": [{"designator": "1~~designator=2", "y": 1}]}),
+    ("lib_modify_footprint_pads", {
+        "footprint_name": "FP",
+        "edits": [{"designator": "1", "new_designator": "A;B"}]}),
+    ("lib_delete_footprint_pads", {
+        "footprint_name": "FP", "pads": [{"designator": "1;all=true"}],
+        "confirm": True}),
+    ("lib_rename_footprints", {"renames": [{"from": "A;B", "to": "C"}]}),
+    # A TRAILING '~' runs into the '~~' after it: 'new=B~' + '~~' reads as
+    # 'new=B' and an op '~old=...'. The reason names the separator too.
+    ("lib_rename_footprints", {"renames": [{"from": "A", "to": "B~"}]}),
+    ("lib_set_pin_properties", {
+        "component_name": "U1",
+        "pins": [{"designator": "1", "new_designator": "2~"},
+                 {"designator": "3", "name": "X"}]}),
 ]
 
 

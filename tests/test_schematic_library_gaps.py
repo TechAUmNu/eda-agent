@@ -49,10 +49,63 @@ def generic_fns() -> dict[str, str]:
 def test_a_pin_edit_emits_only_the_fields_given():
     payload, problems = _pin_edits_payload([
         {"designator": "3", "name": "", "electrical_type": "input",
-         "show_name": False, "length": 200.4}])
+         "show_name": False, "length": 200.0}])
     assert problems == []
     assert payload == ("designator=3;name=;electrical_type=input;"
                        "show_name=false;length=200")
+
+
+@pytest.mark.parametrize("length", [200.4, float("inf"), float("nan"), True,
+                                    0, -100, "long"])
+def test_a_pin_length_that_is_not_a_whole_positive_number_is_refused(length):
+    """inf raised OverflowError past the except, True became 1 and 200.4
+    was rounded to 200, where the Pascal (IsIntStr) would have refused it.
+    """
+    payload, problems = _pin_edits_payload(
+        [{"designator": "3", "length": length}])
+    assert payload == ""
+    assert problems and "length must be a whole number" in problems[0]
+
+
+@pytest.mark.parametrize("owner", [True, 1.5, float("inf"), -1])
+def test_an_owner_part_id_that_is_not_a_whole_number_is_refused(owner):
+    _payload, problems = _pin_edits_payload(
+        [{"designator": "3", "owner_part_id": owner, "name": "X"}])
+    assert problems and "owner_part_id" in problems[0]
+
+
+@pytest.mark.parametrize("value,wire", [
+    (False, "false"), ("false", "false"), ("0", "false"), (0, "false"),
+    (True, "true"), ("true", "true"), ("1", "true"), ("YES", "true")])
+def test_pin_flags_parse_by_the_one_boolean_rule(value, wire):
+    """Truthiness sent show_name=true for the string 'false'."""
+    payload, problems = _pin_edits_payload(
+        [{"designator": "3", "show_name": value, "hidden": value}])
+    assert problems == []
+    assert f"show_name={wire}" in payload and f"hidden={wire}" in payload
+
+
+def test_a_pin_flag_that_is_not_a_boolean_is_refused():
+    _payload, problems = _pin_edits_payload(
+        [{"designator": "3", "hidden": "maybe"}])
+    assert problems and "hidden must be true or false" in problems[0]
+
+
+@pytest.mark.parametrize("key", ["new_designator", "name"])
+def test_a_trailing_tilde_cannot_run_into_the_op_separator(key):
+    """NextBatchOp splits on the FIRST '~~': a value ending '~' that closes
+    an op read as the value without it plus a broken '~op'. Any problem
+    refuses the whole call, so the partial payload is never sent."""
+    edit = {"designator": "1", key: "B~"}
+    _payload, problems = _pin_edits_payload([edit, {"designator": "2",
+                                                    "name": "C"}])
+    assert problems and "ends with '~'" in problems[0]
+
+
+def test_a_leading_tilde_overbar_name_still_passes():
+    payload, problems = _pin_edits_payload(
+        [{"designator": "1", "name": "~RESET"}])
+    assert problems == [] and payload == "designator=1;name=~RESET"
 
 
 def test_a_mistyped_key_is_refused_with_the_right_one():
@@ -133,6 +186,23 @@ def test_reload_closes_by_object_after_a_proven_save(generic_fns):
 
 # --------------------------------------------------------------- No-ERC
 
+@pytest.mark.parametrize("target", [
+    {"x": 12.7, "y": 0}, {"x": True, "y": 0}, {"x": float("inf"), "y": 0},
+    {"x": 1, "y": float("nan")}, {"x": "a", "y": 0}, {"x": 1}])
+def test_no_erc_points_must_be_whole_finite_mils(target):
+    """int() truncated 12.7 to 12, turned True into 1, and raised
+    OverflowError on an infinity, past the except."""
+    payload, problems = no_erc_targets_payload([target])
+    assert payload == ""
+    assert problems and "whole-number" in problems[0]
+
+
+def test_no_erc_pin_ending_in_tilde_is_refused():
+    _p, problems = no_erc_targets_payload(
+        [{"designator": "U1", "pin": "4~"}, {"designator": "U1", "pin": "5"}])
+    assert problems and "ends with '~'" in problems[0]
+
+
 def test_no_erc_targets_prefer_pins_and_refuse_separators():
     payload, problems = no_erc_targets_payload(
         [{"designator": "U7", "pin": "23"}, {"x": 100, "y": 200}])
@@ -163,6 +233,21 @@ def test_saved_report_reads_the_record_verbatim(monkeypatch):
     assert len(rep["field_variants"]) == 2, "the odd one must stand out"
     assert rep["saved_not_in_memory"] == [[6010, 5100]]
     assert rep["in_memory_not_saved"] == []
+
+
+def test_saved_report_normalises_both_sides_the_same_way(monkeypatch):
+    """Saved positions were rounded and live ones truncated, so a marker at
+    a fractional mil showed up as unsaved AND lost; a None x raised."""
+    import eda_agent.fileio.altium_sch as reader
+    monkeypatch.setattr(reader, "read_schdoc_records", lambda p: [
+        {"RECORD": "22", "Location.X": "600", "Location.X_Frac": "67000",
+         "Location.Y": "510"}])
+    rep = saved_no_erc_report("x.SchDoc",
+                              [{"x": 6006.7, "y": 5100},
+                               {"x": None, "y": 1}])
+    assert rep["in_memory_not_saved"] == []
+    assert rep["saved_not_in_memory"] == []
+    assert rep["unreadable_live_markers"] == 1
 
 
 def test_cross_check_matches_whole_tokens_only():

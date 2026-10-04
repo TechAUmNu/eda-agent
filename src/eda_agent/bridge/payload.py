@@ -31,13 +31,21 @@ The rules are narrow on purpose:
 
 Substitution rather than escaping is forced: the deployed Pascal parser
 has no escape syntax to escape TO.
+
+Substitution is right only for FREE TEXT. A name that selects or renames
+an object is refused instead (:func:`name_wire_problem`), and numbers and
+booleans bound for the wire have one guard each (:func:`finite_number`,
+:func:`wire_bool`) for the same reason this module exists: copies drift.
 """
 
 from __future__ import annotations
 
+import math
 import re
+from typing import Optional
 
-__all__ = ["payload_safe", "unsendable_chars"]
+__all__ = ["payload_safe", "unsendable_chars", "name_wire_problem",
+           "finite_number", "non_finite", "whole_number", "wire_bool"]
 
 #: Two or more consecutive tildes. A single one is data.
 #:
@@ -87,3 +95,108 @@ def unsendable_chars(value: object) -> str:
             seen.add(ch)
             out.append(ch)
     return "".join(out)
+
+
+def name_wire_problem(value: object) -> str:
+    """Why ``value`` cannot travel as a NAME in a batch payload, or "".
+
+    A name SELECTS or RENAMES an object, so it is refused rather than
+    passed through :func:`payload_safe`: sanitising ``A;B`` to ``A,B``
+    selects or creates an object nobody asked for. Refused:
+
+    * ``;`` -- ends the field, and the remainder becomes a live field.
+    * ``~~`` -- ends the operation.
+    * a TRAILING ``~``. ``NextBatchOp`` splits on the FIRST ``~~``, so a
+      value ending in ``~`` that closes an operation runs into the
+      separator: ``new=B~`` + ``~~`` + ``old=C`` reads as ``new=B`` and an
+      operation ``~old=C``. Refused wherever it sits, so the rule does not
+      depend on field order.
+    * a character above U+00FF, which the bridge flattens to ``?``.
+
+    A LEADING ``~`` is allowed: it always follows ``key=``, so it can never
+    meet a separator, and it is the overbar marker in pin names (~RESET).
+
+    The reason always names the separators, so a caller can tell this
+    refusal from a missing field.
+    """
+    text = str(value)
+    if ";" in text or "~~" in text:
+        return ("contains ';' or '~~', the wire-format separators; a "
+                "fragment could select or name a different object")
+    if text.endswith("~"):
+        return ("ends with '~', which runs into the '~~' operation "
+                "separator and splits the batch payload")
+    bad = unsendable_chars(text)
+    if bad:
+        return f"contains {bad!r}, which the bridge flattens to '?'"
+    return ""
+
+
+def finite_number(value: object) -> Optional[float]:
+    """A finite float, or None for anything that is not one.
+
+    THE number guard for anything bound for the wire. ``float()`` on a
+    caller's junk raises, which would hand an MCP client a stack trace;
+    NaN and the infinities pass a ``float`` annotation, json writes them
+    as NaN / Infinity (not JSON), and a value that did reach the Pascal
+    unparsed comes out of StrToFloatDef as its DEFAULT, so the call would
+    report success for a value nobody sent. A bool is refused too:
+    ``True`` is a number to Python and never a coordinate.
+    """
+    if isinstance(value, bool):
+        return None
+    try:
+        out = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def whole_number(value: object) -> Optional[int]:
+    """An integer from a JSON-ish value, or None when it is not a whole one.
+
+    For fields the Pascal reads with StrToIntDef (schematic mils, part
+    ids): 12.7 is REFUSED, not rounded to 13 behind the caller's back, and
+    a non-integral value that did reach StrToIntDef would become its
+    default. ``200.0`` and ``"200"`` are whole numbers; bools are not.
+    """
+    out = finite_number(value)
+    if out is None or not out.is_integer():
+        return None
+    return int(out)
+
+
+def non_finite(values: dict) -> list:
+    """Names in ``values`` whose value :func:`finite_number` refuses."""
+    return [name for name, value in values.items()
+            if finite_number(value) is None]
+
+
+#: Words accepted for a boolean inside a batch dict. Anything else is
+#: refused, never guessed: these are EDIT fields, and an inverted flag is
+#: a silent wrong change.
+_TRUE_WORDS = frozenset({"true", "1", "yes", "on"})
+_FALSE_WORDS = frozenset({"false", "0", "no", "off"})
+
+
+def wire_bool(value: object) -> Optional[bool]:
+    """A boolean from a JSON-ish value, or None when it is not one.
+
+    ONE rule for every boolean inside a batch dict. Truthiness is wrong
+    for these: the string ``"false"`` is truthy, so ``keepout: "false"``
+    used to make the fill a keep-out. ``True``/``False``, the integers
+    1/0 and the words true/false, 1/0, yes/no, on/off (any case) are
+    understood; anything else, including other numbers, is None and the
+    caller refuses it.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in _TRUE_WORDS:
+            return True
+        if word in _FALSE_WORDS:
+            return False
+    return None

@@ -28,6 +28,17 @@ SOT = ("SOT23,Package Specifications\n"
        "FootprintName,FootprintDescription,PinCount,PinOrder\n")
 
 
+class Reply:
+    """The CommandResponse fields run_batch reads."""
+
+    def __init__(self, success=True, error=None, data=None,
+                 protocol_version=0):
+        self.success = success
+        self.error = error
+        self.data = data
+        self.protocol_version = protocol_version
+
+
 class FakeBridge:
     def __init__(self, workspace, library, names):
         self.config = type("C", (), {"workspace_dir": workspace})()
@@ -37,6 +48,7 @@ class FakeBridge:
         self.calls = []
         self.save_writes = True
         self.detached = []
+        self.reply = Reply(data={"dispatched": True})
 
     async def send_command_async(self, command, params=None, timeout=None):
         params = params or {}
@@ -75,7 +87,7 @@ class FakeBridge:
 
     def collect_detached(self, request_id, timeout):
         self.calls.append("collect")
-        return object()
+        return self.reply
 
 
 @pytest.fixture
@@ -174,7 +186,9 @@ def test_a_report_with_errors_stops_and_leaves_the_work_unsaved(
                        "messages": [{"description": "Error: x"}]}}}
 
     monkeypatch.setattr(flow.ipc_batch_dialog, "drive_one", failing)
-    out = _run(bridge, [csv_path, csv_path], library)
+    second = Path(csv_path).with_name("sot_b.csv")
+    second.write_text(SOT + 'SOT-23-5_P0.95,five,5,"1,2,3,4,5"\n')
+    out = _run(bridge, [csv_path, str(second)], library)
     assert out["stopped"]["stage"] == "report"
     assert out["unsaved"] == ["SOT-23-6_P0,95"]
     assert bridge.calls.count("detached:generic.run_process") == 1, (
@@ -202,3 +216,166 @@ def test_a_form_left_open_ends_the_call_without_the_bridge(
     assert out["stopped"]["bridge_blocked"] is True
     assert bridge.calls[-1] == "detached:generic.run_process", (
         "nothing may be sent while the form blocks the bridge")
+
+
+def test_the_same_csv_twice_is_refused_before_altium_is_touched(setup):
+    """The cross-file duplicate check compared names only across DIFFERENT
+    paths, and the already-present check sees the library from before the
+    call, so run 2 would hit the 'already exists' prompt mid-run."""
+    bridge, library, csv_path, runs = setup
+    alias = str(Path(csv_path).parent / "." / Path(csv_path).name)
+    out = _run(bridge, [csv_path, alias], library)
+    assert out["stopped"]["stage"] == "preflight"
+    problems = [f["problem"] for f in out["preflight"]["findings"]]
+    assert "duplicate_csv" in problems
+    assert bridge.calls == [] and runs == []
+
+
+def test_a_driver_exception_with_the_form_up_is_a_reported_stop(
+        setup, monkeypatch):
+    """drive_one runs in an executor while RunProcess blocks behind the
+    form. An exception escaping it used to end the call as a traceback,
+    form up, bridge blocked, with no stage or screen report."""
+    bridge, library, csv_path, runs = setup
+
+    def raising(*a, **k):
+        raise RuntimeError("button disabled between find and click")
+
+    monkeypatch.setattr(flow.ipc_batch_dialog, "drive_one", raising)
+    monkeypatch.setattr(flow.ipc_batch_dialog, "find_batch_dialog",
+                        lambda pid: object())
+    monkeypatch.setattr(flow.dialog_report, "report",
+                        lambda pid: {"dialogs": 1})
+    out = _run(bridge, [csv_path], library)
+    stopped = out["stopped"]
+    assert stopped["stage"] == "dialog" and stopped["bridge_blocked"] is True
+    assert "RuntimeError" in stopped["reason"]
+    assert stopped["error"]["code"] == "RuntimeError"
+    assert stopped["dialogs"] == {"dialogs": 1}
+    assert "app_list_open_dialogs" in out["next_step"]
+    assert bridge.calls[-1] == "detached:generic.run_process", (
+        "nothing may be sent while the form blocks the bridge")
+
+
+def test_a_driver_exception_after_the_form_closed_finishes_cleanly(
+        setup, monkeypatch):
+    bridge, library, csv_path, runs = setup
+
+    def raising(*a, **k):
+        bridge.names.add("SOT-23-6_P0,95")
+        raise OSError("OCR failed")
+
+    monkeypatch.setattr(flow.ipc_batch_dialog, "drive_one", raising)
+    monkeypatch.setattr(flow.ipc_batch_dialog, "find_batch_dialog",
+                        lambda pid: None)
+    out = _run(bridge, [csv_path], library)
+    assert out["stopped"]["stage"] == "dialog"
+    assert "OSError" in out["stopped"]["reason"]
+    assert "collect" in bridge.calls, "the reply proves the engine is free"
+    assert out["unsaved"] == ["SOT-23-6_P0,95"]
+    assert "library.save_library" not in bridge.calls
+
+
+def test_a_screen_report_that_raises_does_not_replace_the_stop(
+        setup, monkeypatch):
+    bridge, library, csv_path, runs = setup
+    monkeypatch.setattr(flow.ipc_batch_dialog, "drive_one",
+                        lambda *a, **k: {"ok": False, "stage": "run",
+                                         "batch_dialog_open": True,
+                                         "reason": "a dialog appeared"})
+
+    def broken(pid):
+        raise RuntimeError("window vanished mid-read")
+
+    monkeypatch.setattr(flow.dialog_report, "report", broken)
+    out = _run(bridge, [csv_path], library)
+    assert out["stopped"]["bridge_blocked"] is True
+    assert "window vanished" in out["stopped"]["dialogs"]["error"]
+
+
+def test_the_handler_reply_is_kept_and_explains_a_missing_form(
+        setup, monkeypatch):
+    """collect_detached's reply was only tested for None, so a handler
+    error was thrown away and the stop at 'open' said nothing about why."""
+    bridge, library, csv_path, runs = setup
+    bridge.reply = Reply(success=False, error={
+        "code": "REFUSED_BY_POLICY", "message": "process not allowed"})
+    monkeypatch.setattr(flow.ipc_batch_dialog, "drive_one",
+                        lambda *a, **k: {"ok": False, "stage": "open",
+                                         "batch_dialog_open": False,
+                                         "reason": "no batch generator "
+                                                   "dialog appeared"})
+    out = _run(bridge, [csv_path], library)
+    stopped = out["stopped"]
+    assert stopped["stage"] == "open"
+    assert "REFUSED_BY_POLICY" in stopped["reason"]
+    assert "process not allowed" in stopped["reason"]
+    assert stopped["run_process_reply"]["success"] is False
+    reply = out["runs"][0]["run_process_reply"]
+    assert reply["error"]["code"] == "REFUSED_BY_POLICY"
+
+
+def test_a_protocol_mismatch_in_the_reply_is_reported(setup, monkeypatch):
+    bridge, library, csv_path, runs = setup
+    bridge.reply = Reply(success=True, protocol_version=99)
+    out = _run(bridge, [csv_path], library)
+    assert out["runs"][0]["run_process_reply"]["protocol_mismatch"][
+        "server"] == 99
+    assert any("protocol 99" in w["warning"] for w in out["warnings"])
+
+
+def test_the_driver_never_lets_an_exception_out():
+    """Every executor call of drive_one goes through the reporting
+    wrapper; a bare drive_one in run_batch is the defect this guards."""
+    import inspect
+
+    source = inspect.getsource(flow.run_batch)
+    assert "_drive_one_reporting" in source
+    assert "ipc_batch_dialog.drive_one" not in source
+
+
+def _library_tools():
+    from eda_agent.tools.library import register_library_tools
+
+    captured: dict = {}
+
+    class _Mcp:
+        def tool(self, *a, **k):
+            def deco(fn):
+                captured[fn.__name__] = fn
+                return fn
+            return deco
+
+    register_library_tools(_Mcp())
+    return captured
+
+
+def test_an_open_dialog_refusal_reads_the_screen_off_the_event_loop(
+        monkeypatch, tmp_path):
+    """dialog_report.report can OCR every dialog (about 2 s each); called
+    inline in the async tool it stalled the MCP event loop."""
+    import threading
+
+    from eda_agent.tools import uiauto
+    from eda_agent.ui import dialog_report, ipc_batch_dialog, windows
+
+    seen = {}
+
+    def report(pid):
+        seen["thread"] = threading.current_thread()
+        return {"dialogs": [{"title": "Unsaved Changes"}]}
+
+    monkeypatch.setattr(uiauto, "_altium_pid", lambda: (42, None))
+    monkeypatch.setattr(ipc_batch_dialog, "available", lambda: True)
+    monkeypatch.setattr(windows, "dialogs", lambda pid: ["a dialog"])
+    monkeypatch.setattr(windows, "is_blocked", lambda pid: True)
+    monkeypatch.setattr(dialog_report, "report", report)
+
+    out = asyncio.run(_library_tools()["lib_ipc_batch_generate"](
+        csv_paths=[str(tmp_path / "a.csv")],
+        library_path=str(tmp_path / "x.PcbLib")))
+    assert out["ok"] is False and "already open" in out["reason"]
+    assert out["stopped"]["dialogs"]["dialogs"][0]["title"] == \
+        "Unsaved Changes"
+    assert seen["thread"] is not threading.main_thread(), (
+        "the screen report ran on the event loop's thread")

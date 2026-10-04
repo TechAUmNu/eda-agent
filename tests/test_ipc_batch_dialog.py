@@ -149,3 +149,50 @@ def test_the_module_never_reaches_for_the_bridge():
     source = inspect.getsource(dlg)
     assert "send_command" not in source and "get_bridge" not in source, (
         "the bridge is blocked behind this dialog for the whole run")
+
+
+def test_an_unreadable_option_is_a_miss_not_an_exception(monkeypatch):
+    """snapshot() guarded describe_all; set_option called it again
+    unguarded straight after, while the form blocked the bridge."""
+    monkeypatch.setattr(dlg.controls, "available", lambda: True)
+
+    def broken(dialog):
+        raise OSError("accessibility server busy")
+
+    monkeypatch.setattr(dlg.controls, "describe_all", broken)
+    out = dlg.set_option(_form(), dlg.CURRENT_LIBRARY_WORDS, True,
+                         role="radiobutton")
+    assert out["ok"] is False and "could not be read" in out["reason"]
+
+
+def test_a_set_that_raises_is_a_miss_not_an_exception(monkeypatch):
+    monkeypatch.setattr(dlg.controls, "available", lambda: True)
+    monkeypatch.setattr(dlg.controls, "describe_all", lambda d: [
+        {"role": "radiobutton", "hwnd": 5,
+         "label": "Generate all footprints in current PcbLib file"}])
+
+    def broken(hwnd, want):
+        raise RuntimeError("control destroyed")
+
+    monkeypatch.setattr(dlg.controls, "set_checked", broken)
+    out = dlg.set_option(_form(), dlg.CURRENT_LIBRARY_WORDS, True,
+                         role="radiobutton")
+    assert out["ok"] is False and "raised" in out["reason"]
+
+
+def test_an_unreadable_destination_still_refuses_start(monkeypatch):
+    """The miss feeds the existing configure stop, which closes the
+    unstarted form so the bridge comes back."""
+    form = _form()
+    screen = Screen(monkeypatch, form)
+    screen.on_press["&Close"] = lambda: screen.windows.pop(100)
+    monkeypatch.setattr(dlg, "snapshot", lambda d: {})
+    monkeypatch.setattr(dlg.controls, "available", lambda: True)
+
+    def broken(dialog):
+        raise OSError("accessibility server busy")
+
+    monkeypatch.setattr(dlg.controls, "describe_all", broken)
+    rec = dlg.drive_one(1, r"C:\w\a.csv", [], dialog_timeout=1)
+    assert rec["stage"] == "configure" and "Start" not in screen.pressed
+    assert rec["batch_dialog_open"] is False

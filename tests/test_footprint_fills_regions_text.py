@@ -314,6 +314,30 @@ def test_fills_need_a_layer_and_an_area():
     assert _fields(ops[1])["rotation"] == "45"
 
 
+@pytest.mark.parametrize("value,keepout", [
+    ("false", False), ("0", False), (False, False), (0, False),
+    ("true", True), ("1", True), (True, True)])
+def test_fill_keepout_parses_by_the_one_boolean_rule(value, keepout):
+    """Truthiness sent keepout=true for the string 'false' and turned the
+    fill into a keep-out; this is an EDIT, so that was a silent wrong
+    change."""
+    from eda_agent.tools.library import _fills_payload
+    payload, skipped = _fills_payload([
+        {"x1": 0, "y1": 0, "x2": 1, "y2": 1, "layer": "TopLayer",
+         "keepout": value}])
+    assert skipped == []
+    assert ("keepout" in _fields(payload)) is keepout
+
+
+def test_a_fill_keepout_that_is_not_a_boolean_is_skipped_with_a_reason():
+    from eda_agent.tools.library import _fills_payload
+    payload, skipped = _fills_payload([
+        {"x1": 0, "y1": 0, "x2": 1, "y2": 1, "layer": "TopLayer",
+         "keepout": "perhaps"}])
+    assert payload == ""
+    assert skipped == [{"item": 0, "reason": "keepout must be true or false"}]
+
+
 def test_a_hostile_fill_layer_cannot_add_a_field():
     from eda_agent.tools.library import _fills_payload
     payload, _ = _fills_payload([{"x1": 0, "y1": 0, "x2": 1, "y2": 1,

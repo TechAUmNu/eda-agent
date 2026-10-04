@@ -4,12 +4,13 @@
 
 import asyncio
 import difflib
-import math
 import re
 from pathlib import Path
 from typing import Any, Optional
 from ..bridge import get_bridge
-from ..bridge.payload import payload_safe, unsendable_chars
+from ..bridge.payload import (finite_number, name_wire_problem, non_finite,
+                              payload_safe, unsendable_chars, whole_number,
+                              wire_bool)
 from ..libimport import extract_cse_zip, inspect_cse_zip
 from .bulk_hints import BulkHintTracker
 from .datasheet_hints import tag_response
@@ -96,22 +97,10 @@ _MAX_PASSES = 6
 _FOOTPRINT_3D_ALIGN = ("none", "center", "pads")
 
 
-def _non_finite(values: dict) -> list:
-    """Names whose value is not a finite number.
-
-    NaN and the infinities pass a ``float`` annotation, and json writes
-    them as NaN / Infinity, which is not JSON. A value that did reach
-    the Pascal unparsed would come out of StrToFloatDef as its default
-    0, so a rotation of NaN would be reported as no rotation at all.
-    """
-    bad = []
-    for name, value in values.items():
-        try:
-            if not math.isfinite(float(value)):
-                bad.append(name)
-        except (TypeError, ValueError):
-            bad.append(name)
-    return bad
+#: Names whose value is not a finite number (bools included). The one
+#: guard lives in bridge/payload.py; a copy here once treated True as 1.0
+#: while its siblings refused it.
+_non_finite = non_finite
 
 
 def _batch_encoding() -> str:
@@ -254,8 +243,9 @@ async def _save_library_verified(bridge, library_path: str) -> dict:
             "library.save_library", {"library_path": library_path},
             timeout=_GEOMETRY_TIMEOUT)
     except Exception as exc:                     # noqa: BLE001
-        return {"ok": False, "library_path": library_path,
-                "written_to_disk": False, "error": str(exc),
+        return {"ok": False, "reason": f"the save was refused: {exc}",
+                "library_path": library_path, "written_to_disk": False,
+                "code": getattr(exc, "code", type(exc).__name__),
                 "details": getattr(exc, "details", None)}
     after = mtime()
     out = dict(reply) if isinstance(reply, dict) else {"reply": reply}
@@ -264,6 +254,13 @@ async def _save_library_verified(bridge, library_path: str) -> dict:
     out["written_to_disk"] = (bool(out["mtime_changed"])
                               or bool(out.get("file_age_changed")))
     out["ok"] = out["written_to_disk"] and not out.get("still_modified")
+    if not out["ok"]:
+        out["reason"] = (
+            "the document still reads modified after the save"
+            if out["written_to_disk"] else
+            "the file did not change on disk: Altium declines a save while "
+            "a command is active, without raising. Run "
+            "app_exit_active_command and save again")
     return out
 
 
@@ -273,9 +270,10 @@ def _rename_ops(renames) -> tuple[list[str], list[dict]]:
     A name is REFUSED, never sanitised. ``payload_safe`` turns ';' into ','
     and sends the result, which is right for free text and wrong for a
     name: the footprint would be renamed to something nobody asked for.
+    The rule is ``name_wire_problem``'s, shared with every builder that
+    sends a name: separators, a trailing '~' (it runs into the '~~'
+    after ``new=``), and characters the bridge flattens.
     """
-    from ..bridge.payload import unsendable_chars
-
     ops: list[str] = []
     refused: list[dict] = []
     for item in renames or []:
@@ -289,14 +287,10 @@ def _rename_ops(renames) -> tuple[list[str], list[dict]]:
         for key, value in (("from", old), ("to", new)):
             if not value.strip():
                 problems.append(f"'{key}' is empty")
-            elif ";" in value or "~~" in value:
-                problems.append(f"'{key}' contains ';' or '~~', which split "
-                                f"the batch payload")
-            else:
-                bad = unsendable_chars(value)
-                if bad:
-                    problems.append(f"'{key}' contains {bad!r}, which the "
-                                    f"bridge flattens to '?'")
+                continue
+            why = name_wire_problem(value)
+            if why:
+                problems.append(f"'{key}' {why}")
         if not problems and old == new:
             problems.append("'from' and 'to' are the same name")
         if problems:
@@ -435,6 +429,12 @@ def _mil(v: object) -> str:
     return str(int(r)) if r == int(r) else f"{r:.4f}".rstrip("0").rstrip(".")
 
 
+#: Every numeric field a pad dict may carry, checked before formatting.
+_PAD_NUMBER_KEYS = ("x", "y", "x_size", "y_size", "hole_size",
+                    "corner_radius", "rotation", "slot_length",
+                    "mask_expansion", "paste_expansion", "hole_rotation")
+
+
 def _pads_payload(pads: list[dict[str, Any]],
                   allow_blank: bool = False) -> tuple[str, int]:
     """Build the ``pads`` batch payload, and count what was dropped.
@@ -454,6 +454,11 @@ def _pads_payload(pads: list[dict[str, Any]],
     Pascal writes whatever Name it is given; the drop was only ever a
     guard against a forgotten designator, and a fiducial or mechanical
     pad is unnamed on purpose.
+
+    A pad whose number field is not a finite number, or whose plated /
+    allow_blank_designator is not a boolean, is dropped and counted the
+    same way: sending it would raise here or write a value nobody asked
+    for.
     """
     op_strs: list[str] = []
     skipped_invalid = 0
@@ -462,9 +467,26 @@ def _pads_payload(pads: list[dict[str, Any]],
         # designator or layer carrying ";", "=" or "~~" reshapes the
         # payload and lands the pad somewhere else.
         desig = _payload_safe(str(p.get("designator", "")).strip())
-        blank_ok = (allow_blank or p.get("allow_blank_designator") is True
-                    or p.get("plated") is False)
+        # Booleans by the one rule (wire_bool): truthiness read the string
+        # "false" as true and made an NPTH hole plated. A flag that is not
+        # a boolean drops the pad, counted, rather than guessing.
+        plated = (None if p.get("plated") is None
+                  else wire_bool(p.get("plated")))
+        blank_flag = (None if p.get("allow_blank_designator") is None
+                      else wire_bool(p.get("allow_blank_designator")))
+        if ((p.get("plated") is not None and plated is None)
+                or (p.get("allow_blank_designator") is not None
+                    and blank_flag is None)):
+            skipped_invalid += 1
+            continue
+        blank_ok = allow_blank or blank_flag is True or plated is False
         if not desig and not blank_ok:
+            skipped_invalid += 1
+            continue
+        # Every number by the one guard: _mil on NaN raised a traceback,
+        # and a bool or an infinity is never a pad dimension.
+        if any(p.get(k) is not None and _num(p.get(k)) is None
+               for k in _PAD_NUMBER_KEYS):
             skipped_invalid += 1
             continue
         fields = [
@@ -480,8 +502,8 @@ def _pads_payload(pads: list[dict[str, Any]],
             f"layer={_payload_safe(p.get('layer', 'TopLayer'))}",
         ]
         # optional pad features (patch 2): emitted only when given
-        if p.get('plated') is not None:
-            fields.append(f"plated={'true' if p['plated'] else 'false'}")
+        if plated is not None:
+            fields.append(f"plated={'true' if plated else 'false'}")
         if p.get('hole_type'):
             fields.append(f"hole_type={_payload_safe(p['hole_type'])}")
         for key in ('slot_length', 'mask_expansion', 'paste_expansion'):
@@ -519,24 +541,6 @@ _PAD_SHAPE_WORDS = {
     "roundrectangle": "roundrect", "rounded_rectangle": "roundrect",
 }
 _PAD_HOLE_TYPES = ("round", "square", "slot")
-
-
-def _finite(value: object) -> "float | None":
-    """A finite number from a JSON-ish value, else None.
-
-    Booleans are refused even though Python counts them as ints: a
-    ``"x": true`` is a caller mistake, and sending it as 1 mil would
-    move a pad by a mil and report success.
-    """
-    if isinstance(value, bool):
-        return None
-    try:
-        f = float(value)
-    except (TypeError, ValueError):
-        return None
-    if f != f or f in (float("inf"), float("-inf")):
-        return None
-    return f
 
 
 def _pad_index(value: object) -> "int | None":
@@ -583,7 +587,13 @@ def _pad_edits_payload(edits: object,
             problems.append(f"{where}: designator is required (\"\" selects "
                             f"the unnamed pads)")
             continue
-        desig = _payload_safe(str(e["designator"]).strip())
+        # A designator SELECTS the pad, so a separator is refused, never
+        # substituted: 'A;B' sanitised to 'A,B' edits a pad nobody named.
+        desig = str(e["designator"]).strip()
+        why = name_wire_problem(desig)
+        if why:
+            problems.append(f"{where}: designator {desig!r} {why}; refused")
+            continue
         fields = [f"designator={desig}"]
         idx = None
         if e.get("index") is not None:
@@ -604,7 +614,7 @@ def _pad_edits_payload(edits: object,
         for key in _PAD_EDIT_MILS + _PAD_EDIT_DEGREES:
             if e.get(key) is None:
                 continue
-            v = _finite(e[key])
+            v = _num(e[key])
             if v is None:
                 problems.append(f"{where}: {key} must be a number")
             elif key in ("x_size", "y_size", "slot_length") and v <= 0:
@@ -622,7 +632,7 @@ def _pad_edits_payload(edits: object,
             if isinstance(e[key], str) and e[key].strip().lower() == "rule":
                 fields.append(f"{key}=rule")
                 continue
-            v = _finite(e[key])
+            v = _num(e[key])
             if v is None:
                 problems.append(f"{where}: {key} must be a number in mils or "
                                 f"\"rule\"")
@@ -636,17 +646,18 @@ def _pad_edits_payload(edits: object,
             else:
                 fields.append(f"shape={canon}")
         if e.get("corner_radius") is not None:
-            cr = _finite(e["corner_radius"])
+            cr = _num(e["corner_radius"])
             if cr is None or not cr.is_integer() or not 0 <= cr <= 100:
                 problems.append(f"{where}: corner_radius is a whole "
                                 f"percentage, 0 to 100")
             else:
                 fields.append(f"corner_radius={int(cr)}")
         if e.get("plated") is not None:
-            if not isinstance(e["plated"], bool):
+            plated = wire_bool(e["plated"])
+            if plated is None:
                 problems.append(f"{where}: plated must be true or false")
             else:
-                fields.append(f"plated={'true' if e['plated'] else 'false'}")
+                fields.append(f"plated={'true' if plated else 'false'}")
         if e.get("hole_type") is not None:
             ht = str(e["hole_type"]).strip().lower()
             if ht not in _PAD_HOLE_TYPES:
@@ -659,11 +670,22 @@ def _pad_edits_payload(edits: object,
                 fields.append(f"hole_type={ht}")
         if e.get("layer") is not None and str(e["layer"]).strip():
             fields.append(f"layer={_payload_safe(str(e['layer']).strip())}")
+        blank_ok = allow_blank
+        if e.get("allow_blank_designator") is not None:
+            flag = wire_bool(e["allow_blank_designator"])
+            if flag is None:
+                problems.append(f"{where}: allow_blank_designator must be "
+                                f"true or false")
+            blank_ok = blank_ok or bool(flag)
         if "new_designator" in e and e["new_designator"] is not None:
-            new = _payload_safe(str(e["new_designator"]).strip())
-            if new:
+            new = str(e["new_designator"]).strip()
+            why = name_wire_problem(new)
+            if why:
+                problems.append(f"{where}: new_designator {new!r} {why}; "
+                                f"refused")
+            elif new:
                 fields.append(f"new_designator={new}")
-            elif allow_blank or e.get("allow_blank_designator") is True:
+            elif blank_ok:
                 fields.append("clear_designator=true")
             else:
                 problems.append(f"{where}: new_designator is blank; pass "
@@ -704,8 +726,19 @@ def _pad_selectors_payload(pads: object) -> tuple[str, list[str]]:
             problems.append(f"{where}: designator is required (\"\" selects "
                             f"the unnamed pads)")
             continue
-        fields = [f"designator={_payload_safe(str(p['designator']).strip())}"]
-        take_all = p.get("all") is True
+        desig = str(p["designator"]).strip()
+        why = name_wire_problem(desig)
+        if why:
+            problems.append(f"{where}: designator {desig!r} {why}; refused")
+            continue
+        fields = [f"designator={desig}"]
+        take_all = False
+        if p.get("all") is not None:
+            flag = wire_bool(p["all"])
+            if flag is None:
+                problems.append(f"{where}: all must be true or false")
+                continue
+            take_all = flag
         if p.get("index") is not None:
             idx = _pad_index(p["index"])
             if idx is None:
@@ -754,23 +787,10 @@ def _write_description_edits(descriptions: dict) -> tuple[str, str]:
     return str(batch_path), ""
 
 
-def _num(value: object) -> Optional[float]:
-    """A finite float, or None for anything that is not one.
-
-    Every footprint geometry field goes through here before ``_mil``.
-    ``float()`` on a caller's junk raises, which would hand an MCP client a
-    stack trace, and NaN or infinity would reach the Pascal as text that
-    ``StrToFloatDef`` answers with its DEFAULT, putting the primitive at the
-    origin while the call reports success. A bool is refused too: ``True``
-    is a number to Python and never a coordinate.
-    """
-    if isinstance(value, bool):
-        return None
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        return None
-    return out if math.isfinite(out) else None
+#: A finite float, or None for anything that is not one (bools included).
+#: Every footprint geometry field goes through here before ``_mil``; see
+#: bridge/payload.py finite_number for why each refusal matters.
+_num = finite_number
 
 
 def _tracks_payload(tracks: list[dict[str, Any]]) -> tuple[str, int]:
@@ -840,13 +860,21 @@ def _fills_payload(
         if rotation is None:
             skipped.append({"item": i, "reason": "rotation is not a number"})
             continue
+        # By the one boolean rule: truthiness read the string "false" as
+        # true and turned the fill into a keep-out.
+        keepout = (False if f.get("keepout") is None
+                   else wire_bool(f.get("keepout")))
+        if keepout is None:
+            skipped.append({"item": i, "reason": "keepout must be true or "
+                                                  "false"})
+            continue
         fields = [
             f"x1={_mil(coords[0])}", f"y1={_mil(coords[1])}",
             f"x2={_mil(coords[2])}", f"y2={_mil(coords[3])}",
             f"rotation={_mil(rotation)}",
             f"layer={_payload_safe(layer)}",
         ]
-        if f.get("keepout"):
+        if keepout:
             fields.append("keepout=true")
         op_strs.append(";".join(fields))
     return "~~".join(op_strs), skipped
@@ -949,6 +977,15 @@ def _pins_payload(pins: list[dict[str, Any]]) -> tuple[str, int]:
         if not desig:
             skipped_invalid += 1
             continue
+        # Flags by the one boolean rule (wire_bool): truthiness read the
+        # string "false" as true and hid the pin. A flag that is not a
+        # boolean drops the pin, counted, rather than guessing.
+        flags = {k: wire_bool(p[k]) for k in
+                 ("hidden", "show_name", "show_designator")
+                 if p.get(k) is not None}
+        if any(v is None for v in flags.values()):
+            skipped_invalid += 1
+            continue
         fields = [
             f"designator={desig}",
             f"name={name}",
@@ -958,7 +995,7 @@ def _pins_payload(pins: list[dict[str, Any]]) -> tuple[str, int]:
             f"rotation={round(p.get('rotation', 0))}",
             f"electrical_type="
             f"{_payload_safe(p.get('electrical_type', 'passive'))}",
-            f"hidden={'true' if p.get('hidden') else 'false'}",
+            f"hidden={'true' if flags.get('hidden') else 'false'}",
         ]
         if "owner_part_id" in p and p["owner_part_id"] is not None:
             fields.append(f"owner_part_id={int(p['owner_part_id'])}")
@@ -974,8 +1011,8 @@ def _pins_payload(pins: list[dict[str, Any]]) -> tuple[str, int]:
         # Altium's default alone, so False has to survive as the string
         # "false" rather than being folded into "not set".
         for key in ("show_name", "show_designator"):
-            if p.get(key) is not None:
-                fields.append(f"{key}={'true' if p[key] else 'false'}")
+            if key in flags:
+                fields.append(f"{key}={'true' if flags[key] else 'false'}")
         op_strs.append(";".join(fields))
     return "~~".join(op_strs), skipped_invalid
 
@@ -1006,9 +1043,15 @@ def _pin_edits_payload(pins: Any) -> tuple[str, list[str]]:
       leave the property alone. ``name=""`` is emitted as ``name=`` and
       clears the name; the Pascal tells it apart from no name field.
     * a separator inside ``designator``, ``new_designator`` or ``name`` is
-      refused, not substituted. The designator SELECTS the pin, and a
+      refused, not substituted, and so is a trailing '~'
+      (``name_wire_problem``). The designator SELECTS the pin, and a
       fragment such as ``1`` matches a real pin on most symbols, so the
       edit would land on the wrong one.
+
+    ``length`` and ``owner_part_id`` must be whole numbers (the Pascal
+    reads them as integers and refuses anything else, so rounding here
+    would only hide the refusal), and the three flags parse by
+    ``wire_bool``: the string "false" is false.
 
     Electrical words are NOT checked here: the Pascal asks the one shared
     chain (StrToPinElectrical) and refuses an unknown word per op, so the
@@ -1036,20 +1079,38 @@ def _pin_edits_payload(pins: Any) -> tuple[str, list[str]]:
             continue
         for key in ("designator", "new_designator", "name"):
             value = p.get(key)
-            if value is not None and (";" in str(value) or "~~" in str(value)):
+            why = "" if value is None else name_wire_problem(str(value))
+            if why:
                 problems.append(
-                    f"pins[{i}]: {key} {value!r} contains ';' or '~~', the "
-                    f"wire-format separators; a fragment could select or "
-                    f"name a different pin, so the call is refused")
-        try:
-            owner = (None if p.get("owner_part_id") is None
-                     else int(p["owner_part_id"]))
-            length = (None if p.get("length") is None
-                      else int(round(float(p["length"]))))
-        except (TypeError, ValueError):
-            problems.append(
-                f"pins[{i}] ({desig}): owner_part_id and length must be numbers")
-            continue
+                    f"pins[{i}]: {key} {value!r} {why}, so the call is "
+                    f"refused")
+        # Whole numbers by the house guard, never int()/round(): length=inf
+        # raised OverflowError past this check, True became part 1, and
+        # 12.7 was rounded to 13 where the Pascal (IsIntStr) would have
+        # refused it.
+        owner = length = None
+        if p.get("owner_part_id") is not None:
+            owner = whole_number(p["owner_part_id"])
+            if owner is None or owner < 0:
+                problems.append(f"pins[{i}] ({desig}): owner_part_id must be "
+                                f"a whole number, 0 or more")
+                continue
+        if p.get("length") is not None:
+            length = whole_number(p["length"])
+            if length is None or length <= 0:
+                problems.append(f"pins[{i}] ({desig}): length must be a "
+                                f"whole number of mils, greater than zero")
+                continue
+        flags: dict[str, bool] = {}
+        for key in ("show_name", "show_designator", "hidden"):
+            if p.get(key) is None:
+                continue
+            flag = wire_bool(p[key])
+            if flag is None:
+                problems.append(f"pins[{i}] ({desig}): {key} must be true or "
+                                f"false")
+            else:
+                flags[key] = flag
         fields = [f"designator={desig}"]
         if owner is not None:
             fields.append(f"owner_part_id={owner}")
@@ -1063,9 +1124,8 @@ def _pin_edits_payload(pins: Any) -> tuple[str, list[str]]:
         if p.get("electrical_type") is not None:
             fields.append(
                 f"electrical_type={_payload_safe(p['electrical_type'])}")
-        for key in ("show_name", "show_designator", "hidden"):
-            if p.get(key) is not None:
-                fields.append(f"{key}={'true' if p[key] else 'false'}")
+        for key, flag in flags.items():
+            fields.append(f"{key}={'true' if flag else 'false'}")
         if length is not None:
             fields.append(f"length={length}")
         ops.append(";".join(fields))
@@ -1844,17 +1904,38 @@ def register_library_tools(mcp):
             Dictionary confirming pad addition; ``shape_status`` says
             whether a roundrect read back ("confirmed") or not.
         """
+        # The same guards as the track, arc and text siblings: _mil on NaN
+        # raised a traceback, and a rotation sent raw reached StrToFloatDef
+        # as NaN/inf text and came back as its default.
+        nums = {"x": _num(x), "y": _num(y), "x_size": _num(x_size),
+                "y_size": _num(y_size), "hole_size": _num(hole_size),
+                "rotation": _num(rotation)}
+        bad = [k for k, v in nums.items() if v is None]
+        if bad:
+            return {"ok": False, "reason": (
+                f"not a finite number: {', '.join(bad)} (mils, and degrees "
+                f"for rotation)")}
+        if nums["x_size"] <= 0 or nums["y_size"] <= 0:
+            return {"ok": False, "reason": (
+                "x_size and y_size must be greater than zero")}
+        if nums["hole_size"] < 0:
+            return {"ok": False, "reason": (
+                "hole_size cannot be negative (0 makes the pad SMD)")}
+        cr = whole_number(corner_radius)
+        if cr is None or not 0 <= cr <= 100:
+            return {"ok": False, "reason": (
+                "corner_radius is a whole percentage, 0 to 100")}
         params: dict[str, Any] = {
             "designator": designator,
-            "x": _mil(x),
-            "y": _mil(y),
-            "x_size": _mil(x_size),
-            "y_size": _mil(y_size),
-            "hole_size": _mil(hole_size),
+            "x": _mil(nums["x"]),
+            "y": _mil(nums["y"]),
+            "x_size": _mil(nums["x_size"]),
+            "y_size": _mil(nums["y_size"]),
+            "hole_size": _mil(nums["hole_size"]),
             "shape": shape,
             "layer": layer,
-            "rotation": rotation,
-            "corner_radius": corner_radius,
+            "rotation": _mil(nums["rotation"]),
+            "corner_radius": cr,
         }
         if component_name:
             params["component_name"] = component_name
@@ -1934,8 +2015,9 @@ def register_library_tools(mcp):
         if not payload:
             return {
                 "error": ("No valid pads (every entry was missing a "
-                          "designator; pass allow_blank_designator=True "
-                          "for fiducials or mechanical pads)"),
+                          "designator, or carried a number or flag that is "
+                          "not one; pass allow_blank_designator=True for "
+                          "fiducials or mechanical pads)"),
                 "added": 0,
                 "total": len(pads),
                 "skipped_invalid": skipped_invalid,
@@ -1988,7 +2070,7 @@ def register_library_tools(mcp):
 
         Returns:
             Dict with ``success``, ``footprint``, ``layer`` and
-            ``pending_save`` (run ``app_save_all`` to write the file).
+            ``pending_save`` (run ``lib_save_library`` to write the file).
         """
         coords = [_num(v) for v in (x1, y1, x2, y2)]
         w = _num(width)
@@ -3049,7 +3131,7 @@ def register_library_tools(mcp):
                 bodies off the library's backing board. UNMEASURED and
                 off by default: see ``lib_delete_footprint_primitives``,
                 which shares the rule. Use it if a replaced placeholder
-                comes back after app_save_all and lib_reload_library.
+                comes back after lib_save_library and lib_reload_library.
                 ``replaced.board_removal`` reports what it found.
             align: where the body goes in X and Y.
                 ``"none"`` (default, the previous behaviour) moves it by
@@ -3125,9 +3207,9 @@ def register_library_tools(mcp):
             ``bbox_expected`` then, or save and lib_reload_library.
             ``move_mils``: the move applied, ``{dx, dy}``.
 
-            Nothing is saved: app_save_all writes the library.
-            lib_get_footprint_bodies lists every body on the footprint
-            afterwards.
+            Nothing is saved: lib_save_library(library_path) writes the
+            library. lib_get_footprint_bodies lists every body on the
+            footprint afterwards.
         """
         numbers = {
             "offset_x": offset_x, "offset_y": offset_y, "offset_z": offset_z,
@@ -3308,7 +3390,7 @@ def register_library_tools(mcp):
 
         d = Path(model_dir)
         if not d.is_dir():
-            return {"success": False, "error": f"not a directory: {model_dir}"}
+            return {"ok": False, "reason": f"not a directory: {model_dir}"}
         align = (align or "none").strip().lower()
         if align not in _FOOTPRINT_3D_ALIGN:
             return {"ok": False, "reason": (
@@ -3352,6 +3434,15 @@ def register_library_tools(mcp):
             }
             if remove_from_board:
                 link_params["remove_from_board"] = "true"
+            # EVERY link names the library. get_footprints above is a read,
+            # and the dispatcher puts the previous focus back after a read,
+            # so without this each link resolved against whatever document
+            # had focus: NO_PCBLIB on a sheet, or bodies (and, with
+            # replace, deletions) in a DIFFERENT PcbLib holding a footprint
+            # of the same name. Lib_Link3DModel focuses library_path and
+            # refuses when another document ends up in front.
+            if library_path:
+                link_params["library_path"] = library_path
             try:
                 res = await bridge.send_command_async(
                     "library.link_3d_model", link_params,
@@ -4310,8 +4401,9 @@ def register_library_tools(mcp):
 
         Returns:
             {"component", "kind_requested", "kind_before", "kind_after",
-             "ordinal_after"}. The edit is in memory; app_save_all writes
-            it. lib_get_component_details reports component_kind too.
+             "ordinal_after"}. The edit is in memory;
+            lib_save_library(library_path) writes it.
+            lib_get_component_details reports component_kind too.
         """
         canonical = canonical_component_kind(kind)
         if not str(component_name).strip():
@@ -4482,7 +4574,8 @@ def register_library_tools(mcp):
                   passive.
                 - show_name, show_designator (bool): label visibility.
                 - hidden (bool): hide the whole pin.
-                - length (number, mils, > 0).
+                - length (whole number of mils, > 0; 12.7 is refused,
+                  not rounded).
             library_path: optional .SchLib path; defaults to the focused lib.
 
         Returns:
@@ -4490,7 +4583,8 @@ def register_library_tools(mcp):
              "ops": [{"designator", "matched", "applied", "verified",
              "reason", "pins": [read-back of every changed pin]}]}. No pin
             changed at all is an error (NO_PIN_CHANGED) with the same
-            ops list in details. The edit is in memory until app_save_all.
+            ops list in details. The edit is in memory until
+            lib_save_library(library_path) writes it.
         """
         if not str(component_name).strip():
             return {"ok": False, "reason": "component_name is required"}
@@ -4763,8 +4857,8 @@ def register_library_tools(mcp):
         component is copied across libraries -- the source library is
         focused for the replicate, then the destination is focused and
         the clone is added there. The destination ends focused with the
-        new component selected. Save is deferred (call ``app_save_all`` to
-        flush).
+        new component selected. Save is deferred (call
+        ``lib_save_library`` on the destination to flush).
 
         Args:
             source_name: lib_ref of the component to copy.
@@ -5129,7 +5223,8 @@ def register_library_tools(mcp):
         """Delete one symbol from a schematic library (.SchLib).
 
         Removes the component whose LibReference is ``component_name`` and
-        marks the library dirty for deferred save (flushed by app_save_all).
+        marks the library dirty for deferred save (flushed by
+        lib_save_library).
         Deletes a single named part; if the name is not found the call
         errors (COMPONENT_NOT_FOUND) rather than silently doing nothing.
         There is no wildcard mass-delete.
@@ -5380,7 +5475,7 @@ def register_library_tools(mcp):
             x_mil/y_mil, sizes, shape, corner_pct, hole fields, plated,
             layer, mode, and for a through-hole pad its ``bottom`` and
             ``mid`` copper. The library is MARKED dirty, not written:
-            ``app_save_all`` flushes it.
+            ``lib_save_library(library_path)`` flushes it.
         """
         if not str(footprint_name or "").strip():
             return {"ok": False, "reason": "footprint_name is required"}
@@ -5437,8 +5532,8 @@ def register_library_tools(mcp):
             {library, footprint, removed, selectors, results, pads_before,
              pads_after, still_listed, double_listed, board_removal,
              written_to_disk: false, pending_save}. still_listed must be
-            0. The library is MARKED dirty, not written: ``app_save_all``
-            flushes it.
+            0. The library is MARKED dirty, not written:
+            ``lib_save_library(library_path)`` flushes it.
         """
         if not str(footprint_name or "").strip():
             return {"ok": False, "reason": "footprint_name is required"}
@@ -5494,8 +5589,8 @@ def register_library_tools(mcp):
             {library, updated, unchanged, mismatched, missing_count,
              missing, mismatches, results: [{footprint, old, read_back,
              changed}], written_to_disk: false, pending_save}. The
-            library is MARKED dirty, not written: ``app_save_all``
-            flushes it.
+            library is MARKED dirty, not written:
+            ``lib_save_library(library_path)`` flushes it.
         """
         name = str(footprint_name or "").strip()
         params: dict[str, Any] = {}
@@ -5544,8 +5639,8 @@ def register_library_tools(mcp):
 
         Finds the footprint by name, removes and deregisters it, and MARKS
         the .PcbLib dirty. It does NOT write to disk: this bridge defers
-        saves, and `app_save_all` (or `proj_save` on the LibPkg) is what
-        flushes them. Reported: this said it saved, the footprint was still
+        saves, and `lib_save_library` (this library only) is what flushes
+        them. Reported: this said it saved, the footprint was still
         in the file and the timestamp unchanged until an explicit save.
 
         Deletes a single named footprint; if the name is not found the call
@@ -5698,7 +5793,8 @@ def register_library_tools(mcp):
         clears every other model of that type, then reads all of them back.
         Models of other types (SIM, PCB3DLib) are left alone.
 
-        Changes the library only (in memory; app_save_all writes it).
+        Changes the library only (in memory; lib_save_library writes
+        it).
         Placed instances follow on the next Update From Libraries.
 
         Args:
@@ -5740,8 +5836,8 @@ def register_library_tools(mcp):
         Errors if footprint_name is not found or new_name already exists in
         the library.
 
-        MARKS the .PcbLib dirty; it does not write. Call `app_save_all` to
-        flush, and check what it reports actually reached disk.
+        MARKS the .PcbLib dirty; it does not write. Call
+        `lib_save_library` to flush, and check written_to_disk in its reply.
 
         Args:
             footprint_name: the current footprint name.
@@ -5787,7 +5883,9 @@ def register_library_tools(mcp):
         Returns:
             ``{ok, written_to_disk, mtime_changed, was_modified,
             still_modified, file_age_before, file_age_after,
-            library_path}``.
+            library_path}``, plus ``reason`` whenever ``ok`` is false
+            (the house refusal shape; ``code`` and ``details`` when the
+            save command itself was refused).
         """
         return await _save_library_verified(get_bridge(), library_path)
 
@@ -5825,8 +5923,11 @@ def register_library_tools(mcp):
         """
         ops, refused = _rename_ops(renames)
         if not ops:
-            return {"error": "no rename could be sent", "renamed": 0,
-                    "refused": refused}
+            first = (refused[0].get("reason") if refused
+                     else "renames is empty")
+            return {"ok": False,
+                    "reason": f"no rename could be sent: {first}",
+                    "renamed": 0, "refused": refused}
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "library.rename_footprints",
@@ -5924,7 +6025,12 @@ def register_library_tools(mcp):
             ``report``: per CSV path, ``fatal``, ``errors``, ``warnings``
             and the generator's ``messages``. ``runs``: per CSV, what the
             form showed (options, Output Folder, buttons), how the file
-            name went in, how the run ended, whether the bridge came back.
+            name went in, how the run ended, whether the bridge came back,
+            and ``run_process_reply`` (what the RunProcess handler itself
+            answered). An exception inside the dialog driver is a stop at
+            stage ``dialog`` with ``error``, never a traceback; a complaint
+            from the handler on a run that otherwise worked is listed
+            under ``warnings``. A CSV listed twice is refused by preflight.
         """
         from . import uiauto as _uiauto
         from .ipc_batch_flow import run_batch
@@ -5939,11 +6045,17 @@ def register_library_tools(mcp):
                 return {"ok": False, "reason": (
                     "driving the batch generator needs pywin32 on Windows")}
             if windows.dialogs(pid) or windows.is_blocked(pid):
-                return {"ok": False, "stopped": {"stage": "start", "reason": (
-                    "a dialog is already open in Altium. Close it first: "
-                    "the run cannot tell its own dialogs from one that was "
-                    "already there"),
-                    "dialogs": dialog_report.report(pid)}}
+                reason = ("a dialog is already open in Altium. Close it "
+                          "first: the run cannot tell its own dialogs from "
+                          "one that was already there")
+                # In an executor, as run_batch does it: the report can run
+                # Windows OCR (about 2 s a dialog), which would stall the
+                # MCP event loop if called inline.
+                dialogs = await asyncio.get_running_loop().run_in_executor(
+                    None, dialog_report.report, pid)
+                return {"ok": False, "reason": reason,
+                        "stopped": {"stage": "start", "reason": reason,
+                                    "dialogs": dialogs}}
         return await run_batch(
             get_bridge(), pid, [str(p) for p in csv_paths], library_path,
             report_dir=report_dir, allow_existing=allow_existing,
@@ -6456,7 +6568,7 @@ def register_library_tools(mcp):
         LibReference (each independently switchable). This is the
         minimal fast path of what lib_normalize_implementations does
         inside its full model sweep, when you only need the provenance
-        cleaned, use this. Deferred save: flush with app_save_all.
+        cleaned, use this. Deferred save: flush with lib_save_library.
 
         Args:
             library_path: absolute .SchLib path; empty = focused library.

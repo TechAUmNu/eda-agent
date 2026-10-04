@@ -7,7 +7,6 @@ component placement, trace lengths, layer stackup, board outline, etc.
 """
 
 import json
-import math
 from typing import Any, Optional, Union
 
 from pydantic import ValidationError
@@ -26,7 +25,7 @@ from ..placement import (
 )
 from .bulk_hints import BulkHintTracker
 from .datasheet_hints import tag_response
-from ..bridge.payload import payload_safe
+from ..bridge.payload import non_finite, payload_safe
 
 
 def _build_objective_report(
@@ -327,20 +326,10 @@ _TERMINATION_DEFAULTS = {
 _BOARD_3D_ALIGN = ("center", "none")
 
 
-def _non_finite(values: dict) -> list:
-    """Names whose value is not a finite number.
-
-    The same guard lib_link_3d_model applies, for the same reason: NaN
-    is not JSON, and an unparsable value reaches the handler as 0.
-    """
-    bad = []
-    for name, value in values.items():
-        try:
-            if not math.isfinite(float(value)):
-                bad.append(name)
-        except (TypeError, ValueError):
-            bad.append(name)
-    return bad
+#: The same guard lib_link_3d_model applies, from the one copy in
+#: bridge/payload.py: NaN is not JSON, and an unparsable value reaches the
+#: handler as 0.
+_non_finite = non_finite
 
 
 def register_pcb_tools(mcp):

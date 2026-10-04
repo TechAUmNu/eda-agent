@@ -10,7 +10,8 @@ a pass-through layer for object iteration, property access, and process executio
 import difflib
 import re
 from typing import Any, Optional
-from ..bridge.payload import payload_safe
+from ..bridge.payload import (finite_number, name_wire_problem,
+                              payload_safe, whole_number)
 from ..bridge import get_bridge
 from ..safety import refuse_process, untrusted_text_note
 from .pin_hints import pin_location_hint
@@ -173,18 +174,24 @@ def no_erc_targets_payload(targets: Any) -> tuple[str, list[str]]:
             if not (desig and pin):
                 problems.append(f"targets[{i}]: designator and pin go together")
                 continue
-            if any(";" in v or "~~" in v for v in (desig, pin)):
+            why = name_wire_problem(desig) or name_wire_problem(pin)
+            if why:
                 problems.append(
-                    f"targets[{i}]: {desig!r}/{pin!r} contains ';' or '~~', "
-                    f"the wire-format separators; refused")
+                    f"targets[{i}]: {desig!r}/{pin!r} {why}; refused")
                 continue
             ops.append(f"designator={desig};pin={pin}")
             continue
-        try:
-            ops.append(f"x={int(t['x'])};y={int(t['y'])}")
-        except (KeyError, TypeError, ValueError):
+        # Whole mils by the house guard. int() truncated 12.7 to 12 and
+        # turned True into 1, and an infinity raised OverflowError past
+        # the except; the Pascal reads these with StrToIntDef.
+        x = whole_number(t.get("x"))
+        y = whole_number(t.get("y"))
+        if x is None or y is None:
             problems.append(
-                f"targets[{i}]: give designator + pin, or integer x + y")
+                f"targets[{i}]: give designator + pin, or whole-number "
+                f"x + y in mils")
+            continue
+        ops.append(f"x={x};y={y}")
     return "~~".join(ops), problems
 
 
@@ -236,6 +243,18 @@ _NO_ERC_POSITION_KEYS = frozenset({
 })
 
 
+def _mil_point(x: object, y: object) -> Optional[tuple[int, int]]:
+    """A position as whole mils, the same way for every source, or None.
+
+    ``round`` on both coordinates, matching the Pascal's CoordToMils
+    (Round), so a live marker and its saved record land on one key.
+    """
+    fx, fy = finite_number(x), finite_number(y)
+    if fx is None or fy is None:
+        return None
+    return round(fx), round(fy)
+
+
 def saved_no_erc_report(path: str, live: list[dict[str, Any]],
                         truncated: bool = False) -> dict[str, Any]:
     """What the SAVED .SchDoc says about every No-ERC marker on a sheet.
@@ -259,16 +278,28 @@ def saved_no_erc_report(path: str, live: list[dict[str, Any]],
     for rec in records:
         if rec.get("RECORD") != "22":
             continue
-        x = _schdoc_mils(rec, "Location.X")
-        y = _schdoc_mils(rec, "Location.Y")
-        if x == x and y == y:          # not NaN
-            saved.add((round(x), round(y)))
+        point = _mil_point(_schdoc_mils(rec, "Location.X"),
+                           _schdoc_mils(rec, "Location.Y"))
+        if point is not None:
+            saved.add(point)
         fields = {k: v for k, v in rec.items()
                   if k.upper() not in _NO_ERC_POSITION_KEYS}
         sig = "|".join(f"{k}={fields[k]}" for k in sorted(fields))
         variants[sig] = variants.get(sig, 0) + 1
-    in_memory = {(int(m.get("x", 0)), int(m.get("y", 0)))
-                 for m in live or [] if isinstance(m, dict)}
+    # BOTH SIDES THROUGH ONE NORMALISER. The saved side was rounded and
+    # the live side truncated, so a marker at a fractional mil (an
+    # off-grid pin end) appeared in both difference lists, reading as
+    # unsaved AND lost; a None coordinate raised.
+    in_memory = set()
+    unreadable_live = 0
+    for m in live or []:
+        if not isinstance(m, dict):
+            continue
+        point = _mil_point(m.get("x"), m.get("y"))
+        if point is None:
+            unreadable_live += 1
+        else:
+            in_memory.add(point)
     report: dict[str, Any] = {
         "available": True,
         "path": path,
@@ -277,6 +308,8 @@ def saved_no_erc_report(path: str, live: list[dict[str, Any]],
         "in_memory_not_saved": sorted([list(p) for p in in_memory - saved]),
         "saved_not_in_memory": sorted([list(p) for p in saved - in_memory]),
     }
+    if unreadable_live:
+        report["unreadable_live_markers"] = unreadable_live
     if truncated:
         report["note"] = ("the live list was truncated by limit, so "
                           "saved_not_in_memory may name listed-out markers; "
@@ -1944,7 +1977,8 @@ def register_generic_tools(mcp):
 
         Each target is {"designator": "U7", "pin": "23"} (preferred: the
         marker lands on that pin's electrical end, and never on a phantom
-        pin of an undrawn sub-part) or {"x": ..., "y": ...} in mils. A
+        pin of an undrawn sub-part) or {"x": ..., "y": ...} in whole
+        mils (12.7 is refused, not truncated). A
         point that already carries a marker is skipped, so a re-run does
         not stack duplicates. Use this rather than obj_batch_create with
         hand-computed coordinates.

@@ -162,11 +162,15 @@ Begin
 
     { EVERY DEFERRED SAVE PASSES THROUGH HERE, which is why the follow-up
       is noted here rather than in the forty-odd handlers that call it.
-      The edit is real in memory and absent from disk until app_save_all
+      The edit is real in memory and absent from disk until a save
       runs, and a caller who does not know that sees a tool that reported
-      success and changed no file. }
-    NoteNextStep('This edit is in memory only. Run app_save_all to write '
-        + 'it to disk, and check still_dirty in the reply.');
+      success and changed no file. lib_save_library is named, not
+      app_save_all: that one rewrites every open sheet with fresh
+      UniqueIDs, which churns the owner's version control. }
+    NoteNextStep('This edit is in memory only. Run lib_save_library '
+        + 'with the library path to write just this library, and check '
+        + 'written_to_disk in the reply (app_save_all also rewrites '
+        + 'every open sheet).');
 
     { MARK THE LIBRARY THAT WAS EDITED, NOT WHATEVER HAPPENS TO BE FOCUSED.
       This used to dirty Workspace.DM_FocusedDocument and ignore the SchLib
@@ -197,8 +201,8 @@ Begin
               cannot be distinguished from success afterwards. Say so
               instead. }
             NoteNextStep('The edited library is not open as a document, so '
-                + 'it could not be flagged for saving and app_save_all will '
-                + 'skip it. Open it first, then repeat the edit.');
+                + 'it could not be flagged for saving and no save will '
+                + 'write it. Open it first, then repeat the edit.');
     End
     Else
         NoteNextStep('The edited library did not report its own path, so it '
@@ -2567,8 +2571,10 @@ Begin
     End;
 
     MarkDocDirtyByPath(PcbLib.Board.FileName);
-    NoteNextStep('This edit is in memory only. Run app_save_all to write '
-        + 'it to disk, and check still_dirty in the reply.');
+    NoteNextStep('This edit is in memory only. Run lib_save_library '
+        + 'with the library path to write just this library, and check '
+        + 'written_to_disk in the reply (app_save_all also rewrites '
+        + 'every open sheet).');
     { The RESOLVED layer, named the way the stack names it, so a renamed or }
     { Mechanical17+ layer does not echo as GetLayerString's 'Unknown'.     }
     LayerName := ResolveLayerName(PcbLib.Board, Layer);
@@ -2669,8 +2675,10 @@ Begin
 
     MarkDocDirtyByPath(PcbLib.Board.FileName);
     If Added > 0 Then
-        NoteNextStep('This edit is in memory only. Run app_save_all to write '
-            + 'it to disk, and check still_dirty in the reply.');
+        NoteNextStep('This edit is in memory only. Run lib_save_library '
+            + 'with the library path to write just this library, and check '
+            + 'written_to_disk in the reply (app_save_all also rewrites '
+            + 'every open sheet).');
 
     Result := BuildSuccessResponse(RequestId,
         '{"added":' + IntToStr(Added) + ',"failed":' + IntToStr(Failed)
@@ -2752,8 +2760,10 @@ Begin
     End;
 
     MarkDocDirtyByPath(PcbLib.Board.FileName);
-    NoteNextStep('This edit is in memory only. Run app_save_all to write '
-        + 'it to disk, and check still_dirty in the reply.');
+    NoteNextStep('This edit is in memory only. Run lib_save_library '
+        + 'with the library path to write just this library, and check '
+        + 'written_to_disk in the reply (app_save_all also rewrites '
+        + 'every open sheet).');
     { The RESOLVED layer, named the way the stack names it, so a renamed or }
     { Mechanical17+ layer does not echo as GetLayerString's 'Unknown'.     }
     LayerName := ResolveLayerName(PcbLib.Board, Layer);
@@ -3010,8 +3020,10 @@ Begin
     End;
 
     MarkDocDirtyByPath(PcbLib.Board.FileName);
-    NoteNextStep('This edit is in memory only. Run app_save_all to write '
-        + 'it to disk, and check still_dirty in the reply.');
+    NoteNextStep('This edit is in memory only. Run lib_save_library '
+        + 'with the library path to write just this library, and check '
+        + 'written_to_disk in the reply (app_save_all also rewrites '
+        + 'every open sheet).');
     LayerName := ResolveLayerName(PcbLib.Board, Layer);
     If LayerName = '' Then LayerName := LayerStr;
 
@@ -3176,8 +3188,10 @@ Begin
     If Added > 0 Then
     Begin
         MarkDocDirtyByPath(PcbLib.Board.FileName);
-        NoteNextStep('This edit is in memory only. Run app_save_all to write '
-            + 'it to disk, and check still_dirty in the reply.');
+        NoteNextStep('This edit is in memory only. Run lib_save_library '
+            + 'with the library path to write just this library, and check '
+            + 'written_to_disk in the reply (app_save_all also rewrites '
+            + 'every open sheet).');
     End;
 
     Result := BuildSuccessResponse(RequestId,
@@ -3423,8 +3437,10 @@ Begin
     If Added > 0 Then
     Begin
         MarkDocDirtyByPath(PcbLib.Board.FileName);
-        NoteNextStep('This edit is in memory only. Run app_save_all to write '
-            + 'it to disk, and check still_dirty in the reply.');
+        NoteNextStep('This edit is in memory only. Run lib_save_library '
+            + 'with the library path to write just this library, and check '
+            + 'written_to_disk in the reply (app_save_all also rewrites '
+            + 'every open sheet).');
     End;
 
     Result := BuildSuccessResponse(RequestId,
@@ -6364,7 +6380,7 @@ Begin
         + JsonRaw('move_mils', MoveJson)));
 
     MarkDocDirtyByPath(PcbLib.Board.FileName);
-    NoteNextStep('The PcbLib is changed in memory only; app_save_all writes it. '
+    NoteNextStep('The PcbLib is changed in memory only; lib_save_library writes it. '
         + 'Compare body.bbox with frame.pads_bbox (same frame, mils) before '
         + 'trusting the placement, then look at it with obj_switch_view 3d. '
         + 'lib_get_footprint_bodies lists every body on the footprint.');
@@ -11177,7 +11193,7 @@ Begin
         ',"deleted":"' + EscapeJsonString(FpWanted) + '"' +
         ',"written_to_disk":false,"pending_save":true' +
         ',"note":"removed in memory and the library marked dirty. The file '
-        + 'still contains it until app_save_all or proj_save flushes."}';
+        + 'still contains it until lib_save_library flushes."}';
     Result := BuildSuccessResponse(RequestId, RespJson);
 End;
 
@@ -14187,7 +14203,7 @@ Begin
         MarkDocDirtyByPath(LibPath);
     End;
 
-    NoteStr := 'Removed in memory; app_save_all writes it. Proof it '
+    NoteStr := 'Removed in memory; lib_save_library writes it. Proof it '
         + 'persisted: lib_reload_library, then lib_probe_footprint.';
     If (DoubleListed > 0) And (Not FromBoard) Then
         NoteStr := NoteStr + ' ' + IntToStr(DoubleListed) + ' of these were '
@@ -15037,7 +15053,7 @@ Begin
         + JsonBool('written_to_disk', False) + ','
         + JsonBool('pending_save', AnyChange) + ','
         + JsonStr('note', 'Changed in memory and the library marked dirty. '
-            + 'app_save_all writes it; lib_get_pad_geometry after the save '
+            + 'lib_save_library writes it; lib_get_pad_geometry after the save '
             + 'and lib_reload_library is the proof it persisted.')));
 End;
 
@@ -15370,7 +15386,7 @@ Begin
         + JsonBool('written_to_disk', False) + ','
         + JsonBool('pending_save', Removed > 0) + ','
         + JsonStr('note', 'Removed in memory and the library marked dirty. '
-            + 'app_save_all writes it. Proof it persisted: after the save, '
+            + 'lib_save_library writes it. Proof it persisted: after the save, '
             + 'lib_reload_library then lib_get_pad_geometry must not list the '
             + 'pads. still_listed above must be 0.')));
 End;

@@ -185,7 +185,15 @@ def set_option(dialog, words: Iterable[str], want: bool, role: str) -> dict:
     if not controls.available():
         return {"ok": False, "words": list(words),
                 "reason": "reading dialog options needs comtypes"}
-    described = controls.describe_all(dialog)
+    # Both calls guarded, as snapshot() guards describe_all: they are known
+    # to raise, and this runs while the form blocks the bridge, so an
+    # escape here would end the run with no stage and the form left up.
+    # A failure is a miss, and a miss on the destination refuses Start.
+    try:
+        described = controls.describe_all(dialog)
+    except Exception as exc:                     # noqa: BLE001
+        return {"ok": False, "words": list(words), "role": role,
+                "reason": f"the dialog's options could not be read: {exc}"}
     found = _option(described, words, role)
     if found is None:
         return {"ok": False, "words": list(words), "role": role,
@@ -194,8 +202,14 @@ def set_option(dialog, words: Iterable[str], want: bool, role: str) -> dict:
                 "offered": [c.get("label") or c.get("name")
                             for c in described
                             if c.get("role") in ("checkbox", "radiobutton")]}
-    result = controls.set_checked(found["hwnd"], bool(want))
-    result["label"] = found.get("label") or found.get("name")
+    label = found.get("label") or found.get("name")
+    try:
+        result = controls.set_checked(found["hwnd"], bool(want))
+    except Exception as exc:                     # noqa: BLE001
+        return {"ok": False, "words": list(words), "role": role,
+                "label": label,
+                "reason": f"setting {label!r} raised: {exc}"}
+    result["label"] = label
     return result
 
 

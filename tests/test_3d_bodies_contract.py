@@ -451,3 +451,41 @@ def test_link_sends_a_layer_only_when_given(fake):
     asyncio.run(tools["lib_link_3d_model"](
         component_name="X", model_path="m.step", layer="Mechanical 13"))
     assert fake.commands[-1][1]["layer"] == "Mechanical 13"
+
+
+def test_auto_link_names_the_library_on_every_link(monkeypatch, tmp_path):
+    """get_footprints is a READ, and the dispatcher restores the previous
+    focus after a read, so a link without library_path resolved against
+    whatever document had focus: NO_PCBLIB on a sheet, or bodies (and, with
+    replace, deletions) in a different PcbLib with a same-named footprint.
+    """
+    from tests.conftest import install_bridge_fake
+
+    models = tmp_path / "models"
+    models.mkdir()
+    for name in ("SOIC8", "QFN16"):
+        (models / f"{name}.step").write_text("x")
+    bridge = _CapturingBridge(replies={"library.get_footprints": {
+        "footprints": [{"name": "SOIC8"}, {"name": "QFN16"}]}})
+    install_bridge_fake(monkeypatch, tmp_path, bridge)
+    lib = r"C:\libs\carrier.PcbLib"
+    asyncio.run(_tools()["lib_auto_link_3d_models"](
+        model_dir=str(models), library_path=lib, replace=True))
+    links = [p for c, p in bridge.commands if c == "library.link_3d_model"]
+    assert len(links) == 2
+    assert all(p.get("library_path") == lib for p in links), links
+
+    bridge.commands.clear()
+    asyncio.run(_tools()["lib_auto_link_3d_models"](model_dir=str(models)))
+    links = [p for c, p in bridge.commands if c == "library.link_3d_model"]
+    assert links and all("library_path" not in p for p in links), (
+        "without a library_path the focused library is used, as documented")
+
+
+def test_auto_link_refuses_a_missing_folder_in_the_house_envelope(fake,
+                                                                  tmp_path):
+    result = asyncio.run(_tools()["lib_auto_link_3d_models"](
+        model_dir=str(tmp_path / "nope")))
+    assert result["ok"] is False and "not a directory" in result["reason"]
+    assert "error" not in result and "success" not in result
+    assert fake.commands == []

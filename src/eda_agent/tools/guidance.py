@@ -64,6 +64,29 @@ _RECIPES: tuple[dict[str, Any], ...] = (
             "changes the pinout rather than the drawing."),
     },
     {
+        "task": "Save a library edit to disk",
+        "keywords": ("save", "write", "disk", "flush", "persist", "dirty",
+                     "pcblib", "schlib", "uniqueid", "churn"),
+        "when": (("save", "library"), ("write", "library", "disk")),
+        "document_kind": "library",
+        "backends": ("altium",),
+        "use": ["lib_save_library", "lib_reload_library"],
+        "avoid": [
+            ("app_save_all", "writes EVERY open document, and each save "
+                             "rewrites open SchDocs and PcbDocs with fresh "
+                             "parameter UniqueIDs, so one library edit "
+                             "churns every open sheet in version control"),
+        ],
+        "note": (
+            "Library edits are marked dirty, not written. lib_save_library "
+            "writes just the one .PcbLib or .SchLib and reports "
+            "written_to_disk from the file itself; ok false means Altium "
+            "declined (often an active command: app_exit_active_command, "
+            "then save again). lib_reload_library after the save proves the "
+            "edit is in the file. Keep app_save_all for saving several "
+            "documents at once on purpose."),
+    },
+    {
         "task": "Change or delete individual pads in a footprint",
         "keywords": ("pad", "pads", "roundrect", "corner", "radius", "drill",
                      "slot", "fiducial", "npth", "resize", "reshape"),
@@ -83,7 +106,8 @@ _RECIPES: tuple[dict[str, Any], ...] = (
             "one pad is refused without one. Coordinates are mils from the "
             "footprint origin, as lib_add_footprint_pads takes them. Every "
             "field written is read back, and the library is marked dirty, "
-            "not saved: app_save_all writes it."),
+            "not saved: lib_save_library writes just that library (not "
+            "app_save_all, which rewrites every open sheet)."),
     },
     {
         "task": "Add paste apertures, mask openings or keep-outs inside a "
@@ -110,7 +134,7 @@ _RECIPES: tuple[dict[str, Any], ...] = (
             "apertures over it. A keep-out on KeepOutLayer blocks every "
             "layer; one on a copper layer blocks that layer only and "
             "reports keepout_applied, because that write is not yet "
-            "verified live."),
+            "verified live. lib_save_library writes the library."),
     },
     {
         "task": ("Generate IPC-compliant land patterns with the IPC wizard "
@@ -405,7 +429,8 @@ _RECIPES: tuple[dict[str, Any], ...] = (
             "Name each pin by its CURRENT number and list only what changes. "
             "Pins on every sub-part are reachable without an @N scope. A "
             "renumber onto a number another pin holds is refused; swap "
-            "through a temporary number."),
+            "through a temporary number. lib_save_library writes the "
+            "library."),
     },
     {
         "task": "Make a library symbol a net tie, graphical part or jumper",
@@ -423,7 +448,8 @@ _RECIPES: tuple[dict[str, Any], ...] = (
         "note": (
             "Kinds: standard, mechanical, graphical, net_tie_bom, "
             "net_tie_no_bom, standard_no_bom, jumper. Placed parts follow on "
-            "the next Update From Libraries."),
+            "the next Update From Libraries. lib_save_library writes the "
+            "library."),
     },
     {
         "task": "ERC still reports pins with No-ERC markers, or deleted objects persist",

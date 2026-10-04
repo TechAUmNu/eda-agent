@@ -41,13 +41,13 @@ import asyncio
 import functools
 import json
 import os
-import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from ..atomicfile import replace_with_retry
+from ..bridge.altium_bridge import PROTOCOL_VERSION
 from ..libimport import ipc_batch as files
-from ..ui import dialog_report, ipc_batch_dialog, windows
+from ..ui import dialog_report, ipc_batch_dialog
 
 #: The extension's batch command (FootprintWizard.rcs: Command=
 #: 'PCB:BatchPCBLibCreate', Caption 'IPC Compliant Footprints Batch
@@ -70,6 +70,83 @@ def _failure(command: str, exc: BaseException) -> dict:
     return {"command": command, "error": str(exc),
             "code": getattr(exc, "code", type(exc).__name__),
             "details": getattr(exc, "details", None)}
+
+
+def _screen_report(pid: int) -> dict:
+    """``dialog_report.report``, which never raises here.
+
+    Called on the way OUT of a stop, so an exception from it (an OCR
+    failure, a window that vanished mid-read) would replace the stop
+    record with a bare traceback, which is the one thing a stop exists
+    to prevent.
+    """
+    try:
+        return dialog_report.report(pid)
+    except Exception as exc:                     # noqa: BLE001
+        return {"error": f"the screen could not be read: {exc}"}
+
+
+def _form_still_open(pid: int) -> bool:
+    """Whether the batch form is still up. True when that cannot be read:
+    a bridge call made behind an open form only sits until it times out,
+    so "unknown" is answered the safe way."""
+    try:
+        return ipc_batch_dialog.find_batch_dialog(pid) is not None
+    except Exception:                            # noqa: BLE001
+        return True
+
+
+def _drive_one_reporting(pid: int, csv_path: str, dirs: list,
+                         **kwargs) -> dict:
+    """``drive_one``, with any exception turned into a stop record.
+
+    drive_one runs in an executor while RunProcess is blocked behind the
+    form it drives, so an exception escaping it (a disabled-button race in
+    windows.click, an accessibility read failing, OCR in a dialog report)
+    used to end the whole call as a traceback with the form still up, the
+    bridge still blocked and nothing saying so.
+    """
+    try:
+        return ipc_batch_dialog.drive_one(pid, csv_path, dirs, **kwargs)
+    except Exception as exc:                     # noqa: BLE001
+        return {"csv": csv_path, "ok": False, "stage": "dialog",
+                "reason": (f"the dialog driver raised "
+                           f"{type(exc).__name__}: {exc}"),
+                "error": _failure("ipc_batch_dialog.drive_one", exc),
+                "batch_dialog_open": _form_still_open(pid)}
+
+
+def _reply_record(reply) -> dict:
+    """What the RunProcess handler answered, kept rather than discarded.
+
+    Before, only ``reply is not None`` was looked at, so a handler error
+    (unknown process, a refusal) surfaced as a run that stopped at 'open'
+    with nothing saying why no form appeared.
+    """
+    rec: dict = {"success": getattr(reply, "success", None),
+                 "error": getattr(reply, "error", None),
+                 "data": getattr(reply, "data", None)}
+    version = getattr(reply, "protocol_version", 0)
+    if version and version != PROTOCOL_VERSION:
+        rec["protocol_mismatch"] = {"client": PROTOCOL_VERSION,
+                                    "server": version}
+    return rec
+
+
+def _reply_problem(rec: dict) -> str:
+    """The handler's own words when it did not succeed, else ""."""
+    parts = []
+    if rec.get("success") is False:
+        err = rec.get("error") if isinstance(rec.get("error"), dict) else {}
+        code = err.get("code") or "an error"
+        message = err.get("message") or ""
+        parts.append(f"RunProcess answered {code}"
+                     + (f": {message}" if message else ""))
+    if rec.get("protocol_mismatch"):
+        mm = rec["protocol_mismatch"]
+        parts.append(f"the Altium script speaks protocol {mm['server']}, "
+                     f"this server {mm['client']}; reload the script")
+    return "; ".join(parts)
 
 
 def _load_state(workspace_dir: Path) -> dict:
@@ -166,6 +243,7 @@ def preflight(csv_paths: list, library_path: str) -> dict:
                                  f"PcbLib already saved on disk: the run "
                                  f"ends with a reload from that file")})
     owner: dict = {}
+    seen_paths: dict = {}
     for raw in csv_paths or []:
         path = str(raw)
         if not os.path.isabs(path):
@@ -176,6 +254,21 @@ def preflight(csv_paths: list, library_path: str) -> dict:
                                      "a relative name against its own "
                                      "folder, not this server's")})
             continue
+        # The same file twice: the duplicate-name check below compares
+        # names across DIFFERENT files, and the already-present check only
+        # sees the library as it was before the call, so the second run
+        # would regenerate the first run's names and stop mid-run on the
+        # generator's 'already exists' prompt, with the bridge blocked.
+        key = os.path.normcase(os.path.abspath(path))
+        if key in seen_paths:
+            findings.append({"csv": path, "problem": "duplicate_csv",
+                             "severity": "error",
+                             "why": (f"listed more than once (also as "
+                                     f"{seen_paths[key]!r}); a second run "
+                                     f"would stop on the generator's "
+                                     f"'already exists' prompt")})
+            continue
+        seen_paths[key] = path
         plan = files.parse_batch_csv(path)
         plans.append(plan)
         findings.extend(plan["findings"])
@@ -271,7 +364,7 @@ async def run_batch(bridge, pid: int, csv_paths: list, library_path: str, *,
                             os.path.join(os.path.dirname(csv_path),
                                          "Output")) if d]
         ui = await loop.run_in_executor(None, functools.partial(
-            ipc_batch_dialog.drive_one, pid, csv_path, dirs,
+            _drive_one_reporting, pid, csv_path, dirs,
             dialog_timeout=dialog_timeout, run_timeout=run_timeout,
             open_report=open_report, may_steal_focus=may_steal_focus))
         rec["dialog"] = ui
@@ -284,7 +377,9 @@ async def run_batch(bridge, pid: int, csv_paths: list, library_path: str, *,
                               "csv": csv_path, "reason": ui.get("reason"),
                               "bridge_blocked": True,
                               "dialogs": await loop.run_in_executor(
-                                  None, dialog_report.report, pid)}
+                                  None, _screen_report, pid)}
+            if ui.get("error"):
+                out["stopped"]["error"] = ui["error"]
             out["next_step"] = (
                 "answer or close the dialog in Altium (app_list_open_dialogs "
                 "and app_press_dialog_button work while the bridge is "
@@ -300,14 +395,28 @@ async def run_batch(bridge, pid: int, csv_paths: list, library_path: str, *,
                 f"the batch form is gone but the RunProcess that opened it "
                 f"has not returned within {engine_timeout:g}s"),
                 "dialogs": await loop.run_in_executor(
-                    None, dialog_report.report, pid)}
+                    None, _screen_report, pid)}
             return out
+        rec["run_process_reply"] = _reply_record(reply)
+        handler_problem = _reply_problem(rec["run_process_reply"])
 
         if not ui.get("ok"):
+            reason = ui.get("reason") or ""
+            if handler_problem:
+                reason = (f"{reason}; {handler_problem}" if reason
+                          else handler_problem)
             out["stopped"] = {"stage": ui.get("stage", "dialog"),
-                              "csv": csv_path, "reason": ui.get("reason")}
+                              "csv": csv_path, "reason": reason,
+                              "run_process_reply": rec["run_process_reply"]}
+            if ui.get("error"):
+                out["stopped"]["error"] = ui["error"]
             error_seen = True
             break
+        if handler_problem:
+            # The form ran and its report decides the outcome below, but
+            # the handler's complaint is not thrown away.
+            out.setdefault("warnings", []).append(
+                {"csv": csv_path, "warning": handler_problem})
 
         found = ui.get("report")
         if found is None:
