@@ -1328,6 +1328,178 @@ Begin
     Try Result := Footprint.Y; Except End;
 End;
 
+{..............................................................................}
+{ PAD SHAPE ON EVERY COPPER LAYER                                              }
+{                                                                              }
+{ THE THROUGH-HOLE ROUNDRECT BUG. The add handlers wrote a rounded rectangle   }
+{ with SetState_StackShapeOnLayer(Pad.Layer, ...). For an SMD pad Pad.Layer is }
+{ a copper layer and that works. For a drilled pad it is eMultiLayer, which is }
+{ not an entry of the pad stack at all, and Altium IGNORES an out-of-stack     }
+{ layer without raising. MEASURED 2026-10-03 on the multiviewer carrier        }
+{ library: header pin 1 asked for as roundrect read back as a plain round pad  }
+{ from both the saved file and lib_get_pad_geometry. The fix writes the stack  }
+{ entries that exist: top (the simple-mode entry TopShape reads back), bottom, }
+{ the first inner layer, and every inner layer the library's own stack holds.  }
+{                                                                              }
+{ Shapes are passed as CONSTANTS, never held in a variable: every proven call  }
+{ in this codebase hands the enum literal to the setter, and an Integer given  }
+{ to a TShape parameter has not been exercised here.                           }
+{..............................................................................}
+
+{ The read-back word for a TShape ordinal. Library.pas compiles before PCB.pas }
+{ so PCB.pas's LmShapeName is not reachable from here; same mapping, the       }
+{ vocabulary the modify tool accepts.                                          }
+Function PadShapeWord(S : Integer) : String;
+Begin
+    Result := 'round';
+    If S = eRectangular Then Result := 'rectangular';
+    If S = eOctagonal Then Result := 'octagonal';
+    If S = eRoundedRectangular Then Result := 'roundrect';
+End;
+
+{ A caller's shape word folded to the four the pad stack has, or '' when it is }
+{ none of them. 'roundrectangle' is accepted because it is what                }
+{ lib_get_pad_geometry reports, so a read can be fed straight back.            }
+Function CanonicalPadShape(Shape : String) : String;
+Var
+    W : String;
+Begin
+    Result := '';
+    W := LowerCase(Trim(Shape));
+    If (W = 'round') Or (W = 'rounded') Or (W = 'circle') Or (W = 'oval') Then
+        Result := 'round'
+    Else If (W = 'rectangular') Or (W = 'rect') Or (W = 'rectangle') Then
+        Result := 'rectangular'
+    Else If (W = 'octagonal') Or (W = 'oct') Or (W = 'octagon') Then
+        Result := 'octagonal'
+    Else If (W = 'roundrect') Or (W = 'rounded_rectangular')
+         Or (W = 'roundrectangle') Or (W = 'rounded_rectangle') Then
+        Result := 'roundrect';
+End;
+
+{ One copper entry of a pad's stack, by canonical shape word. The caller       }
+{ passes copper layers only; eMultiLayer is the silent no-op this exists for. }
+Procedure SetStackShapeWord(Pad : IPCB_Pad; Lyr : TLayer; Canon : String; Pct : Integer);
+Begin
+    If Canon = 'roundrect' Then
+    Begin
+        Try Pad.SetState_StackShapeOnLayer(Lyr, eRoundedRectangular); Except End;
+        Try Pad.SetState_StackCRPctOnLayer(Lyr, Pct); Except End;
+    End
+    Else If Canon = 'rectangular' Then
+    Begin
+        Try Pad.SetState_StackShapeOnLayer(Lyr, eRectangular); Except End;
+    End
+    Else If Canon = 'octagonal' Then
+    Begin
+        Try Pad.SetState_StackShapeOnLayer(Lyr, eOctagonal); Except End;
+    End
+    Else
+    Begin
+        Try Pad.SetState_StackShapeOnLayer(Lyr, eRounded); Except End;
+    End;
+End;
+
+{ Set a pad's copper shape on every layer it has copper on, and READ IT BACK.  }
+{                                                                              }
+{ Returns, and the caller reports it rather than assuming success:            }
+{   'confirmed'      TopShape (+ corner %) reads back as asked, and for a      }
+{                    drilled pad so does the bottom stack entry               }
+{   'top_only'       TopShape took; a drilled pad's bottom entry did not      }
+{   'unconfirmed'    TopShape did not take by either route                    }
+{ with '_via_top_shape' appended when only the second route (step 4) took.    }
+{                                                                              }
+{ Step 1 is exactly what the add handlers always did for the simple-mode       }
+{ entry. Step 2 is the fix. Step 4 is a second route for roundrect only:       }
+{ TopShape := eRoundedRectangular. Both identifiers are proven, the pairing    }
+{ is not, which is why it runs only when the top entry did not read back.      }
+Function SetPadCopperShape(Board : IPCB_Board; Pad : IPCB_Pad; Canon : String; Pct : Integer) : String;
+Var
+    LayerStack : IPCB_LayerStack_V7;
+    Obj : IPCB_LayerObject_V7;
+    Lyr : TLayer;
+    IsTH, TopOk, BotOk : Boolean;
+    Got, Via : String;
+    P : Integer;
+Begin
+    Result := 'unconfirmed';
+    P := Pct;
+    If P < 0 Then P := 0;
+    If P > 100 Then P := 100;
+    IsTH := False;
+    Try IsTH := (Pad.Layer = eMultiLayer); Except End;
+
+    { 1. The simple-mode entry. }
+    If Canon = 'roundrect' Then SetStackShapeWord(Pad, eTopLayer, Canon, P)
+    Else If Canon = 'rectangular' Then Pad.TopShape := eRectangular
+    Else If Canon = 'octagonal' Then Pad.TopShape := eOctagonal
+    Else Pad.TopShape := eRounded;
+
+    { 2. Every other copper entry. A drilled pad has copper top, bottom and    }
+    {    on each inner layer; eMidLayer1 is written explicitly because a       }
+    {    two-layer library stack lists no inner layer, and it is the entry a   }
+    {    top/middle/bottom stack reads for ALL inner layers. A single-layer    }
+    {    pad on the bottom gets its own entry as well as the top one.          }
+    If IsTH Then
+    Begin
+        SetStackShapeWord(Pad, eBottomLayer, Canon, P);
+        SetStackShapeWord(Pad, eMidLayer1, Canon, P);
+        LayerStack := Nil;
+        If Board <> Nil Then
+        Begin
+            Try LayerStack := Board.LayerStack_V7; Except LayerStack := Nil; End;
+        End;
+        If LayerStack <> Nil Then
+        Begin
+            Obj := Nil;
+            Try Obj := LayerStack.FirstLayer; Except Obj := Nil; End;
+            While Obj <> Nil Do
+            Begin
+                Lyr := eNoLayer;
+                Try Lyr := Obj.LayerID; Except Lyr := eNoLayer; End;
+                If (Lyr > eMidLayer1) And (Lyr < eBottomLayer) Then
+                    SetStackShapeWord(Pad, Lyr, Canon, P);
+                Try Obj := LayerStack.NextLayer(Obj); Except Obj := Nil; End;
+            End;
+        End;
+    End
+    Else If Pad.Layer <> eTopLayer Then
+        SetStackShapeWord(Pad, Pad.Layer, Canon, P);
+
+    { 3. Read back what a caller and the saved file will see. }
+    Got := '';
+    Try Got := PadShapeWord(Pad.TopShape); Except Got := ''; End;
+    TopOk := (Got = Canon);
+    If TopOk And (Canon = 'roundrect') Then
+    Begin
+        Try TopOk := (Pad.StackCRPctOnLayer[eTopLayer] = P); Except TopOk := False; End;
+    End;
+
+    { 4. Roundrect only, and only when the top entry did not take. UNVERIFIED }
+    {    pairing of two proven identifiers; the read-back decides.            }
+    Via := '';
+    If (Not TopOk) And (Canon = 'roundrect') Then
+    Begin
+        Try Pad.TopShape := eRoundedRectangular; Except End;
+        Try Pad.SetState_StackCRPctOnLayer(eTopLayer, P); Except End;
+        Got := '';
+        Try Got := PadShapeWord(Pad.TopShape); Except Got := ''; End;
+        TopOk := (Got = Canon);
+        If TopOk Then Via := '_via_top_shape';
+    End;
+    If Not TopOk Then Exit;
+
+    BotOk := True;
+    If IsTH Then
+    Begin
+        Got := '';
+        Try Got := PadShapeWord(Pad.StackShapeOnLayer[eBottomLayer]); Except Got := ''; End;
+        BotOk := (Got = Canon);
+    End;
+    If BotOk Then Result := 'confirmed' + Via
+    Else Result := 'top_only' + Via;
+End;
+
 Function Lib_AddFootprintPad(Params : String; RequestId : String) : String;
 Var
     Designator, Shape, LayerStr : String;
@@ -1338,7 +1510,9 @@ Var
     Footprint : IPCB_LibComponent;
     Pad : IPCB_Pad;
     PadLayer : TLayer;
+    ShapeHow : String;
 Begin
+    ShapeHow := '';
     Designator := ExtractJsonValue(Params, 'designator');
     X := StrToFloatDef(ExtractJsonValue(Params, 'x'), 0);
     Y := StrToFloatDef(ExtractJsonValue(Params, 'y'), 0);
@@ -1394,15 +1568,14 @@ Begin
 
         Pad.Layer := PadLayer;
 
-        { Shape. roundrect = the modern IPC default: set the layer-stack shape }
-        { then the corner-radius percentage (Altium stores RR radius as a %).  }
+        { Shape. roundrect = the modern IPC default, written on EVERY copper }
+        { layer and read back by SetPadCopperShape (Altium stores the radius }
+        { as a %). Writing it on Pad.Layer alone did nothing for a drilled   }
+        { pad: eMultiLayer is not a pad-stack entry.                          }
         If Shape = 'rectangular' Then Pad.TopShape := eRectangular
         Else If Shape = 'octagonal' Then Pad.TopShape := eOctagonal
         Else If (Shape = 'roundrect') Or (Shape = 'rounded_rectangular') Then
-        Begin
-            Pad.SetState_StackShapeOnLayer(Pad.Layer, eRoundedRectangular);
-            Pad.SetState_StackCRPctOnLayer(Pad.Layer, CornerRadius);
-        End
+            ShapeHow := SetPadCopperShape(PcbLib.Board, Pad, 'roundrect', CornerRadius)
         Else Pad.TopShape := eRounded;
 
         Footprint.AddPCBObject(Pad);
@@ -1420,7 +1593,11 @@ Begin
         PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress,
             c_Broadcast, PCBM_BoardRegisteration, Pad.I_ObjectAddress);
 
-        Result := BuildSuccessResponse(RequestId, '{"success":true,"designator":"' + EscapeJsonString(Designator) + '"}');
+        If ShapeHow <> '' Then
+            Result := BuildSuccessResponse(RequestId, '{"success":true,"designator":"'
+                + EscapeJsonString(Designator) + '","shape_status":"' + ShapeHow + '"}')
+        Else
+            Result := BuildSuccessResponse(RequestId, '{"success":true,"designator":"' + EscapeJsonString(Designator) + '"}');
     End
     Else
         Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Failed to create pad');
@@ -1449,7 +1626,11 @@ Var
     PlatedStr, HoleTypeStr, MaskStr, PasteStr : String;
     SlotLen, HoleRot : Double;
     Cache : TPadCache;
+    ShapeHow : String;
+    RRAsked, RRUnconfirmed : Integer;
 Begin
+    RRAsked := 0;
+    RRUnconfirmed := 0;
     PadsStr := ExtractJsonValue(Params, 'pads');
     If PadsStr = '' Then
     Begin
@@ -1538,8 +1719,10 @@ Begin
             Else If Shape = 'octagonal' Then Pad.TopShape := eOctagonal
             Else If (Shape = 'roundrect') Or (Shape = 'rounded_rectangular') Then
             Begin
-                Pad.SetState_StackShapeOnLayer(Pad.Layer, eRoundedRectangular);
-                Pad.SetState_StackCRPctOnLayer(Pad.Layer, CornerRadius);
+                { Every copper layer, read back: see SetPadCopperShape. }
+                ShapeHow := SetPadCopperShape(PcbLib.Board, Pad, 'roundrect', CornerRadius);
+                Inc(RRAsked);
+                If Pos('confirmed', ShapeHow) <> 1 Then Inc(RRUnconfirmed);
             End
             Else Pad.TopShape := eRounded;
 
@@ -1593,6 +1776,8 @@ Begin
     Result := BuildSuccessResponse(RequestId,
         '{"added":' + IntToStr(Added) + ',"failed":' + IntToStr(Failed)
         + ',"unknown_layers":"' + EscapeJsonString(BadLayers) + '"'
+        + ',"roundrect_requested":' + IntToStr(RRAsked)
+        + ',"roundrect_unconfirmed":' + IntToStr(RRUnconfirmed)
         + ',"total":' + IntToStr(OpCount) + '}');
 End;
 
@@ -11632,6 +11817,1374 @@ Begin
         + '"pads_included":' + BoolToJsonStr(IncludePads) + '}');
 End;
 
+{..............................................................................}
+{ PAD EDITING INSIDE A PCBLIB FOOTPRINT                                        }
+{                                                                              }
+{ lib_modify_footprint_pads, lib_delete_footprint_pads and                     }
+{ lib_set_footprint_description. Before these the only way to change ONE pad  }
+{ of a saved footprint was to edit the .PcbLib OLE stream by hand (done        }
+{ 2026-10-03 on the multiviewer carrier library: three shape bytes per pad,    }
+{ library closed, backup kept), because lib_delete_footprint_primitives takes  }
+{ every pad on a layer or none, and deleting and re-adding them loses per-pad  }
+{ overrides such as a manual paste expansion.                                  }
+{                                                                              }
+{ TARGETS ARE RESOLVED ONCE, BEFORE ANYTHING CHANGES. One read-only walk       }
+{ records every pad's address and designator in iterator order, deduplicated   }
+{ by address: a pad added in this session is yielded TWICE until the library   }
+{ is reloaded (measured, see Lib_GetPadGeometry). "index" is the n-th pad with }
+{ that designator in that order, which is the order lib_get_pad_geometry       }
+{ lists them in, and it keeps meaning the same pad after an earlier edit in    }
+{ the same call renamed or removed one.                                        }
+{                                                                              }
+{ EACH TARGET IS THEN REACHED BY A FRESH WALK THAT STOPS ON IT, and is changed }
+{ or removed while that iterator is still open. Both recorded lessons allow    }
+{ exactly that: Lib_DeleteFootprintPrimitives measured that a primitive is     }
+{ dangling once its GroupIterator is destroyed, and a walk that never advances }
+{ after the change cannot skip entries.                                        }
+{                                                                              }
+{ EVERY CHANGE IS BRACKETED with PCBM_BeginModify / PCBM_EndModify on the pad  }
+{ (Lib_SetDesignator: without it the edit lives in memory and is dropped when  }
+{ the component is re-serialised on save) and READ BACK field by field.        }
+{..............................................................................}
+
+{ Focus a .PcbLib by path for a WRITE and prove it is the one in front.        }
+{                                                                              }
+{ The verify-after-open half is Lib_DeleteFootprintPrimitives's: an open that  }
+{ silently fails leaves the PREVIOUS library focused, and a write would land   }
+{ in it while reporting the path that was asked for. Returns Nil with ErrCode  }
+{ and ErrMsg set; rewrites LibPath to the path actually used.                  }
+Function FocusPcbLibForEdit(Var LibPath : String; Var ErrCode : String; Var ErrMsg : String) : IPCB_Library;
+Var
+    Workspace : IWorkspace;
+    Doc : IDocument;
+    FocusedPath : String;
+Begin
+    Result := Nil;
+    ErrCode := '';
+    ErrMsg := '';
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        ErrCode := 'NO_WORKSPACE';
+        ErrMsg := 'No workspace';
+        Exit;
+    End;
+    FocusedPath := '';
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+    If LibPath = '' Then LibPath := FocusedPath;
+    If LibPath = '' Then
+    Begin
+        ErrCode := 'NO_LIBRARY';
+        ErrMsg := 'No library is active and library_path was not supplied';
+        Exit;
+    End;
+    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
+    Begin
+        ResetParameters;
+        AddStringParameter('ObjectKind', 'Document');
+        AddStringParameter('FileName', LibPath);
+        RunProcess('WorkspaceManager:OpenObject');
+    End;
+    FocusedPath := '';
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
+    Begin
+        ErrCode := 'WRONG_DOCUMENT_FOCUSED';
+        ErrMsg := 'Asked for ' + LibPath + ' but the focused document is "'
+            + FocusedPath + '". Nothing was changed.';
+        Exit;
+    End;
+    Result := PCBServer.GetCurrentPCBLibrary;
+    If Result = Nil Then
+    Begin
+        ErrCode := 'NO_PCBLIB';
+        ErrMsg := 'Focused ' + LibPath + ' but it is not a PCB library. These '
+            + 'tools edit a footprint inside a .PcbLib; a placed pad on a '
+            + 'board is a pcb_ tool''s job.';
+    End;
+End;
+
+{ The footprint by name, case-insensitively, as Lib_DeleteFootprintPrimitives  }
+{ and Lib_SetDesignator match it. Nil when absent.                             }
+Function FindPcbLibFootprint(PcbLib : IPCB_Library; FpWanted : String) : IPCB_LibComponent;
+Var
+    Iter : IPCB_LibraryIterator;
+    Footprint : IPCB_LibComponent;
+    FpName : String;
+Begin
+    Result := Nil;
+    If PcbLib = Nil Then Exit;
+    Iter := PcbLib.LibraryIterator_Create;
+    Try
+        Footprint := Iter.FirstPCBObject;
+        While Footprint <> Nil Do
+        Begin
+            FpName := '';
+            Try FpName := Footprint.Name; Except End;
+            If UpperCase(FpName) = UpperCase(FpWanted) Then
+            Begin
+                Result := Footprint;
+                Break;
+            End;
+            Footprint := Iter.NextPCBObject;
+        End;
+    Finally
+        PcbLib.LibraryIterator_Destroy(Iter);
+    End;
+End;
+
+{ An angle folded into [0, 360), bounded so a wild value cannot spin here.    }
+Function NormDeg(A : Double) : Double;
+Var
+    I : Integer;
+Begin
+    Result := A;
+    For I := 1 To 64 Do
+    Begin
+        If Result >= 360 Then Result := Result - 360;
+        If Result < 0 Then Result := Result + 360;
+    End;
+End;
+
+{ One pad's state as a JSON object, in MILS relative to the footprint origin, }
+{ which is what the modify tool takes. Every member read here is already read }
+{ by Lib_GetPadGeometry or LmPadsSection; the per-layer block is what makes    }
+{ the through-hole roundrect fix checkable in one call.                        }
+Function PadStateJson(Pad : IPCB_Pad; XOrg : Integer; YOrg : Integer) : String;
+Var
+    S, Body, HoleStr, ModeStr, MaskSrc, PasteSrc : String;
+    IsTH, Simple : Boolean;
+    Cache : TPadCache;
+    Pct : Integer;
+    Val, MaskVal, PasteVal : Double;
+Begin
+    IsTH := False;
+    Try IsTH := (Pad.Layer = eMultiLayer); Except End;
+    HoleStr := 'round';
+    Try
+        If Pad.HoleType = eSquareHole Then HoleStr := 'square'
+        Else If Pad.HoleType = eSlotHole Then HoleStr := 'slot';
+    Except End;
+    Pct := 0;
+    Try Pct := Pad.StackCRPctOnLayer[eTopLayer]; Except Pct := 0; End;
+    ModeStr := '-1';
+    Try ModeStr := IntToStr(Pad.Mode); Except ModeStr := '-1'; End;
+    Simple := False;
+    Try Simple := (Pad.Mode = ePadMode_Simple); Except Simple := False; End;
+
+    S := JsonStr('designator', Pad.Name)
+        + ',' + JsonFloat('x_mil', CoordToMilsF(Pad.X - XOrg))
+        + ',' + JsonFloat('y_mil', CoordToMilsF(Pad.Y - YOrg))
+        + ',' + JsonFloat('x_size_mil', CoordToMilsF(Pad.TopXSize))
+        + ',' + JsonFloat('y_size_mil', CoordToMilsF(Pad.TopYSize))
+        + ',' + JsonStr('shape', PadShapeWord(Pad.TopShape))
+        + ',' + JsonInt('corner_pct', Pct)
+        + ',' + JsonFloat('rotation', Pad.Rotation)
+        + ',' + JsonStr('layer', GetLayerString(Pad.Layer))
+        + ',' + JsonFloat('hole_mil', CoordToMilsF(Pad.HoleSize))
+        + ',' + JsonStr('hole_type', HoleStr);
+
+    Val := 0;
+    Try Val := CoordToMilsF(Pad.HoleWidth); Except Val := 0; End;
+    S := S + ',' + JsonFloat('hole_width_mil', Val);
+    Val := 0;
+    Try Val := Pad.HoleRotation; Except Val := 0; End;
+    S := S + ',' + JsonFloat('hole_rotation', Val);
+    Try
+        S := S + ',' + JsonBool('plated', Pad.Plated);
+    Except
+        S := S + ',' + JsonNull('plated');
+    End;
+    S := S + ',' + JsonRaw('mode', ModeStr) + ',' + JsonBool('mode_simple', Simple);
+
+    If IsTH Then
+    Begin
+        Body := '';
+        Try
+            Body := JsonStr('shape', PadShapeWord(Pad.StackShapeOnLayer[eBottomLayer]))
+                + ',' + JsonFloat('x_size_mil', CoordToMilsF(Pad.XStackSizeOnLayer[eBottomLayer]))
+                + ',' + JsonFloat('y_size_mil', CoordToMilsF(Pad.YStackSizeOnLayer[eBottomLayer]))
+                + ',' + JsonInt('corner_pct', Pad.StackCRPctOnLayer[eBottomLayer]);
+        Except
+            Body := '';
+        End;
+        S := S + ',' + JsonRaw('bottom', JsonObj(Body));
+        Body := '';
+        Try
+            Body := JsonStr('shape', PadShapeWord(Pad.MidShape))
+                + ',' + JsonFloat('x_size_mil', CoordToMilsF(Pad.MidXSize))
+                + ',' + JsonFloat('y_size_mil', CoordToMilsF(Pad.MidYSize));
+        Except
+            Body := '';
+        End;
+        S := S + ',' + JsonRaw('mid', JsonObj(Body));
+    End;
+
+    MaskSrc := 'rule';
+    PasteSrc := 'rule';
+    MaskVal := 0;
+    PasteVal := 0;
+    Try
+        Cache := Pad.GetState_Cache;
+        If Cache.SolderMaskExpansionValid = eCacheManual Then
+        Begin
+            MaskSrc := 'manual';
+            MaskVal := CoordToMilsF(Cache.SolderMaskExpansion);
+        End;
+        If Cache.PasteMaskExpansionValid = eCacheManual Then
+        Begin
+            PasteSrc := 'manual';
+            PasteVal := CoordToMilsF(Cache.PasteMaskExpansion);
+        End;
+    Except End;
+    S := S + ',' + JsonFloat('mask_expansion_mil', MaskVal)
+        + ',' + JsonStr('mask_expansion_source', MaskSrc)
+        + ',' + JsonFloat('paste_expansion_mil', PasteVal)
+        + ',' + JsonStr('paste_expansion_source', PasteSrc);
+    Result := JsonObj(S);
+End;
+
+{..............................................................................}
+{ Lib_ModifyFootprintPads - change named pads of one PcbLib footprint.         }
+{                                                                              }
+{ Params: footprint_name (required), library_path (optional), edits (batch,    }
+{ ~~ / ; / =). Per edit: designator (required; '' selects the unnamed pads),  }
+{ index (0-based among the pads with that designator; REQUIRED when more than  }
+{ one pad carries it, so a duplicate is never edited by guess), then any of:   }
+{ x, y, x_size, y_size, hole_size, slot_length, mask_expansion,                }
+{ paste_expansion (mils, sub-mil kept; the two expansions also take 'rule'),   }
+{ rotation, hole_rotation (degrees), shape, corner_radius (percent), plated,   }
+{ hole_type, layer (SMD only), new_designator, clear_designator.               }
+{                                                                              }
+{ Order inside one edit is fixed: drill and layer first (the shape setters are }
+{ layer-aware, and a hole_size crossing zero turns a pad SMD or through-hole   }
+{ exactly as the add tools do), then position, size, shape, hole form,         }
+{ mask/paste, and the name last. Each edit is validated completely before      }
+{ anything is written, so a bad field leaves that pad untouched.               }
+{..............................................................................}
+Function Lib_ModifyFootprintPads(Params : String; RequestId : String) : String;
+Var
+    LibPath, FpWanted, EditsStr, Remaining, Op, ErrCode, ErrMsg : String;
+    Desig, IdxStr, Canon, ShapeStr, ShapeHow, LayerStr, NewName, ClearStr : String;
+    XStr, YStr, XSStr, YSStr, HoleStr, RotStr, CRStr, PlatedStr, HoleTypeStr : String;
+    SlotStr, HoleRotStr, MaskStr, PasteStr, CurShape, TxtName, BadField : String;
+    TargetAddr, PadAddr, ItemJson, ResultsJson : String;
+    ChangedJson, MismatchJson, WarnJson : String;
+    PcbLib : IPCB_Library;
+    Board : IPCB_Board;
+    Target : IPCB_LibComponent;
+    GrpIter : IPCB_GroupIterator;
+    Pad : IPCB_Pad;
+    Cache : TPadCache;
+    SnapAddrs, SnapNames, UsedAddrs : TStringList;
+    XOrg, YOrg, WantIdx, ResIdx, Matches, Hit, I : Integer;
+    OpCount, Applied, FailedCount, Pct : Integer;
+    NewX, NewY, NewXS, NewYS, NewHole, NewRot, SlotLen, HoleRot : Double;
+    NewLayer : TLayer;
+    IsTH, WillBeTH, AnyChange, WantPlated : Boolean;
+Begin
+    LibPath := ExtractJsonValue(Params, 'library_path');
+    FpWanted := ExtractJsonValue(Params, 'footprint_name');
+    EditsStr := ExtractJsonValue(Params, 'edits');
+    If FpWanted = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM',
+            'footprint_name is required. Editing whichever footprint the '
+            + 'editor happens to show is the mistake this avoids.');
+        Exit;
+    End;
+    If EditsStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'edits is required');
+        Exit;
+    End;
+
+    PcbLib := FocusPcbLibForEdit(LibPath, ErrCode, ErrMsg);
+    If PcbLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, ErrCode, ErrMsg);
+        Exit;
+    End;
+    Board := PcbLib.Board;
+    Target := FindPcbLibFootprint(PcbLib, FpWanted);
+    If Target = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'FOOTPRINT_NOT_FOUND',
+            'Footprint not found in ' + LibPath + ': ' + FpWanted
+            + '. lib_get_footprints lists what it holds.');
+        Exit;
+    End;
+    { MAKE IT CURRENT, verified, BEFORE THE ORIGIN IS READ. x and y are     }
+    { relative to Footprint.X/Y, and that is only the true reference for a  }
+    { footprint the library has made current: lib_get_pad_geometry reads it }
+    { off a non-current footprint and, for IPC generated ones, reported pin }
+    { 1 at the origin while the saved file had the pads centred (owner's    }
+    { fpcheck.py, 2026-10-02). Making a component current also relocates   }
+    { it (Lib_SetDesignator), so the read below comes after. Same write and }
+    { read-back as ResolveLibFootprint and Lib_SetDesignator.              }
+    If PcbLib.CurrentComponent <> Target Then
+    Begin
+        Try PcbLib.CurrentComponent := Target; Except End;
+        If PcbLib.CurrentComponent <> Target Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'SELECT_FAILED',
+                'Could not make footprint "' + FpWanted + '" current, so '
+                + 'its origin cannot be trusted as the frame for x and y. '
+                + 'Nothing was changed.');
+            Exit;
+        End;
+    End;
+    XOrg := FootprintOriginX(Target);
+    YOrg := FootprintOriginY(Target);
+
+    OpCount := 0;
+    Applied := 0;
+    FailedCount := 0;
+    AnyChange := False;
+    ResultsJson := '';
+
+    SnapAddrs := TStringList.Create;
+    SnapNames := TStringList.Create;
+    UsedAddrs := TStringList.Create;
+    Try
+        { The snapshot: address and designator of every pad, once each. }
+        GrpIter := Target.GroupIterator_Create;
+        Try
+            GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+            Pad := GrpIter.FirstPCBObject;
+            While Pad <> Nil Do
+            Begin
+                PadAddr := '';
+                Try PadAddr := IntToStr(Pad.I_ObjectAddress); Except End;
+                If (PadAddr <> '') And (SnapAddrs.IndexOf(PadAddr) < 0) Then
+                Begin
+                    TxtName := '';
+                    Try TxtName := Pad.Name; Except End;
+                    SnapAddrs.Add(PadAddr);
+                    SnapNames.Add(TxtName);
+                End;
+                Pad := GrpIter.NextPCBObject;
+            End;
+        Finally
+            Target.GroupIterator_Destroy(GrpIter);
+        End;
+
+        Remaining := EditsStr;
+        PCBServer.PreProcess;
+        Try
+            While True Do
+            Begin
+                Op := NextBatchOp(Remaining);
+                If Op = '' Then Break;
+                OpCount := OpCount + 1;
+
+                Desig := GetBatchField(Op, 'designator');
+                IdxStr := Trim(GetBatchField(Op, 'index'));
+                XStr := Trim(GetBatchField(Op, 'x'));
+                YStr := Trim(GetBatchField(Op, 'y'));
+                XSStr := Trim(GetBatchField(Op, 'x_size'));
+                YSStr := Trim(GetBatchField(Op, 'y_size'));
+                HoleStr := Trim(GetBatchField(Op, 'hole_size'));
+                RotStr := Trim(GetBatchField(Op, 'rotation'));
+                ShapeStr := Trim(GetBatchField(Op, 'shape'));
+                CRStr := Trim(GetBatchField(Op, 'corner_radius'));
+                PlatedStr := LowerCase(Trim(GetBatchField(Op, 'plated')));
+                HoleTypeStr := LowerCase(Trim(GetBatchField(Op, 'hole_type')));
+                SlotStr := Trim(GetBatchField(Op, 'slot_length'));
+                HoleRotStr := Trim(GetBatchField(Op, 'hole_rotation'));
+                MaskStr := LowerCase(Trim(GetBatchField(Op, 'mask_expansion')));
+                PasteStr := LowerCase(Trim(GetBatchField(Op, 'paste_expansion')));
+                LayerStr := Trim(GetBatchField(Op, 'layer'));
+                NewName := GetBatchField(Op, 'new_designator');
+                ClearStr := LowerCase(Trim(GetBatchField(Op, 'clear_designator')));
+
+                ErrCode := '';
+                ErrMsg := '';
+                ItemJson := '';
+                ChangedJson := '';
+                MismatchJson := '';
+                WarnJson := '';
+                ShapeHow := '';
+                Canon := '';
+                WantIdx := -1;
+                ResIdx := -1;
+                Matches := 0;
+                Hit := -1;
+                TargetAddr := '';
+                NewLayer := eNoLayer;
+                Pct := 25;
+                Pad := Nil;
+
+                { ---- 1. validate every field; nothing is touched yet ---- }
+                BadField := '';
+                If (XStr <> '') And (Not IsFloatStr(XStr)) Then BadField := 'x';
+                If (YStr <> '') And (Not IsFloatStr(YStr)) Then BadField := 'y';
+                If (XSStr <> '') And (Not IsFloatStr(XSStr)) Then BadField := 'x_size';
+                If (YSStr <> '') And (Not IsFloatStr(YSStr)) Then BadField := 'y_size';
+                If (HoleStr <> '') And (Not IsFloatStr(HoleStr)) Then BadField := 'hole_size';
+                If (RotStr <> '') And (Not IsFloatStr(RotStr)) Then BadField := 'rotation';
+                If (SlotStr <> '') And (Not IsFloatStr(SlotStr)) Then BadField := 'slot_length';
+                If (HoleRotStr <> '') And (Not IsFloatStr(HoleRotStr)) Then BadField := 'hole_rotation';
+                If (CRStr <> '') And (Not IsIntStr(CRStr)) Then BadField := 'corner_radius';
+                If (MaskStr <> '') And (MaskStr <> 'rule') And (Not IsFloatStr(MaskStr)) Then
+                    BadField := 'mask_expansion';
+                If (PasteStr <> '') And (PasteStr <> 'rule') And (Not IsFloatStr(PasteStr)) Then
+                    BadField := 'paste_expansion';
+                If BadField <> '' Then
+                Begin
+                    ErrCode := 'BAD_NUMBER';
+                    ErrMsg := BadField + ' is not a number';
+                End;
+
+                NewX := StrToFloatDef(XStr, 0);
+                NewY := StrToFloatDef(YStr, 0);
+                NewXS := StrToFloatDef(XSStr, 0);
+                NewYS := StrToFloatDef(YSStr, 0);
+                NewHole := StrToFloatDef(HoleStr, 0);
+                NewRot := StrToFloatDef(RotStr, 0);
+                SlotLen := StrToFloatDef(SlotStr, 0);
+                HoleRot := StrToFloatDef(HoleRotStr, 0);
+                If CRStr <> '' Then Pct := StrToIntDef(CRStr, 25);
+
+                If (ErrCode = '') And (((XSStr <> '') And (NewXS <= 0))
+                    Or ((YSStr <> '') And (NewYS <= 0))) Then
+                Begin
+                    ErrCode := 'BAD_SIZE';
+                    ErrMsg := 'x_size and y_size must be greater than zero';
+                End;
+                If (ErrCode = '') And (HoleStr <> '') And (NewHole < 0) Then
+                Begin
+                    ErrCode := 'BAD_SIZE';
+                    ErrMsg := 'hole_size cannot be negative (0 makes the pad SMD)';
+                End;
+                If (ErrCode = '') And (SlotStr <> '') And (SlotLen <= 0) Then
+                Begin
+                    ErrCode := 'BAD_SIZE';
+                    ErrMsg := 'slot_length must be greater than zero';
+                End;
+                If (ErrCode = '') And ((Pct < 0) Or (Pct > 100)) Then
+                Begin
+                    ErrCode := 'BAD_CORNER_RADIUS';
+                    ErrMsg := 'corner_radius is a percentage, 0 to 100';
+                End;
+                If (ErrCode = '') And (ShapeStr <> '') Then
+                Begin
+                    Canon := CanonicalPadShape(ShapeStr);
+                    If Canon = '' Then
+                    Begin
+                        ErrCode := 'BAD_SHAPE';
+                        ErrMsg := 'unknown shape "' + ShapeStr
+                            + '": use round, rectangular, octagonal or roundrect';
+                    End;
+                End;
+                If (ErrCode = '') And (HoleTypeStr <> '') And (HoleTypeStr <> 'round')
+                    And (HoleTypeStr <> 'square') And (HoleTypeStr <> 'slot') Then
+                Begin
+                    ErrCode := 'BAD_HOLE_TYPE';
+                    ErrMsg := 'hole_type must be round, square or slot';
+                End;
+                If (ErrCode = '') And (PlatedStr <> '') And (PlatedStr <> 'true')
+                    And (PlatedStr <> 'false') Then
+                Begin
+                    ErrCode := 'BAD_PLATED';
+                    ErrMsg := 'plated must be true or false';
+                End;
+                If (ErrCode = '') And (LayerStr <> '') Then
+                Begin
+                    NewLayer := ResolveLayerId(Board, LayerStr);
+                    If (NewLayer = eNoLayer) Or (NewLayer = eMultiLayer) Then
+                    Begin
+                        ErrCode := 'UNKNOWN_LAYER';
+                        ErrMsg := 'layer "' + LayerStr + '" is not a single layer of '
+                            + 'this library. ' + BoardLayerNamesHint(Board);
+                    End;
+                End;
+                If (ErrCode = '') And (ClearStr = 'true') And (NewName <> '') Then
+                Begin
+                    ErrCode := 'BAD_DESIGNATOR';
+                    ErrMsg := 'new_designator and clear_designator are exclusive';
+                End;
+                If (ErrCode = '') And (IdxStr <> '') Then
+                Begin
+                    If IsIntStr(IdxStr) Then WantIdx := StrToIntDef(IdxStr, -1);
+                    If WantIdx < 0 Then
+                    Begin
+                        ErrCode := 'BAD_INDEX';
+                        ErrMsg := 'index must be a whole number, 0 or more';
+                    End;
+                End;
+
+                { ---- 2. resolve the target from the snapshot ---- }
+                If ErrCode = '' Then
+                Begin
+                    For I := 0 To SnapNames.Count - 1 Do
+                    Begin
+                        If SnapNames[I] = Desig Then
+                        Begin
+                            If (Hit < 0) And ((WantIdx < 0) Or (Matches = WantIdx)) Then
+                            Begin
+                                Hit := I;
+                                ResIdx := Matches;
+                            End;
+                            Matches := Matches + 1;
+                        End;
+                    End;
+                    If Matches = 0 Then
+                    Begin
+                        ErrCode := 'PAD_NOT_FOUND';
+                        ErrMsg := 'no pad named "' + Desig + '" in ' + FpWanted;
+                    End
+                    Else If (WantIdx < 0) And (Matches > 1) Then
+                    Begin
+                        ErrCode := 'AMBIGUOUS';
+                        ErrMsg := IntToStr(Matches) + ' pads are named "' + Desig
+                            + '". Pass index (0 to ' + IntToStr(Matches - 1)
+                            + ', in lib_get_pad_geometry order) to pick one.';
+                    End
+                    Else If Hit < 0 Then
+                    Begin
+                        ErrCode := 'PAD_NOT_FOUND';
+                        ErrMsg := 'index ' + IntToStr(WantIdx) + ' asked for, but only '
+                            + IntToStr(Matches) + ' pad(s) are named "' + Desig + '"';
+                    End;
+                End;
+                If ErrCode = '' Then
+                Begin
+                    TargetAddr := SnapAddrs[Hit];
+                    If UsedAddrs.IndexOf(TargetAddr) >= 0 Then
+                    Begin
+                        ErrCode := 'DUPLICATE_TARGET';
+                        ErrMsg := 'this pad is already edited earlier in the same '
+                            + 'call; merge the two edits into one';
+                    End
+                    Else
+                        UsedAddrs.Add(TargetAddr);
+                End;
+
+                { ---- 3. reach the pad, apply, read back ---- }
+                If ErrCode = '' Then
+                Begin
+                    GrpIter := Target.GroupIterator_Create;
+                    Try
+                        GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+                        Pad := GrpIter.FirstPCBObject;
+                        While Pad <> Nil Do
+                        Begin
+                            PadAddr := '';
+                            Try PadAddr := IntToStr(Pad.I_ObjectAddress); Except End;
+                            If PadAddr = TargetAddr Then Break;
+                            Pad := GrpIter.NextPCBObject;
+                        End;
+
+                        If Pad = Nil Then
+                        Begin
+                            ErrCode := 'PAD_NOT_FOUND';
+                            ErrMsg := 'the pad resolved at the start of the call '
+                                + 'was no longer in the footprint';
+                        End
+                        Else
+                        Begin
+                            IsTH := (Pad.Layer = eMultiLayer);
+                            WillBeTH := IsTH;
+                            If HoleStr <> '' Then WillBeTH := (NewHole > 0);
+                            If (LayerStr <> '') And WillBeTH Then
+                            Begin
+                                ErrCode := 'LAYER_ON_DRILLED_PAD';
+                                ErrMsg := 'layer applies to SMD pads only; a drilled '
+                                    + 'pad is MultiLayer. Pass hole_size=0 with it to '
+                                    + 'make the pad SMD.';
+                            End;
+
+                            If ErrCode = '' Then
+                            Begin
+                                Try
+                                    Try
+                                        PCBServer.SendMessageToRobots(Pad.I_ObjectAddress,
+                                            c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                                    Except End;
+                                    Try
+                                        { a. Drill and layer. }
+                                        If HoleStr <> '' Then
+                                        Begin
+                                            Pad.HoleSize := MilsToCoordF(NewHole);
+                                            AddChangedField(ChangedJson, 'hole_size');
+                                            If (NewHole > 0) And (Not IsTH) Then
+                                            Begin
+                                                Pad.Layer := eMultiLayer;
+                                                AddChangedField(ChangedJson, 'layer');
+                                            End
+                                            Else If (NewHole <= 0) And IsTH And (LayerStr = '') Then
+                                            Begin
+                                                Pad.Layer := eTopLayer;
+                                                AddChangedField(ChangedJson, 'layer');
+                                            End;
+                                        End;
+                                        If (LayerStr <> '') And (Not WillBeTH) Then
+                                        Begin
+                                            Pad.Layer := NewLayer;
+                                            AddChangedField(ChangedJson, 'layer');
+                                        End;
+
+                                        { b. Position and rotation. }
+                                        If XStr <> '' Then
+                                        Begin
+                                            Pad.X := XOrg + MilsToCoordF(NewX);
+                                            AddChangedField(ChangedJson, 'x');
+                                        End;
+                                        If YStr <> '' Then
+                                        Begin
+                                            Pad.Y := YOrg + MilsToCoordF(NewY);
+                                            AddChangedField(ChangedJson, 'y');
+                                        End;
+                                        If RotStr <> '' Then
+                                        Begin
+                                            Pad.Rotation := NewRot;
+                                            AddChangedField(ChangedJson, 'rotation');
+                                        End;
+
+                                        { c. Size: every layer in a simple stack. }
+                                        If XSStr <> '' Then
+                                        Begin
+                                            Pad.TopXSize := MilsToCoordF(NewXS);
+                                            AddChangedField(ChangedJson, 'x_size');
+                                        End;
+                                        If YSStr <> '' Then
+                                        Begin
+                                            Pad.TopYSize := MilsToCoordF(NewYS);
+                                            AddChangedField(ChangedJson, 'y_size');
+                                        End;
+
+                                        { d. Shape. No corner_radius given: a pad     }
+                                        {    that is already roundrect keeps its own. }
+                                        If Canon <> '' Then
+                                        Begin
+                                            If CRStr = '' Then
+                                            Begin
+                                                Try
+                                                    If Pad.TopShape = eRoundedRectangular Then
+                                                        Pct := Pad.StackCRPctOnLayer[eTopLayer];
+                                                Except End;
+                                            End;
+                                            ShapeHow := SetPadCopperShape(Board, Pad, Canon, Pct);
+                                            AddChangedField(ChangedJson, 'shape');
+                                            If (Canon = 'roundrect') And (CRStr <> '') Then
+                                                AddChangedField(ChangedJson, 'corner_radius');
+                                        End
+                                        Else If CRStr <> '' Then
+                                        Begin
+                                            CurShape := '';
+                                            Try CurShape := PadShapeWord(Pad.TopShape); Except End;
+                                            If CurShape = 'roundrect' Then
+                                            Begin
+                                                ShapeHow := SetPadCopperShape(Board, Pad, CurShape, Pct);
+                                                AddChangedField(ChangedJson, 'corner_radius');
+                                            End
+                                            Else
+                                                AddChangedField(WarnJson,
+                                                    'corner_radius ignored: the pad is ' + CurShape
+                                                    + ', not roundrect. Pass shape=roundrect with it.');
+                                        End;
+
+                                        { e. Hole form and plating. }
+                                        If HoleTypeStr <> '' Then
+                                        Begin
+                                            If HoleTypeStr = 'slot' Then Pad.HoleType := eSlotHole
+                                            Else If HoleTypeStr = 'square' Then Pad.HoleType := eSquareHole
+                                            Else Pad.HoleType := eRoundHole;
+                                            AddChangedField(ChangedJson, 'hole_type');
+                                        End;
+                                        If SlotStr <> '' Then
+                                        Begin
+                                            Pad.HoleWidth := MilsToCoordF(SlotLen);
+                                            AddChangedField(ChangedJson, 'slot_length');
+                                        End;
+                                        If HoleRotStr <> '' Then
+                                        Begin
+                                            Pad.HoleRotation := HoleRot;
+                                            AddChangedField(ChangedJson, 'hole_rotation');
+                                        End;
+                                        If PlatedStr <> '' Then
+                                        Begin
+                                            WantPlated := (PlatedStr = 'true');
+                                            Pad.Plated := WantPlated;
+                                            AddChangedField(ChangedJson, 'plated');
+                                        End;
+
+                                        { f. Mask and paste: the PCB_MakePasteGrid     }
+                                        {    cache pattern, read FRESH so nothing set  }
+                                        {    above is written back stale. 'rule' is    }
+                                        {    eCacheInvalid, the value the paste-       }
+                                        {    exclusion restore already writes.         }
+                                        If (MaskStr <> '') Or (PasteStr <> '') Then
+                                        Begin
+                                            Cache := Pad.GetState_Cache;
+                                            If MaskStr = 'rule' Then
+                                                Cache.SolderMaskExpansionValid := eCacheInvalid
+                                            Else If MaskStr <> '' Then
+                                            Begin
+                                                Cache.SolderMaskExpansionValid := eCacheManual;
+                                                Cache.SolderMaskExpansion :=
+                                                    MilsToCoordF(StrToFloatDef(MaskStr, 0));
+                                            End;
+                                            If PasteStr = 'rule' Then
+                                                Cache.PasteMaskExpansionValid := eCacheInvalid
+                                            Else If PasteStr <> '' Then
+                                            Begin
+                                                Cache.PasteMaskExpansionValid := eCacheManual;
+                                                Cache.PasteMaskExpansion :=
+                                                    MilsToCoordF(StrToFloatDef(PasteStr, 0));
+                                            End;
+                                            Pad.SetState_Cache := Cache;
+                                            If MaskStr <> '' Then AddChangedField(ChangedJson, 'mask_expansion');
+                                            If PasteStr <> '' Then AddChangedField(ChangedJson, 'paste_expansion');
+                                        End;
+
+                                        { g. The designator, last. }
+                                        If ClearStr = 'true' Then
+                                        Begin
+                                            TxtName := '';
+                                            Pad.Name := TxtName;
+                                            AddChangedField(ChangedJson, 'designator');
+                                        End
+                                        Else If NewName <> '' Then
+                                        Begin
+                                            Pad.Name := NewName;
+                                            AddChangedField(ChangedJson, 'designator');
+                                        End;
+
+                                        Try Pad.GraphicallyInvalidate; Except End;
+                                    Finally
+                                        Try
+                                            PCBServer.SendMessageToRobots(Pad.I_ObjectAddress,
+                                                c_Broadcast, PCBM_EndModify, c_NoEventData);
+                                        Except End;
+                                    End;
+                                Except
+                                    ErrCode := 'APPLY_FAILED';
+                                    ErrMsg := 'Altium raised part way through the edit. '
+                                        + 'Fields already written stay written; see changed '
+                                        + 'and the pad read-back.';
+                                End;
+                                If ChangedJson <> '' Then AnyChange := True;
+
+                                { ---- read back every requested field ---- }
+                                Try
+                                    If (HoleStr <> '') And (Pad.HoleSize <> MilsToCoordF(NewHole)) Then
+                                        AddChangedField(MismatchJson, 'hole_size');
+                                    If (HoleStr <> '') And (NewHole > 0) And (Pad.Layer <> eMultiLayer) Then
+                                        AddChangedField(MismatchJson, 'layer');
+                                    If (HoleStr <> '') And (NewHole <= 0) And (Pad.Layer = eMultiLayer) Then
+                                        AddChangedField(MismatchJson, 'layer');
+                                    If (LayerStr <> '') And (Not WillBeTH) And (Pad.Layer <> NewLayer) Then
+                                        AddChangedField(MismatchJson, 'layer');
+                                    If (XStr <> '') And ((Pad.X - XOrg) <> MilsToCoordF(NewX)) Then
+                                        AddChangedField(MismatchJson, 'x');
+                                    If (YStr <> '') And ((Pad.Y - YOrg) <> MilsToCoordF(NewY)) Then
+                                        AddChangedField(MismatchJson, 'y');
+                                    If (RotStr <> '') And
+                                       (Abs(NormDeg(Pad.Rotation) - NormDeg(NewRot)) > 0.001) Then
+                                        AddChangedField(MismatchJson, 'rotation');
+                                    If (XSStr <> '') And (Pad.TopXSize <> MilsToCoordF(NewXS)) Then
+                                        AddChangedField(MismatchJson, 'x_size');
+                                    If (YSStr <> '') And (Pad.TopYSize <> MilsToCoordF(NewYS)) Then
+                                        AddChangedField(MismatchJson, 'y_size');
+                                    If ShapeHow = 'unconfirmed' Then
+                                        AddChangedField(MismatchJson, 'shape');
+                                    If Pos('top_only', ShapeHow) = 1 Then
+                                        AddChangedField(WarnJson,
+                                            'TopShape took but the bottom stack entry did '
+                                            + 'not read back the same; pad.mode and '
+                                            + 'pad.bottom say whether that matters');
+                                    If (HoleTypeStr = 'slot') And (Pad.HoleType <> eSlotHole) Then
+                                        AddChangedField(MismatchJson, 'hole_type');
+                                    If (HoleTypeStr = 'square') And (Pad.HoleType <> eSquareHole) Then
+                                        AddChangedField(MismatchJson, 'hole_type');
+                                    If (HoleTypeStr = 'round') And (Pad.HoleType <> eRoundHole) Then
+                                        AddChangedField(MismatchJson, 'hole_type');
+                                    If (SlotStr <> '') And (Pad.HoleWidth <> MilsToCoordF(SlotLen)) Then
+                                        AddChangedField(MismatchJson, 'slot_length');
+                                    If (HoleRotStr <> '') And
+                                       (Abs(NormDeg(Pad.HoleRotation) - NormDeg(HoleRot)) > 0.001) Then
+                                        AddChangedField(MismatchJson, 'hole_rotation');
+                                    If (PlatedStr <> '') And (Pad.Plated <> (PlatedStr = 'true')) Then
+                                        AddChangedField(MismatchJson, 'plated');
+                                    If (MaskStr <> '') Or (PasteStr <> '') Then
+                                    Begin
+                                        Cache := Pad.GetState_Cache;
+                                        If (MaskStr = 'rule') And
+                                           (Cache.SolderMaskExpansionValid = eCacheManual) Then
+                                            AddChangedField(MismatchJson, 'mask_expansion');
+                                        If (MaskStr <> '') And (MaskStr <> 'rule') And
+                                           ((Cache.SolderMaskExpansionValid <> eCacheManual) Or
+                                            (Cache.SolderMaskExpansion <>
+                                             MilsToCoordF(StrToFloatDef(MaskStr, 0)))) Then
+                                            AddChangedField(MismatchJson, 'mask_expansion');
+                                        If (PasteStr = 'rule') And
+                                           (Cache.PasteMaskExpansionValid = eCacheManual) Then
+                                            AddChangedField(MismatchJson, 'paste_expansion');
+                                        If (PasteStr <> '') And (PasteStr <> 'rule') And
+                                           ((Cache.PasteMaskExpansionValid <> eCacheManual) Or
+                                            (Cache.PasteMaskExpansion <>
+                                             MilsToCoordF(StrToFloatDef(PasteStr, 0)))) Then
+                                            AddChangedField(MismatchJson, 'paste_expansion');
+                                    End;
+                                    If (ClearStr = 'true') And (Pad.Name <> '') Then
+                                        AddChangedField(MismatchJson, 'designator');
+                                    If (NewName <> '') And (Pad.Name <> NewName) Then
+                                        AddChangedField(MismatchJson, 'designator');
+                                    If ((XSStr <> '') Or (YSStr <> '')) And (Pad.Layer = eMultiLayer)
+                                       And (Pad.Mode <> ePadMode_Simple) Then
+                                        AddChangedField(WarnJson,
+                                            'the pad stack is not simple, so x_size/y_size set the '
+                                            + 'TOP layer only; compare pad.bottom and pad.mid');
+                                Except
+                                    AddChangedField(WarnJson, 'the read-back raised part way through');
+                                End;
+                            End;
+
+                            { The pad was reached: report its state whatever happened. }
+                            ItemJson := JsonStr('designator', Desig)
+                                + ',' + JsonInt('index', ResIdx)
+                                + ',' + JsonInt('matches', Matches)
+                                + ',' + JsonBool('ok', (ErrCode = '') And (MismatchJson = ''))
+                                + ',' + JsonRaw('changed', JsonArr(ChangedJson))
+                                + ',' + JsonRaw('mismatched', JsonArr(MismatchJson))
+                                + ',' + JsonRaw('warnings', JsonArr(WarnJson));
+                            If ShapeHow <> '' Then
+                                ItemJson := ItemJson + ',' + JsonStr('shape_status', ShapeHow);
+                            If ErrCode <> '' Then
+                                ItemJson := ItemJson + ',' + JsonStr('error', ErrCode)
+                                    + ',' + JsonStr('message', ErrMsg);
+                            ItemJson := ItemJson + ',' + JsonRaw('pad', PadStateJson(Pad, XOrg, YOrg));
+                        End;
+                    Finally
+                        Target.GroupIterator_Destroy(GrpIter);
+                    End;
+                End;
+
+                If ItemJson = '' Then
+                    ItemJson := JsonStr('designator', Desig)
+                        + ',' + JsonStr('index', IdxStr)
+                        + ',' + JsonInt('matches', Matches)
+                        + ',' + JsonBool('ok', False)
+                        + ',' + JsonStr('error', ErrCode)
+                        + ',' + JsonStr('message', ErrMsg);
+
+                If (ErrCode = '') And (MismatchJson = '') Then Inc(Applied)
+                Else Inc(FailedCount);
+                If ResultsJson <> '' Then ResultsJson := ResultsJson + ',';
+                ResultsJson := ResultsJson + JsonObj(ItemJson);
+            End;
+        Finally
+            PCBServer.PostProcess;
+        End;
+    Finally
+        Try SnapAddrs.Free; Except End;
+        Try SnapNames.Free; Except End;
+        Try UsedAddrs.Free; Except End;
+    End;
+
+    If AnyChange Then
+    Begin
+        Try PcbLib.Board.ViewManager_FullUpdate; Except End;
+        MarkDocDirtyByPath(LibPath);
+    End;
+
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonStr('library', LibPath) + ','
+        + JsonStr('footprint', FpWanted) + ','
+        + JsonInt('applied', Applied) + ','
+        + JsonInt('failed', FailedCount) + ','
+        + JsonInt('total', OpCount) + ','
+        + JsonRaw('results', JsonArr(ResultsJson)) + ','
+        + JsonBool('written_to_disk', False) + ','
+        + JsonBool('pending_save', AnyChange) + ','
+        + JsonStr('note', 'Changed in memory and the library marked dirty. '
+            + 'app_save_all writes it; lib_get_pad_geometry after the save '
+            + 'and lib_reload_library is the proof it persisted.')));
+End;
+
+{..............................................................................}
+{ Lib_DeleteFootprintPads - remove named pads from one PcbLib footprint.       }
+{                                                                              }
+{ Params: footprint_name (required), library_path (optional), confirm=true    }
+{ (required), pads (batch). Per selector: designator (required; '' selects    }
+{ unnamed pads), and either index (0-based, as lib_modify_footprint_pads) or   }
+{ all=true (every pad with that designator). A designator carried by more     }
+{ than one pad with neither is REFUSED.                                        }
+{                                                                              }
+{ ALL OR NOTHING. Every selector must resolve before the first pad goes; one   }
+{ that does not refuses the whole call, because a half-applied delete is      }
+{ harder to reason about than one that did nothing (the obj_batch_delete      }
+{ guard's rule).                                                               }
+{                                                                              }
+{ The removal is Lib_DeleteFootprintPrimitives's, call for call: walk with a   }
+{ base IPCB_Primitive, stop on the match, Target.RemovePCBObject while the     }
+{ iterator is still open, then destroy it. A pad added in this session is     }
+{ listed twice until a reload, so each address gets up to two passes and the  }
+{ reply says how many removals each took. Whether the removal reaches disk is  }
+{ checked the only way it can be: save, reload, read (see the reply's note).  }
+{..............................................................................}
+Function Lib_DeleteFootprintPads(Params : String; RequestId : String) : String;
+Var
+    LibPath, FpWanted, PadsStr, Remaining, Op, ErrCode, ErrMsg, ConfirmStr : String;
+    Desig, IdxStr, AllStr, PadAddr, TxtName, ItemJson, ResultsJson, RefusedJson : String;
+    PcbLib : IPCB_Library;
+    Target : IPCB_LibComponent;
+    GrpIter : IPCB_GroupIterator;
+    Pad : IPCB_Pad;
+    Prim : IPCB_Primitive;
+    SnapAddrs, SnapNames, Doomed, AfterAddrs : TStringList;
+    I, J, WantIdx, Matches, Picked, OpCount, Removed, DoubleListed : Integer;
+    Removals, StillListed, PadsBefore, PadsAfter : Integer;
+    Found, TakeAll : Boolean;
+Begin
+    LibPath := ExtractJsonValue(Params, 'library_path');
+    FpWanted := ExtractJsonValue(Params, 'footprint_name');
+    PadsStr := ExtractJsonValue(Params, 'pads');
+    ConfirmStr := ExtractJsonValue(Params, 'confirm');
+    If FpWanted = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'footprint_name is required');
+        Exit;
+    End;
+    If PadsStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'pads is required');
+        Exit;
+    End;
+    If ConfirmStr <> 'true' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'CONFIRM_REQUIRED',
+            'This removes pads from footprint "' + FpWanted + '", which changes '
+            + 'its pinout. Read them with lib_get_pad_geometry, then pass '
+            + 'confirm=true.');
+        Exit;
+    End;
+
+    PcbLib := FocusPcbLibForEdit(LibPath, ErrCode, ErrMsg);
+    If PcbLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, ErrCode, ErrMsg);
+        Exit;
+    End;
+    Target := FindPcbLibFootprint(PcbLib, FpWanted);
+    If Target = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'FOOTPRINT_NOT_FOUND',
+            'Footprint not found in ' + LibPath + ': ' + FpWanted);
+        Exit;
+    End;
+
+    OpCount := 0;
+    Removed := 0;
+    DoubleListed := 0;
+    StillListed := 0;
+    PadsAfter := 0;
+    ResultsJson := '';
+    RefusedJson := '';
+
+    SnapAddrs := TStringList.Create;
+    SnapNames := TStringList.Create;
+    Doomed := TStringList.Create;
+    AfterAddrs := TStringList.Create;
+    Try
+        GrpIter := Target.GroupIterator_Create;
+        Try
+            GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+            Pad := GrpIter.FirstPCBObject;
+            While Pad <> Nil Do
+            Begin
+                PadAddr := '';
+                Try PadAddr := IntToStr(Pad.I_ObjectAddress); Except End;
+                If (PadAddr <> '') And (SnapAddrs.IndexOf(PadAddr) < 0) Then
+                Begin
+                    TxtName := '';
+                    Try TxtName := Pad.Name; Except End;
+                    SnapAddrs.Add(PadAddr);
+                    SnapNames.Add(TxtName);
+                End;
+                Pad := GrpIter.NextPCBObject;
+            End;
+        Finally
+            Target.GroupIterator_Destroy(GrpIter);
+        End;
+        PadsBefore := SnapAddrs.Count;
+
+        { Resolve every selector first. Nothing is removed in this loop. }
+        Remaining := PadsStr;
+        While True Do
+        Begin
+            Op := NextBatchOp(Remaining);
+            If Op = '' Then Break;
+            OpCount := OpCount + 1;
+            Desig := GetBatchField(Op, 'designator');
+            IdxStr := Trim(GetBatchField(Op, 'index'));
+            AllStr := LowerCase(Trim(GetBatchField(Op, 'all')));
+            TakeAll := (AllStr = 'true');
+            WantIdx := -1;
+            ErrMsg := '';
+            If (IdxStr <> '') And TakeAll Then
+                ErrMsg := 'index and all are exclusive'
+            Else If IdxStr <> '' Then
+            Begin
+                If IsIntStr(IdxStr) Then WantIdx := StrToIntDef(IdxStr, -1);
+                If WantIdx < 0 Then ErrMsg := 'index must be a whole number, 0 or more';
+            End;
+
+            Matches := 0;
+            For I := 0 To SnapNames.Count - 1 Do
+                If SnapNames[I] = Desig Then Matches := Matches + 1;
+
+            If ErrMsg = '' Then
+            Begin
+                If Matches = 0 Then
+                    ErrMsg := 'no pad named "' + Desig + '"'
+                Else If (WantIdx < 0) And (Not TakeAll) And (Matches > 1) Then
+                    ErrMsg := IntToStr(Matches) + ' pads are named "' + Desig
+                        + '"; pass index (0 to ' + IntToStr(Matches - 1)
+                        + ') or all=true'
+                Else If WantIdx >= Matches Then
+                    ErrMsg := 'index ' + IntToStr(WantIdx) + ' asked for, but only '
+                        + IntToStr(Matches) + ' pad(s) are named "' + Desig + '"';
+            End;
+
+            If ErrMsg <> '' Then
+            Begin
+                AddFailReason(RefusedJson, Desig, ErrMsg);
+                Continue;
+            End;
+
+            Picked := 0;
+            J := 0;
+            For I := 0 To SnapNames.Count - 1 Do
+            Begin
+                If SnapNames[I] = Desig Then
+                Begin
+                    If TakeAll Or (WantIdx < 0) Or (J = WantIdx) Then
+                    Begin
+                        If Doomed.IndexOf(SnapAddrs[I]) < 0 Then
+                        Begin
+                            Doomed.Add(SnapAddrs[I]);
+                            Picked := Picked + 1;
+                        End;
+                    End;
+                    J := J + 1;
+                End;
+            End;
+            ItemJson := JsonStr('designator', Desig) + ','
+                + JsonStr('index', IdxStr) + ','
+                + JsonBool('all', TakeAll) + ','
+                + JsonInt('matches', Matches) + ','
+                + JsonInt('selected', Picked);
+            If ResultsJson <> '' Then ResultsJson := ResultsJson + ',';
+            ResultsJson := ResultsJson + JsonObj(ItemJson);
+        End;
+
+        If RefusedJson <> '' Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'SELECTOR_UNRESOLVED',
+                'Nothing was removed: some selectors did not resolve to exactly '
+                + 'the pads meant. ' + '[' + RefusedJson + ']');
+            Exit;
+        End;
+
+        PCBServer.PreProcess;
+        Try
+            PCBServer.SendMessageToRobots(Target.I_ObjectAddress,
+                c_Broadcast, PCBM_BeginModify, c_NoEventData);
+            For I := 0 To Doomed.Count - 1 Do
+            Begin
+                Removals := 0;
+                For J := 1 To 2 Do
+                Begin
+                    Found := False;
+                    GrpIter := Target.GroupIterator_Create;
+                    Try
+                        GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+                        Prim := GrpIter.FirstPCBObject;
+                        While Prim <> Nil Do
+                        Begin
+                            PadAddr := '';
+                            Try PadAddr := IntToStr(Prim.I_ObjectAddress); Except End;
+                            If PadAddr = Doomed[I] Then
+                            Begin
+                                Found := True;
+                                Break;
+                            End;
+                            Prim := GrpIter.NextPCBObject;
+                        End;
+                        { Removed while the iterator is OPEN: see the       }
+                        { REMOVE WHILE THE ITERATOR IS STILL OPEN note in    }
+                        { Lib_DeleteFootprintPrimitives.                     }
+                        If Found And (Prim <> Nil) Then
+                        Begin
+                            Try
+                                Target.RemovePCBObject(Prim);
+                                Removals := Removals + 1;
+                            Except
+                                Found := False;
+                            End;
+                        End;
+                    Finally
+                        Target.GroupIterator_Destroy(GrpIter);
+                    End;
+                    If Not Found Then Break;
+                End;
+                If Removals > 0 Then Removed := Removed + 1;
+                If Removals > 1 Then DoubleListed := DoubleListed + 1;
+            End;
+            PCBServer.SendMessageToRobots(Target.I_ObjectAddress,
+                c_Broadcast, PCBM_EndModify, c_NoEventData);
+        Finally
+            PCBServer.PostProcess;
+        End;
+
+        { Read back: none of the removed addresses may still be listed. }
+        GrpIter := Target.GroupIterator_Create;
+        Try
+            GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+            Pad := GrpIter.FirstPCBObject;
+            While Pad <> Nil Do
+            Begin
+                PadAddr := '';
+                Try PadAddr := IntToStr(Pad.I_ObjectAddress); Except End;
+                If (PadAddr <> '') And (AfterAddrs.IndexOf(PadAddr) < 0) Then
+                Begin
+                    AfterAddrs.Add(PadAddr);
+                    If Doomed.IndexOf(PadAddr) >= 0 Then StillListed := StillListed + 1;
+                End;
+                Pad := GrpIter.NextPCBObject;
+            End;
+        Finally
+            Target.GroupIterator_Destroy(GrpIter);
+        End;
+        PadsAfter := AfterAddrs.Count;
+    Finally
+        Try SnapAddrs.Free; Except End;
+        Try SnapNames.Free; Except End;
+        Try Doomed.Free; Except End;
+        Try AfterAddrs.Free; Except End;
+    End;
+
+    If Removed > 0 Then
+    Begin
+        Try PcbLib.Board.ViewManager_FullUpdate; Except End;
+        MarkDocDirtyByPath(LibPath);
+    End;
+
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonStr('library', LibPath) + ','
+        + JsonStr('footprint', FpWanted) + ','
+        + JsonInt('removed', Removed) + ','
+        + JsonInt('selectors', OpCount) + ','
+        + JsonRaw('results', JsonArr(ResultsJson)) + ','
+        + JsonInt('pads_before', PadsBefore) + ','
+        + JsonInt('pads_after', PadsAfter) + ','
+        + JsonInt('still_listed', StillListed) + ','
+        + JsonInt('double_listed', DoubleListed) + ','
+        + JsonBool('written_to_disk', False) + ','
+        + JsonBool('pending_save', Removed > 0) + ','
+        + JsonStr('note', 'Removed in memory and the library marked dirty. '
+            + 'app_save_all writes it. Proof it persisted: after the save, '
+            + 'lib_reload_library then lib_get_pad_geometry must not list the '
+            + 'pads. still_listed above must be 0.')));
+End;
+
+{..............................................................................}
+{ Lib_SetFootprintDescription - set Description on one or many footprints.    }
+{                                                                              }
+{ Params: library_path (optional), and EITHER footprint_name + description    }
+{ (one footprint; an empty description clears it) OR edits_path (a file of    }
+{ "name<TAB>description" lines in the system ANSI codepage, one per footprint, }
+{ written by the Python tool the way lib_batch_rename writes its file).       }
+{                                                                              }
+{ The write is Lib_CreateFootprint's Footprint.Description, on an existing    }
+{ footprint, inside the library walk the height sweep already writes in, and  }
+{ bracketed with PCBM_BeginModify / PCBM_EndModify on the footprint as        }
+{ Lib_DeleteFootprintPrimitives brackets its edits. Every write is READ BACK.  }
+{..............................................................................}
+Function Lib_SetFootprintDescription(Params : String; RequestId : String) : String;
+Var
+    LibPath, FpWanted, NewDesc, EditsPath, ErrCode, ErrMsg : String;
+    Line, WantName, Want, OldDesc, GotDesc, FpName, Key : String;
+    ResultsJson, MissingJson, MismatchJson : String;
+    PcbLib : IPCB_Library;
+    Iter : IPCB_LibraryIterator;
+    Footprint : IPCB_LibComponent;
+    Edits, Names, Descs, Done : TStringList;
+    I, Updated, Unchanged, Mismatched, Emitted, Missing : Integer;
+Begin
+    LibPath := ExtractJsonValue(Params, 'library_path');
+    FpWanted := ExtractJsonValue(Params, 'footprint_name');
+    NewDesc := ExtractJsonValue(Params, 'description');
+    EditsPath := ExtractJsonValue(Params, 'edits_path');
+
+    If (FpWanted = '') And (EditsPath = '') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM',
+            'give footprint_name (with description) or edits_path');
+        Exit;
+    End;
+    If (FpWanted <> '') And (EditsPath <> '') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAMS',
+            'give footprint_name or edits_path, not both');
+        Exit;
+    End;
+    If (EditsPath <> '') And (Not FileExists(EditsPath)) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_EDITS',
+            'Edit file not found: ' + EditsPath);
+        Exit;
+    End;
+
+    PcbLib := FocusPcbLibForEdit(LibPath, ErrCode, ErrMsg);
+    If PcbLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, ErrCode, ErrMsg);
+        Exit;
+    End;
+
+    Updated := 0;
+    Unchanged := 0;
+    Mismatched := 0;
+    Missing := 0;
+    Emitted := 0;
+    ResultsJson := '';
+    MissingJson := '';
+    MismatchJson := '';
+
+    Edits := TStringList.Create;
+    Names := TStringList.Create;
+    Descs := TStringList.Create;
+    Done := TStringList.Create;
+    Try
+        If EditsPath <> '' Then
+        Begin
+            Edits.LoadFromFile(EditsPath);
+            For I := 0 To Edits.Count - 1 Do
+            Begin
+                Line := Edits[I];
+                If (Length(Line) > 0) And (Copy(Line, Length(Line), 1) = #13) Then
+                    Line := Copy(Line, 1, Length(Line) - 1);
+                If Line = '' Then Continue;
+                WantName := SplitNextTab(Line);
+                If WantName = '' Then Continue;
+                Names.Add(WantName);
+                Descs.Add(Line);
+            End;
+        End
+        Else
+        Begin
+            Names.Add(FpWanted);
+            Descs.Add(NewDesc);
+        End;
+
+        PCBServer.PreProcess;
+        Try
+            Iter := PcbLib.LibraryIterator_Create;
+            Try
+                Footprint := Iter.FirstPCBObject;
+                While Footprint <> Nil Do
+                Begin
+                    FpName := '';
+                    Try FpName := Footprint.Name; Except End;
+                    For I := 0 To Names.Count - 1 Do
+                    Begin
+                        Key := UpperCase(Names[I]);
+                        If Key <> UpperCase(FpName) Then Continue;
+                        If Done.IndexOf(Key) >= 0 Then Continue;
+                        Done.Add(Key);
+                        Want := Descs[I];
+                        OldDesc := '';
+                        Try OldDesc := Footprint.Description; Except End;
+                        GotDesc := OldDesc;
+                        If OldDesc = Want Then
+                            Unchanged := Unchanged + 1
+                        Else
+                        Begin
+                            Try
+                                PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
+                                    c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                            Except End;
+                            Try Footprint.Description := Want; Except End;
+                            Try
+                                PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
+                                    c_Broadcast, PCBM_EndModify, c_NoEventData);
+                            Except End;
+                            GotDesc := '';
+                            Try GotDesc := Footprint.Description; Except End;
+                            If GotDesc = Want Then
+                                Updated := Updated + 1
+                            Else
+                            Begin
+                                Mismatched := Mismatched + 1;
+                                AddFailReason(MismatchJson, FpName,
+                                    'read back "' + GotDesc + '"');
+                            End;
+                        End;
+                        If Emitted < 200 Then
+                        Begin
+                            If ResultsJson <> '' Then ResultsJson := ResultsJson + ',';
+                            ResultsJson := ResultsJson + JsonObj(
+                                JsonStr('footprint', FpName) + ','
+                                + JsonStr('old', OldDesc) + ','
+                                + JsonStr('read_back', GotDesc) + ','
+                                + JsonBool('changed', OldDesc <> GotDesc));
+                            Emitted := Emitted + 1;
+                        End;
+                        Break;
+                    End;
+                    Footprint := Iter.NextPCBObject;
+                End;
+            Finally
+                PcbLib.LibraryIterator_Destroy(Iter);
+            End;
+        Finally
+            PCBServer.PostProcess;
+        End;
+
+        For I := 0 To Names.Count - 1 Do
+        Begin
+            If Done.IndexOf(UpperCase(Names[I])) < 0 Then
+            Begin
+                Missing := Missing + 1;
+                If Missing <= 100 Then
+                Begin
+                    If MissingJson <> '' Then MissingJson := MissingJson + ',';
+                    MissingJson := MissingJson + '"' + EscapeJsonString(Names[I]) + '"';
+                End;
+            End;
+        End;
+    Finally
+        Try Edits.Free; Except End;
+        Try Names.Free; Except End;
+        Try Descs.Free; Except End;
+        Try Done.Free; Except End;
+    End;
+
+    If (Updated > 0) Or (Mismatched > 0) Then
+    Begin
+        Try PcbLib.Board.ViewManager_FullUpdate; Except End;
+        MarkDocDirtyByPath(LibPath);
+    End;
+
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonStr('library', LibPath) + ','
+        + JsonInt('updated', Updated) + ','
+        + JsonInt('unchanged', Unchanged) + ','
+        + JsonInt('mismatched', Mismatched) + ','
+        + JsonInt('missing_count', Missing) + ','
+        + JsonRaw('missing', JsonArr(MissingJson)) + ','
+        + JsonRaw('mismatches', JsonArr(MismatchJson)) + ','
+        + JsonRaw('results', JsonArr(ResultsJson)) + ','
+        + JsonBool('written_to_disk', False) + ','
+        + JsonBool('pending_save', (Updated > 0) Or (Mismatched > 0))));
+End;
+
 Function Lib_SetMechLayers(Params : String; RequestId : String) : String;
 Var
     LibPath, FocusedPath, OpsStr : String;
@@ -11962,6 +13515,10 @@ Begin
         'delete_footprint':     Result := Lib_DeleteFootprint(Params, RequestId);
         'delete_footprint_primitives':
                                 Result := Lib_DeleteFootprintPrimitives(Params, RequestId);
+        'modify_footprint_pads': Result := Lib_ModifyFootprintPads(Params, RequestId);
+        'delete_footprint_pads': Result := Lib_DeleteFootprintPads(Params, RequestId);
+        'set_footprint_description':
+                                Result := Lib_SetFootprintDescription(Params, RequestId);
         'remove_model':         Result := Lib_RemoveModel(Params, RequestId);
         'rename_footprint':     Result := Lib_RenameFootprint(Params, RequestId);
         'set_model_name':       Result := Lib_SetModelName(Params, RequestId);

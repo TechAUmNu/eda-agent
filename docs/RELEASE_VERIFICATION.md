@@ -1,4 +1,4 @@
-# Release verification: 2026.10.04.1
+# Release verification: 2026.10.04.2
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -37,6 +37,10 @@ works elsewhere cannot be an undeclared identifier:
 | 6, mirrored text | `MirrorFlag` | yes, `PCB.pas` | lowest |
 | 20, bulk vias | `Size`, `HoleSize`, `LowLayer`, `HighLayer` on a via | yes, `PCB_PlaceVia` | low |
 | 20, track width | `Width` on a track, now in fractions of a mil | yes, `PCB_PlaceTrack` | low |
+| 23, pad editing | `RemovePCBObject` | yes, `Lib_DeleteFootprintPrimitives` | medium: it deletes, and whether removing a session-added pad's second listing reaches disk is unmeasured |
+| 23, pad editing | `SetState_StackShapeOnLayer` | yes, `Library.pas` | medium: the through-hole fix hands the method top, bottom and inner layers it was never given before |
+| 23, pad editing | `HoleType` | yes, `Lib_AddFootprintPads` | low: `eRoundHole` is a new value for it |
+| 23, pad editing | `Description` | yes, `Lib_CreateFootprint` | low: written on an existing footprint for the first time |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -217,7 +221,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.04.1`, `version_match` =
+Expect `altium_script_version` = `2026.10.04.2`, `version_match` =
 `true`, and `mcp_server_version` = `0.6.1`.
 
 Those are two different versions and they fail differently.
@@ -1309,6 +1313,53 @@ Finally the refusals: `align middle` answers `BAD_ALIGN` before anything
 is touched, and a `.txt` file as `model_path` with `replace true` answers
 `MODEL_LOAD_FAILED` and leaves the placeholders where they were (list
 the footprint to check).
+
+---
+
+## 23. Pad editing inside a PcbLib footprint
+
+`lib_modify_footprint_pads`, `lib_delete_footprint_pads` and
+`lib_set_footprint_description` are new, and the add tools now write a
+roundrect on every copper layer. Every Altium member they touch is already
+used elsewhere, so an undeclared identifier is ruled out by construction;
+what is unmeasured is BEHAVIOUR, and each handler reports what it observed so
+one run settles it. Call `app_ping` after every step.
+
+On a scratch .PcbLib only:
+
+1. `lib_create_footprint` a scratch footprint, then `lib_add_footprint_pads`
+   with: pad "1" through-hole roundrect (hole_size 40, 70 x 70, corner_radius
+   25); pad "2" SMD rectangular; two SMD pads both named "3"; one unplated
+   blank pad (designator "", hole_size 40, plated false). The reply must say
+   `roundrect_requested: 1, roundrect_unconfirmed: 0`. If it says
+   `roundrect_unconfirmed: 1`, the through-hole fix did not take: record it
+   and continue, step 2 will say more.
+2. `lib_modify_footprint_pads` on "1" with `shape: "rectangular"`, then
+   again with `shape: "roundrect", corner_radius: 40`. Record each reply's
+   `shape_status` (`confirmed` or `top_only`, either possibly ending
+   `_via_top_shape`, or `unconfirmed`) and the pad's `mode`, `bottom` and
+   `mid` blocks. `confirmed` means writing the top/bottom/inner stack entries
+   works; a `_via_top_shape` suffix means only `TopShape :=
+   eRoundedRectangular` did, and the add path should try it first.
+3. Modify "3" with only `x`: it must answer `AMBIGUOUS` and change nothing.
+   With `index: 1, x: 10.5` exactly one pad moves, and
+   `lib_get_pad_geometry` shows which (the second "3" in its list).
+4. Modify "2" with `layer: "BottomLayer"`, `mask_expansion: 2`,
+   `paste_expansion: "rule"`. Every field must come back with `mismatched`
+   empty.
+5. `app_save_all`, `lib_reload_library`, `lib_get_pad_geometry`: everything
+   from steps 2-4 must still be there. This is the step that proves the
+   `PCBM_BeginModify` bracket made the edits persist.
+6. `lib_delete_footprint_pads` on "3" index 0 with `confirm: true`. The
+   library was reloaded in step 5, so expect `removed: 1`, `still_listed: 0`,
+   `double_listed: 0`. Then add one more pad "9" and delete it WITHOUT a
+   reload: that pad is listed twice, so expect `double_listed: 1`. Save,
+   reload, read: neither pad may come back. If one does, removing it from
+   the footprint is not enough and the library board's registration has to
+   be removed too; record which one.
+7. `lib_set_footprint_description` once with `footprint_name` and once with
+   `descriptions` for two footprints. Save, reload, `lib_get_footprints`: the
+   new text must be on disk.
 
 ---
 

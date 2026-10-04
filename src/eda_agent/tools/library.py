@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 from ..bridge import get_bridge
-from ..bridge.payload import payload_safe
+from ..bridge.payload import payload_safe, unsendable_chars
 from ..libimport import extract_cse_zip, inspect_cse_zip
 from .bulk_hints import BulkHintTracker
 from .datasheet_hints import tag_response
@@ -358,7 +358,8 @@ def _mil(v: object) -> str:
     return str(int(r)) if r == int(r) else f"{r:.4f}".rstrip("0").rstrip(".")
 
 
-def _pads_payload(pads: list[dict[str, Any]]) -> tuple[str, int]:
+def _pads_payload(pads: list[dict[str, Any]],
+                  allow_blank: bool = False) -> tuple[str, int]:
     """Build the ``pads`` batch payload, and count what was dropped.
 
     Sibling of :func:`_pins_payload`, extracted for the same reason: the
@@ -369,8 +370,13 @@ def _pads_payload(pads: list[dict[str, Any]]) -> tuple[str, int]:
     checking against the real parser rather than a reading of it.
 
     Returns ``(payload, skipped_invalid)``. A pad with a blank
-    designator is dropped -- the Pascal requires one -- and counted so
-    the loss is reported instead of silently absorbed.
+    designator is dropped and counted, so the loss is reported instead
+    of silently absorbed, UNLESS the blank is asked for: ``allow_blank``
+    for the whole call, ``"allow_blank_designator": True`` on the pad,
+    or ``"plated": False`` (an NPTH hole, conventionally unnamed). The
+    Pascal writes whatever Name it is given; the drop was only ever a
+    guard against a forgotten designator, and a fiducial or mechanical
+    pad is unnamed on purpose.
     """
     op_strs: list[str] = []
     skipped_invalid = 0
@@ -379,7 +385,9 @@ def _pads_payload(pads: list[dict[str, Any]]) -> tuple[str, int]:
         # designator or layer carrying ";", "=" or "~~" reshapes the
         # payload and lands the pad somewhere else.
         desig = _payload_safe(str(p.get("designator", "")).strip())
-        if not desig and p.get("plated") is not False:
+        blank_ok = (allow_blank or p.get("allow_blank_designator") is True
+                    or p.get("plated") is False)
+        if not desig and not blank_ok:
             skipped_invalid += 1
             continue
         fields = [
@@ -406,6 +414,267 @@ def _pads_payload(pads: list[dict[str, Any]]) -> tuple[str, int]:
             fields.append(f"hole_rotation={float(p['hole_rotation'])}")
         op_strs.append(";".join(fields))
     return "~~".join(op_strs), skipped_invalid
+
+
+#: Per-edit fields lib_modify_footprint_pads accepts, by how they travel.
+#: Mils and degrees go through _mil, so sub-mil values keep Altium's
+#: 1/10000-mil resolution exactly as lib_add_footprint_pads sends them.
+_PAD_EDIT_MILS = ("x", "y", "x_size", "y_size", "hole_size", "slot_length")
+_PAD_EDIT_DEGREES = ("rotation", "hole_rotation")
+_PAD_EDIT_EXPANSIONS = ("mask_expansion", "paste_expansion")
+_PAD_EDIT_KEYS = frozenset(
+    ("designator", "index", "shape", "corner_radius", "plated", "hole_type",
+     "layer", "new_designator", "allow_blank_designator")
+    + _PAD_EDIT_MILS + _PAD_EDIT_DEGREES + _PAD_EDIT_EXPANSIONS)
+
+#: Shape words folded onto the four pad-stack shapes. Mirrors
+#: CanonicalPadShape in Library.pas, which refuses anything else: a
+#: modify that fell back to "round" the way the add path does would
+#: reshape a pad nobody asked to reshape. "roundrectangle" is what
+#: lib_get_pad_geometry reports, so a read can be fed straight back.
+_PAD_SHAPE_WORDS = {
+    "round": "round", "rounded": "round", "circle": "round",
+    "oval": "round",
+    "rectangular": "rectangular", "rect": "rectangular",
+    "rectangle": "rectangular",
+    "octagonal": "octagonal", "oct": "octagonal", "octagon": "octagonal",
+    "roundrect": "roundrect", "rounded_rectangular": "roundrect",
+    "roundrectangle": "roundrect", "rounded_rectangle": "roundrect",
+}
+_PAD_HOLE_TYPES = ("round", "square", "slot")
+
+
+def _finite(value: object) -> "float | None":
+    """A finite number from a JSON-ish value, else None.
+
+    Booleans are refused even though Python counts them as ints: a
+    ``"x": true`` is a caller mistake, and sending it as 1 mil would
+    move a pad by a mil and report success.
+    """
+    if isinstance(value, bool):
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if f != f or f in (float("inf"), float("-inf")):
+        return None
+    return f
+
+
+def _pad_index(value: object) -> "int | None":
+    """A 0-based pad index, or None when the value is not one."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float) and value.is_integer() and value >= 0:
+        return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def _pad_edits_payload(edits: object,
+                       allow_blank: bool = False) -> tuple[str, list[str]]:
+    """Build the ``edits`` batch for lib_modify_footprint_pads.
+
+    Returns ``(payload, problems)``. ANY problem refuses the whole call
+    before anything is sent. The alternative, dropping the bad field and
+    sending the rest, is the failure this codebase keeps paying for: the
+    handler reports success for a pad that was only half changed.
+
+    Same grammar and sanitiser as :func:`_pads_payload`, so the FPC
+    cross-validation of ``GetBatchField`` covers this string too.
+    """
+    if not isinstance(edits, (list, tuple)) or not edits:
+        return "", ["edits must be a non-empty list of dicts"]
+    problems: list[str] = []
+    ops: list[str] = []
+    seen: set[tuple[str, int]] = set()
+    for n, e in enumerate(edits):
+        where = f"edit {n}"
+        if not isinstance(e, dict):
+            problems.append(f"{where}: must be a dict, got {type(e).__name__}")
+            continue
+        unknown = sorted(str(k) for k in set(e) - _PAD_EDIT_KEYS)
+        if unknown:
+            problems.append(f"{where}: unknown key(s) {unknown}; accepted: "
+                            f"{sorted(_PAD_EDIT_KEYS)}")
+            continue
+        if e.get("designator") is None:
+            problems.append(f"{where}: designator is required (\"\" selects "
+                            f"the unnamed pads)")
+            continue
+        desig = _payload_safe(str(e["designator"]).strip())
+        fields = [f"designator={desig}"]
+        idx = None
+        if e.get("index") is not None:
+            idx = _pad_index(e["index"])
+            if idx is None:
+                problems.append(f"{where}: index must be a whole number, 0 or "
+                                f"more")
+                continue
+            fields.append(f"index={idx}")
+        target = (desig, -1 if idx is None else idx)
+        if target in seen:
+            problems.append(f"{where}: pad {desig!r} (index {idx}) is already "
+                            f"edited earlier in this call; merge the edits")
+            continue
+        seen.add(target)
+
+        before = len(problems)
+        for key in _PAD_EDIT_MILS + _PAD_EDIT_DEGREES:
+            if e.get(key) is None:
+                continue
+            v = _finite(e[key])
+            if v is None:
+                problems.append(f"{where}: {key} must be a number")
+            elif key in ("x_size", "y_size", "slot_length") and v <= 0:
+                problems.append(f"{where}: {key} must be greater than zero")
+            elif key == "hole_size" and v < 0:
+                problems.append(f"{where}: hole_size cannot be negative (0 "
+                                f"makes the pad SMD)")
+            elif key in _PAD_EDIT_DEGREES and not -360.0 <= v <= 360.0:
+                problems.append(f"{where}: {key} must be within -360..360")
+            else:
+                fields.append(f"{key}={_mil(v)}")
+        for key in _PAD_EDIT_EXPANSIONS:
+            if e.get(key) is None:
+                continue
+            if isinstance(e[key], str) and e[key].strip().lower() == "rule":
+                fields.append(f"{key}=rule")
+                continue
+            v = _finite(e[key])
+            if v is None:
+                problems.append(f"{where}: {key} must be a number in mils or "
+                                f"\"rule\"")
+            else:
+                fields.append(f"{key}={_mil(v)}")
+        if e.get("shape") is not None:
+            canon = _PAD_SHAPE_WORDS.get(str(e["shape"]).strip().lower())
+            if canon is None:
+                problems.append(f"{where}: unknown shape {e['shape']!r}; use "
+                                f"round, rectangular, octagonal or roundrect")
+            else:
+                fields.append(f"shape={canon}")
+        if e.get("corner_radius") is not None:
+            cr = _finite(e["corner_radius"])
+            if cr is None or not cr.is_integer() or not 0 <= cr <= 100:
+                problems.append(f"{where}: corner_radius is a whole "
+                                f"percentage, 0 to 100")
+            else:
+                fields.append(f"corner_radius={int(cr)}")
+        if e.get("plated") is not None:
+            if not isinstance(e["plated"], bool):
+                problems.append(f"{where}: plated must be true or false")
+            else:
+                fields.append(f"plated={'true' if e['plated'] else 'false'}")
+        if e.get("hole_type") is not None:
+            ht = str(e["hole_type"]).strip().lower()
+            if ht not in _PAD_HOLE_TYPES:
+                problems.append(f"{where}: hole_type must be round, square or "
+                                f"slot")
+            else:
+                if (ht == "slot" and e.get("slot_length") is None):
+                    problems.append(f"{where}: hole_type=slot needs "
+                                    f"slot_length (mils)")
+                fields.append(f"hole_type={ht}")
+        if e.get("layer") is not None and str(e["layer"]).strip():
+            fields.append(f"layer={_payload_safe(str(e['layer']).strip())}")
+        if "new_designator" in e and e["new_designator"] is not None:
+            new = _payload_safe(str(e["new_designator"]).strip())
+            if new:
+                fields.append(f"new_designator={new}")
+            elif allow_blank or e.get("allow_blank_designator") is True:
+                fields.append("clear_designator=true")
+            else:
+                problems.append(f"{where}: new_designator is blank; pass "
+                                f"allow_blank_designator=true to leave the "
+                                f"pad unnamed (fiducial, mechanical pad)")
+        if len(problems) > before:
+            continue
+        if len(fields) == (2 if idx is not None else 1):
+            problems.append(f"{where}: changes nothing; give at least one "
+                            f"field to set")
+            continue
+        ops.append(";".join(fields))
+    return "~~".join(ops), problems
+
+
+def _pad_selectors_payload(pads: object) -> tuple[str, list[str]]:
+    """Build the ``pads`` batch for lib_delete_footprint_pads.
+
+    Returns ``(payload, problems)``; any problem refuses the call, for
+    the same reason the Pascal refuses a selector it cannot resolve.
+    """
+    if not isinstance(pads, (list, tuple)) or not pads:
+        return "", ["pads must be a non-empty list of dicts"]
+    problems: list[str] = []
+    ops: list[str] = []
+    for n, p in enumerate(pads):
+        where = f"pad {n}"
+        if not isinstance(p, dict):
+            problems.append(f"{where}: must be a dict, got {type(p).__name__}")
+            continue
+        unknown = sorted(str(k) for k in set(p) - {"designator", "index",
+                                                     "all"})
+        if unknown:
+            problems.append(f"{where}: unknown key(s) {unknown}; accepted: "
+                            f"designator, index, all")
+            continue
+        if p.get("designator") is None:
+            problems.append(f"{where}: designator is required (\"\" selects "
+                            f"the unnamed pads)")
+            continue
+        fields = [f"designator={_payload_safe(str(p['designator']).strip())}"]
+        take_all = p.get("all") is True
+        if p.get("index") is not None:
+            idx = _pad_index(p["index"])
+            if idx is None:
+                problems.append(f"{where}: index must be a whole number, 0 or "
+                                f"more")
+                continue
+            if take_all:
+                problems.append(f"{where}: index and all are exclusive")
+                continue
+            fields.append(f"index={idx}")
+        if take_all:
+            fields.append("all=true")
+        ops.append(";".join(fields))
+    return "~~".join(ops), problems
+
+
+def _write_description_edits(descriptions: dict) -> tuple[str, str]:
+    """Write the name<TAB>description file the bulk handler reads.
+
+    Returns ``(path, error)``; exactly one is non-empty. Same encoding
+    and newline contract as lib_batch_rename's file, for the same
+    reasons: the Pascal reads it in the system ANSI codepage, and a CR
+    left on a line would end up inside a description.
+    """
+    encoding = _batch_encoding()
+    lines: list[str] = []
+    for name, text in descriptions.items():
+        name_s, text_s = str(name), "" if text is None else str(text)
+        if not name_s.strip():
+            return "", "a footprint name is blank"
+        for label, value in (("name", name_s), ("description", text_s)):
+            if any(c in value for c in "\t\r\n"):
+                return "", (f"{name_s!r}: the {label} contains a tab or line "
+                            f"break, which would corrupt the batch file")
+            bad = _first_unencodable(value, encoding)
+            if bad:
+                return "", (f"{name_s!r}: the {label} contains {bad!r}, which "
+                            f"the Altium-side reader's codepage ({encoding}) "
+                            f"cannot represent")
+        lines.append(f"{name_s}\t{text_s}\n")
+    config = get_config()
+    config.ensure_workspace()
+    batch_path = config.workspace_dir / "footprint_descriptions.tsv"
+    with open(batch_path, "w", encoding=encoding, newline="") as f:
+        f.write("".join(lines))
+    return str(batch_path), ""
 
 
 def _pins_payload(pins: list[dict[str, Any]]) -> tuple[str, int]:
@@ -1169,21 +1438,23 @@ def register_library_tools(mcp):
     @mcp.tool()
     async def lib_add_footprint_pad(
         designator: str,
-        x: int,
-        y: int,
-        x_size: int = 60,
-        y_size: int = 60,
-        hole_size: int = 0,
+        x: float,
+        y: float,
+        x_size: float = 60,
+        y_size: float = 60,
+        hole_size: float = 0,
         shape: str = "rectangular",
         layer: str = "TopLayer",
-        rotation: int = 0,
+        rotation: float = 0,
         corner_radius: int = 25,
     ) -> dict[str, Any]:
         """Add a pad to the current footprint.
 
         Args:
-            designator: Pad designator (e.g., "1", "2")
-            x: X coordinate in mils
+            designator: Pad designator (e.g., "1", "2"); "" for an
+                unnamed fiducial or mechanical pad.
+            x: X coordinate in mils, relative to the footprint origin.
+                Sub-mil values are kept (1/10000 mil).
             y: Y coordinate in mils
             x_size: Pad X size in mils
             y_size: Pad Y size in mils
@@ -1197,21 +1468,23 @@ def register_library_tools(mcp):
                 for through-hole pads (always MultiLayer).
             rotation: Pad rotation in degrees
             corner_radius: Corner radius percentage for shape="roundrect"
-                (Altium stores RR radius as a %; 25 is typical).
+                (Altium stores RR radius as a %; 25 is typical). Applied
+                on every copper layer, through-hole pads included.
 
         Returns:
-            Dictionary confirming pad addition
+            Dictionary confirming pad addition; ``shape_status`` says
+            whether a roundrect read back ("confirmed") or not.
         """
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "library.add_footprint_pad",
             {
                 "designator": designator,
-                "x": x,
-                "y": y,
-                "x_size": x_size,
-                "y_size": y_size,
-                "hole_size": hole_size,
+                "x": _mil(x),
+                "y": _mil(y),
+                "x_size": _mil(x_size),
+                "y_size": _mil(y_size),
+                "hole_size": _mil(hole_size),
                 "shape": shape,
                 "layer": layer,
                 "rotation": rotation,
@@ -1226,6 +1499,7 @@ def register_library_tools(mcp):
     @mcp.tool()
     async def lib_add_footprint_pads(
         pads: list[dict[str, Any]],
+        allow_blank_designator: bool = False,
     ) -> dict[str, Any]:
         """Add MANY pads to the current footprint in ONE call.
 
@@ -1237,18 +1511,31 @@ def register_library_tools(mcp):
 
         Args:
             pads: List of pad dicts, each with:
-                - designator (str, required) -- e.g. "1", "2", "A1"
-                - x, y       (int, mils), pad centre
-                - x_size, y_size (int, mils, default 60)
-                - hole_size  (int, mils, default 0 = SMD)
+                - designator (str, required) -- e.g. "1", "2", "A1". A
+                  blank one is dropped and counted unless the pad is
+                  unplated, carries "allow_blank_designator": true, or
+                  the call passes allow_blank_designator=True.
+                - x, y       (float, mils), pad centre relative to the
+                  footprint origin; sub-mil values are kept
+                - x_size, y_size (float, mils, default 60)
+                - hole_size  (float, mils, default 0 = SMD)
                 - shape      (str, default "rectangular"), one of
                   round / rectangular / octagonal / roundrect (modern IPC
-                  rounded-rectangle SMD). Oval = round with x_size!=y_size.
+                  rounded-rectangle). Oval = round with x_size!=y_size.
+                  roundrect is set on every copper layer, so it works on
+                  through-hole pads too.
                 - corner_radius (int %, default 25) for shape="roundrect"
                 - rotation   (float deg, default 0)
                 - layer      (str, default "TopLayer"). Only used for SMD
                   pads (hole_size=0); a drilled pad is forced through-hole
                   (MultiLayer). Use "BottomLayer" for bottom-side SMD.
+                - plated (bool): False makes an NPTH hole.
+                - hole_type (str): round / square / slot; slot_length
+                  (mils) and hole_rotation (deg) for a slot.
+                - mask_expansion, paste_expansion (float, mils): a manual
+                  per-pad override of the design rule.
+            allow_blank_designator: Keep pads whose designator is blank
+                (fiducials, mechanical pads) instead of dropping them.
 
         Example, a 4-pad 0402 + corner pad in one call:
             lib_add_footprint_pads(pads=[
@@ -1259,13 +1546,17 @@ def register_library_tools(mcp):
             ])
 
         Returns:
-            Dict with added, failed, total counts.
+            Dict with added, failed, total counts, and
+            roundrect_requested / roundrect_unconfirmed: a roundrect that
+            did not read back is counted, never assumed.
         """
-        payload, skipped_invalid = _pads_payload(pads)
+        payload, skipped_invalid = _pads_payload(pads, allow_blank_designator)
 
         if not payload:
             return {
-                "error": "No valid pads (every entry was missing a designator)",
+                "error": ("No valid pads (every entry was missing a "
+                          "designator; pass allow_blank_designator=True "
+                          "for fiducials or mechanical pads)"),
                 "added": 0,
                 "total": len(pads),
                 "skipped_invalid": skipped_invalid,
@@ -4173,6 +4464,228 @@ def register_library_tools(mcp):
         bridge = get_bridge()
         return await bridge.send_command_async(
             "library.delete_footprint_primitives", params)
+
+    @mcp.tool()
+    async def lib_modify_footprint_pads(
+        footprint_name: str,
+        edits: list[dict[str, Any]],
+        library_path: str = "",
+        allow_blank_designator: bool = False,
+    ) -> dict[str, Any]:
+        """Change existing pads of ONE PcbLib footprint, in place, in one call.
+
+        THE TOOL FOR EDITING A PAD. Before it the only way to reshape,
+        resize, move, re-drill or rename one pad of a saved footprint
+        was to edit the .PcbLib file by hand, because
+        ``lib_delete_footprint_primitives`` takes every pad on a layer
+        or none, and deleting and re-adding pads loses their per-pad
+        overrides (a manual paste expansion, a mask expansion).
+
+        Read the footprint first with ``lib_get_pad_geometry``: its pad
+        order is what ``index`` counts in. Coordinates are mils relative
+        to the footprint origin, the same convention as
+        ``lib_add_footprint_pads``; sub-mil values are kept (1/10000 mil).
+        The footprint is made the library's current one first, and the
+        switch is read back (``SELECT_FAILED`` otherwise), because its
+        origin is only a trustworthy frame for a current footprint.
+
+        A designator carried by MORE THAN ONE pad (coincident USB-C
+        contacts, a pin with two lands) is refused unless ``index``
+        picks one, so a duplicate is never edited by guess. Each edit is
+        validated completely before anything is written, and every
+        field written is READ BACK: ``mismatched`` names any field that
+        did not take, and ``pad`` is the pad's state afterwards.
+
+        Args:
+            footprint_name: The footprint to edit. Required.
+            edits: One dict per pad:
+                - designator (str, REQUIRED): selects the pad. "" selects
+                  the unnamed pads (fiducials, NPTH holes).
+                - index (int): 0-based among pads with that designator,
+                  in ``lib_get_pad_geometry`` order. Required when the
+                  designator is not unique.
+                Then any of (omitted = left alone):
+                - x, y (float, mils): new pad centre.
+                - x_size, y_size (float, mils, > 0): copper size. In a
+                  simple pad stack this is every layer.
+                - rotation (float, degrees).
+                - shape (str): round | rectangular | octagonal |
+                  roundrect. Set on EVERY copper layer, through-hole
+                  pads included.
+                - corner_radius (int %, 0-100): for roundrect. Alone, it
+                  re-radiuses a pad that is already roundrect; with no
+                  corner_radius a roundrect keeps its current radius.
+                - hole_size (float, mils): 0 makes the pad SMD (on
+                  ``layer``, default TopLayer); > 0 makes it through-hole,
+                  exactly as the add tools decide.
+                - hole_type (str): round | square | slot. slot needs
+                  slot_length.
+                - slot_length (float, mils), hole_rotation (float, deg).
+                - plated (bool): False for an NPTH hole.
+                - mask_expansion, paste_expansion (float mils, or "rule"
+                  to hand the value back to the design rule).
+                - layer (str): SMD pads only, e.g. "BottomLayer".
+                - new_designator (str): rename. "" leaves the pad unnamed,
+                  and needs allow_blank_designator.
+            library_path: The .PcbLib. Defaults to the focused document.
+            allow_blank_designator: Allow new_designator "" on every edit
+                (a fiducial or mechanical pad). A single edit can carry
+                its own "allow_blank_designator": true instead.
+
+        Returns:
+            {library, footprint, applied, failed, total, results: [{
+             designator, index, matches, ok, changed, mismatched,
+             warnings, shape_status?, error?, message?, pad: {...}}],
+             written_to_disk: false, pending_save}. ``pad`` carries
+            x_mil/y_mil, sizes, shape, corner_pct, hole fields, plated,
+            layer, mode, and for a through-hole pad its ``bottom`` and
+            ``mid`` copper. The library is MARKED dirty, not written:
+            ``app_save_all`` flushes it.
+        """
+        if not str(footprint_name or "").strip():
+            return {"ok": False, "reason": "footprint_name is required"}
+        payload, problems = _pad_edits_payload(edits, allow_blank_designator)
+        if problems:
+            return {"ok": False,
+                    "reason": "nothing was sent: " + problems[0],
+                    "problems": problems}
+        params: dict[str, Any] = {
+            "footprint_name": str(footprint_name).strip(),
+            "edits": payload,
+        }
+        if str(library_path or "").strip():
+            params["library_path"] = str(library_path).strip()
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.modify_footprint_pads", params, timeout=120.0)
+
+    @mcp.tool()
+    async def lib_delete_footprint_pads(
+        footprint_name: str,
+        pads: list[dict[str, Any]],
+        library_path: str = "",
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Delete individual pads from ONE PcbLib footprint.
+
+        The single-pad delete. ``lib_delete_footprint_primitives`` with
+        include_pads removes every pad on a layer; this removes exactly
+        the pads named. Select each by designator, plus ``index`` (the
+        n-th pad with that designator in ``lib_get_pad_geometry`` order)
+        when the designator is not unique, or ``all`` for every pad
+        carrying it.
+
+        ALL OR NOTHING: if any selector does not resolve to exactly the
+        pads it names, nothing is removed and the reply says which.
+
+        Args:
+            footprint_name: The footprint to edit. Required.
+            pads: One dict per selector:
+                - designator (str, REQUIRED). "" selects unnamed pads.
+                - index (int): 0-based among pads with that designator.
+                - all (bool): every pad with that designator.
+            library_path: The .PcbLib. Defaults to the focused document.
+            confirm: Required. Read the pads with
+                ``lib_get_pad_geometry`` first, then pass True.
+
+        Returns:
+            {library, footprint, removed, selectors, results, pads_before,
+             pads_after, still_listed, double_listed, written_to_disk:
+             false, pending_save}. still_listed must be 0. The library is
+            MARKED dirty, not written: ``app_save_all`` flushes it.
+        """
+        if not str(footprint_name or "").strip():
+            return {"ok": False, "reason": "footprint_name is required"}
+        payload, problems = _pad_selectors_payload(pads)
+        if problems:
+            return {"ok": False,
+                    "reason": "nothing was sent: " + problems[0],
+                    "problems": problems}
+        if not confirm:
+            return {"ok": False, "reason": (
+                "confirm=True is required: deleting a pad changes the "
+                "footprint's pinout. Read the pads with "
+                "lib_get_pad_geometry first.")}
+        params: dict[str, Any] = {
+            "footprint_name": str(footprint_name).strip(),
+            "pads": payload,
+            "confirm": "true",
+        }
+        if str(library_path or "").strip():
+            params["library_path"] = str(library_path).strip()
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.delete_footprint_pads", params, timeout=120.0)
+
+    @mcp.tool()
+    async def lib_set_footprint_description(
+        footprint_name: str = "",
+        description: Optional[str] = None,
+        descriptions: Optional[dict[str, str]] = None,
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Set the Description of one PcbLib footprint, or of many in one call.
+
+        The PcbLib twin of ``lib_set_component_description``, which
+        writes a SchLib symbol. Read the current text with
+        ``lib_get_footprints``. Every write is read back, so text the
+        bridge flattened (characters above U+00FF arrive as "?")
+        shows up as a mismatch instead of a success.
+
+        Args:
+            footprint_name: One footprint to set (with ``description``).
+            description: The new text for ``footprint_name``. "" clears
+                it.
+            descriptions: Many at once, {footprint name: description},
+                instead of the pair above. One round trip for a whole
+                library, e.g. after a generator wrote "0,50mm" for
+                "0.50mm" in every description.
+            library_path: The .PcbLib. Defaults to the focused document.
+
+        Returns:
+            {library, updated, unchanged, mismatched, missing_count,
+             missing, mismatches, results: [{footprint, old, read_back,
+             changed}], written_to_disk: false, pending_save}. The
+            library is MARKED dirty, not written: ``app_save_all``
+            flushes it.
+        """
+        name = str(footprint_name or "").strip()
+        params: dict[str, Any] = {}
+        if descriptions:
+            if name or description is not None:
+                return {"ok": False, "reason": (
+                    "give footprint_name + description, or descriptions, "
+                    "not both")}
+            if not isinstance(descriptions, dict):
+                return {"ok": False, "reason": (
+                    "descriptions must be a {footprint name: description} "
+                    "dict")}
+            batch_path, error = _write_description_edits(descriptions)
+            if error:
+                return {"ok": False, "reason": "nothing was sent: " + error}
+            params["edits_path"] = batch_path
+        else:
+            if not name:
+                return {"ok": False, "reason": (
+                    "give footprint_name + description, or descriptions")}
+            if description is None:
+                return {"ok": False, "reason": (
+                    "description is required with footprint_name; pass "
+                    "\"\" to clear it")}
+            params["footprint_name"] = name
+            params["description"] = str(description)
+        if str(library_path or "").strip():
+            params["library_path"] = str(library_path).strip()
+
+        bridge = get_bridge()
+        result = await bridge.send_command_async(
+            "library.set_footprint_description", params, timeout=120.0)
+        if name and isinstance(result, dict):
+            lost = unsendable_chars(str(description))
+            if lost:
+                result["warning"] = (
+                    f"{lost!r} cannot cross the bridge and arrives as '?'")
+        return result
 
     @mcp.tool()
     async def lib_delete_footprint(

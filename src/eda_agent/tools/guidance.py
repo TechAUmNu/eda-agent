@@ -64,6 +64,28 @@ _RECIPES: tuple[dict[str, Any], ...] = (
             "changes the pinout rather than the drawing."),
     },
     {
+        "task": "Change or delete individual pads in a footprint",
+        "keywords": ("pad", "pads", "roundrect", "corner", "radius", "drill",
+                     "slot", "fiducial", "npth", "resize", "reshape"),
+        "document_kind": "library",
+        "backends": ("altium",),
+        "use": ["lib_get_pad_geometry", "lib_modify_footprint_pads",
+                "lib_delete_footprint_pads"],
+        "avoid": [
+            ("lib_delete_footprint_primitives",
+             "takes EVERY pad on a layer or none, and re-adding pads loses "
+             "their per-pad mask and paste overrides"),
+            ("obj_modify", "resolves a BOARD, not the library in front"),
+        ],
+        "note": (
+            "Read the pads first with lib_get_pad_geometry: its order is "
+            "what index counts in, and a designator carried by more than "
+            "one pad is refused without one. Coordinates are mils from the "
+            "footprint origin, as lib_add_footprint_pads takes them. Every "
+            "field written is read back, and the library is marked dirty, "
+            "not saved: app_save_all writes it."),
+    },
+    {
         "task": "Set mechanical layer names and kinds on a BOARD",
         "keywords": ("mechanical", "layer", "mechkind", "kind", "rename",
                      "pair", "paired", "board"),

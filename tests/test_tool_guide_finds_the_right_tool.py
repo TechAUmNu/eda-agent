@@ -125,6 +125,14 @@ QUESTIONS = [
      {"sch_place_components", "design_execute_plan"}),
     ("set the electrical type of a pin in section B of a multi part component",
      {"obj_modify"}),
+    # 2026-10-03: a carrier library's pads were edited by patching the
+    # .PcbLib file by hand, because no tool was found that changed or
+    # deleted one pad. The tools exist now; these keep them findable.
+    ("change the shape of one pad in a pcblib footprint",
+     {"lib_modify_footprint_pads"}),
+    ("delete a single pad from a footprint", {"lib_delete_footprint_pads"}),
+    ("set the corner radius of pin 1 on a through-hole header footprint",
+     {"lib_modify_footprint_pads"}),
 ]
 
 #: The second held-out set, written 2026-09-23 BEFORE put, reflect and

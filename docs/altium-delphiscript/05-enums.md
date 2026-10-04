@@ -80,7 +80,9 @@ The kind tag on every object: passed to the factories, used in
 ## 5.6 Pad / hole shapes (`TShape` / hole type)
 
 - **Pad copper shape:** `eRounded`, `eRectangular`, `eOctagonal`,
-  `eRoundRectangle` (also spelled `eRoundedRectangular`).
+  `eRoundedRectangular`. NOT `eRoundRectangle`, which is the schematic
+  rounded-rectangle object id: both exist, so a pad compared against it
+  never matches and nothing errors.
 - **Hole shape:** `eRoundHole`, `eSquareHole`, `eSlotHole`.
 
 ---

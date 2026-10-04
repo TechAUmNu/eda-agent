@@ -227,8 +227,26 @@ top-layer entries of the per-layer pad stack; a simple SMD/through pad reads
 them as its size.
 
 **`TopShape : TShape`**  *(property)*
-The pad shape: `eRounded`, `eRectangular`, `eOctagonal`, `eRoundRectangle`
-([enums](05-enums.md)).
+The pad shape in a simple stack: `eRounded`, `eRectangular`, `eOctagonal`,
+`eRoundedRectangular` ([enums](05-enums.md)). Not `eRoundRectangle`: that is
+the SCHEMATIC rounded-rectangle object id, both identifiers exist, and a pad
+compared against it never matches. A rounded rectangle is written through the
+stack setters below, because its corner radius lives there.
+
+**`SetState_StackShapeOnLayer(Layer, Shape)`** / **`SetState_StackCRPctOnLayer(Layer, Percent)`**
+Write one copper entry of the pad stack: its shape and, for
+`eRoundedRectangular`, the corner radius as a percentage. `Layer` must be a
+COPPER layer. A through-hole pad's `Layer` is `eMultiLayer`, which is not a
+stack entry, and Altium ignores it without raising: measured, a roundrect
+header pin read back round from the saved file. Write `eTopLayer` (the entry
+`TopShape` reads back), `eBottomLayer` and the inner layers instead, which is
+what `SetPadCopperShape` in Library.pas does, and read the result back.
+
+**`StackShapeOnLayer[Layer]`** / **`StackCRPctOnLayer[Layer]`** / **`XStackSizeOnLayer[Layer]`** / **`YStackSizeOnLayer[Layer]`**  *(indexed properties)*
+Read the same per-layer entries. `MidShape` / `MidXSize` / `MidYSize` and
+`BotShape` / `BotXSize` / `BotYSize` are a top/middle/bottom stack's inner
+and bottom values; `Mode` says which kind of stack the pad has
+(`ePadMode_Simple` for one shape on every layer).
 
 **`HoleSize : TCoord`**  *(property)*
 The drill diameter: `0` = SMD pad, `> 0` = through-hole.
@@ -248,9 +266,12 @@ Simple / top-middle-bottom / full pad-stack mode. `eCacheManual` style stacks
 read/write through the cache record below.
 
 **`GetState_Cache : TPadCache`** / **`SetState_Cache(Cache : TPadCache)`**
-Read / write the full pad-stack cache record (per-layer sizes, shapes, mask
-expansions). Read-modify-write: `C := Pad.GetState_Cache; C.… := …;
-Pad.SetState_Cache(C);`.
+Read / write the pad's cache record: the mask and paste expansions and
+whether each is a manual override (`eCacheManual`) or follows the design
+rule (`eCacheInvalid`). Read-modify-write, in the form this codebase uses:
+`C := Pad.GetState_Cache; C.PasteMaskExpansionValid := eCacheManual;
+C.PasteMaskExpansion := …; Pad.SetState_Cache := C;`. Read it FRESH right
+before writing it back, after any other change to the pad.
 
 **`IsSurfaceMount : Boolean`** / **`IsPadRemoved[Layer] : Boolean`**  *(properties)*
 Whether the pad is SMD; whether copper is removed on a given layer of the stack.
