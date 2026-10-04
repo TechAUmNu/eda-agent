@@ -1739,7 +1739,7 @@ def register_design_tools(mcp) -> None:
         sheet: str = "main",
         grid_mils: int = 100,
         fr_iterations: int = 80,
-        placement_hints: Optional[dict[str, dict[str, int]]] = None,
+        placement_hints: Optional[dict[str, dict[str, Any]]] = None,
         render_png: Optional[str] = None,
     ) -> dict[str, Any]:
         """Compute the schematic layout for a DesignPlan, as pure data.
@@ -1891,7 +1891,7 @@ def register_design_tools(mcp) -> None:
         plan_json: Union[str, dict],
         project_path: str,
         use_canvas: bool = True,
-        placement_hints: Optional[dict[str, dict[str, int]]] = None,
+        placement_hints: Optional[dict[str, dict[str, Any]]] = None,
         mode: str = "auto",
     ) -> dict[str, Any]:
         """Instantiate a DesignPlan in Altium.
@@ -2107,7 +2107,7 @@ def register_design_tools(mcp) -> None:
     async def design_preview_plan(
         plan_json: Union[str, dict],
         output_svg_path: Optional[str] = None,
-        placement_hints: Optional[dict[str, dict[str, int]]] = None,
+        placement_hints: Optional[dict[str, dict[str, Any]]] = None,
     ) -> dict[str, Any]:
         """Render a DesignPlan to SVG without emitting to Altium.
 

@@ -98,6 +98,8 @@ def render_canvas_svg(
         parts.append(_svg_label(label, sheet_obj, options))
     for port in canvas.power_ports_on(sheet_obj.name):
         parts.append(_svg_power_port(port, sheet_obj, options))
+    for mark in canvas.no_ercs_on(sheet_obj.name):
+        parts.append(_svg_no_erc(mark, sheet_obj, options))
     parts.append("</svg>")
     return "\n".join(parts)
 
@@ -347,6 +349,16 @@ def _svg_power_port(
         f'transform="translate(0,0)">'
         f'{body}</g>'
     )
+
+
+def _svg_no_erc(mark, sheet: Sheet, options: RenderOptions) -> str:
+    """A No-ERC mark: a small cross on the pin end, as Altium draws it."""
+    cx, cy = _mils_to_svg(mark.x, mark.y, sheet, options)
+    c = options.power_port_stroke
+    return (f'<g class="no-erc"><line x1="{cx - 4:.1f}" y1="{cy - 4:.1f}" '
+            f'x2="{cx + 4:.1f}" y2="{cy + 4:.1f}" stroke="{c}" stroke-width="1.5"/>'
+            f'<line x1="{cx - 4:.1f}" y1="{cy + 4:.1f}" x2="{cx + 4:.1f}" '
+            f'y2="{cy - 4:.1f}" stroke="{c}" stroke-width="1.5"/></g>')
 
 
 def _svg_power_port_body(

@@ -739,9 +739,25 @@ def _resolve_sheet(canvas: SchematicCanvas, plan: Any, sheet: str,
     ctx = _GlyphSheet(canvas, plan, sheet)
     changed = 0
     touched_nets: set = set()
+    # A stub-label part's drawing (stub_labels.py) is the style the plan
+    # asked for: its glyphs and copper are never moved, re-aimed or cut.
+    macro_ports: set = set()
+    macro_segs: list[Seg] = []
+    for inst in canvas.instances_on(sheet):
+        macro = getattr(inst, "stub_macro", None)
+        if macro is not None:
+            macro_ports |= {(q.text, q.x, q.y) for q in macro.ports}
+            macro_segs += [tuple(w[:4]) for w in macro.wires]
+
+    def _cuts_macro(removed) -> bool:
+        return any(r == m or _collinear_overlap(r, m)
+                   for r in removed for m in macro_segs)
+
     for gi in [i for i, _p in ctx.ports()]:
         port = canvas.power_ports[gi]
         if port is None or port.text in skip_nets:
+            continue
+        if (port.text, port.x, port.y) in macro_ports:
             continue
         wires = ctx.wires()
         ports = ctx.ports()
@@ -761,13 +777,15 @@ def _resolve_sheet(canvas: SchematicCanvas, plan: Any, sheet: str,
             removed, added, cut = shared
             dcoll, dcross, cost = _evaluate(ctx, gi, port, removed, added,
                                             None, wires, ports)
-            if dcross <= 0 and dcoll < 0:
+            if dcross <= 0 and dcoll < 0 and not _cuts_macro(removed):
                 best = ((dcoll, cost), f"share@{cut}", (removed, added, None))
+        old_wires: list[Seg] = []
         if kind == "A":
-            anchor = root
             old_segs = _path_segments(list(reversed(path_pts))) if path_pts else []
             old_wires = [w[:4] for w in wires if w[4] == port.text
                          and any(_collinear_overlap(w[:4], s) for s in old_segs)]
+        if kind == "A" and not _cuts_macro(old_wires):
+            anchor = root
             base = [w for w in wires
                     if not (w[4] == port.text and w[:4] in old_wires)]
             others = [(j, q) for j, q in ports if j != gi]

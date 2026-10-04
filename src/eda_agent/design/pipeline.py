@@ -84,6 +84,13 @@ from eda_agent.design.router import (
     _stub_endpoints,
 )
 from eda_agent.design.symbols import SymbolExtractor, SymbolModel
+from eda_agent.design.stub_labels import (
+    apply_draw_style_hints,
+    build_stub_label_macro,
+    pin_nets as _stub_pin_nets,
+    stub_label_half_extents,
+    stub_label_refdes,
+)
 
 logger = logging.getLogger("eda_agent.design.pipeline")
 
@@ -236,6 +243,13 @@ def build_canvas_from_plan(
     hidden. Emit-to-Altium paths always use strict=True.
     """
     result = PipelineResult()
+    # draw_style may arrive as a placement hint (an agent that may not edit
+    # the plan); fold it in first. Returns the SAME plan when no hint
+    # carries the key, so every other caller is untouched.
+    plan, _ds_notes = apply_draw_style_hints(plan, placement_hints)
+    for _t in _ds_notes:
+        result.notes.append(PipelineNote(severity="warning", text=_t))
+    stub_parts = stub_label_refdes(plan)
 
     # 1. Extract symbols. Skip needs_creation parts up front -- they
     # can't be placed and the planner is expected to resolve them.
@@ -321,6 +335,11 @@ def build_canvas_from_plan(
         bb = model.body_bbox
         body_half[part.refdes] = (max(1, (bb.x_max - bb.x_min) // 2),
                                   max(1, (bb.y_max - bb.y_min) // 2))
+        if part.refdes in stub_parts:
+            # A stub-label part occupies its stubs and labels, not just its
+            # body: every pass that keeps parts apart must see that.
+            body_half[part.refdes] = stub_label_half_extents(
+                model, _stub_pin_nets(plan, part.refdes, model))
     if priors:
         placements = apply_placement_priors(placements, plan, priors,
                                             body_half=body_half)
@@ -538,6 +557,17 @@ def build_canvas_from_plan(
     if polish:
         _repair_pin_polarity(canvas, plan)
 
+    # 3a''. Stub-label parts: their drawing depends only on their own pins,
+    # so it is fixed the moment they are placed. Recorded on the instance so
+    # wiring, scoring, trimming and rendering all read the same geometry.
+    if stub_parts:
+        for inst in canvas.instances:
+            if inst.refdes in stub_parts:
+                macro = build_stub_label_macro(
+                    inst, _stub_pin_nets(plan, inst.refdes, inst.symbol))
+                inst.stub_macro = macro
+                inst.keepout = macro.keepout
+
     # 3b. Parameter stamps. Bind Value / Manufacturer / MPN / Footprint
     # (and Datasheet when the part carries datasheet_url) so the emitter
     # can stamp them on each placed instance in one bulk call. Same
@@ -644,7 +674,7 @@ def build_canvas_from_plan(
     from eda_agent.design.quality import _count_body_overlaps
     for _sheet in plan.sheets:
         _overlaps = _count_body_overlaps(
-            [inst.world_bbox() for inst in canvas.instances_on(_sheet.name)])
+            [inst.keepout_bbox() for inst in canvas.instances_on(_sheet.name)])
         if _overlaps:
             result.notes.append(PipelineNote(
                 severity="warning",
@@ -1207,7 +1237,9 @@ def _recenter_within_sheet(
     return [shifted_by_refdes[p.refdes] for p in placements]
 
 
-_HINT_KEYS = frozenset({"x", "y", "rotation", "mirror", "flipped"})
+# "draw_style" is consumed earlier, by stub_labels.apply_draw_style_hints,
+# but it is a key the engine reads, so it must not be reported as unknown.
+_HINT_KEYS = frozenset({"x", "y", "rotation", "mirror", "flipped", "draw_style"})
 
 
 def _hint_mirror(refdes: str, hint: dict, current: bool,
@@ -1333,6 +1365,10 @@ def build_best_canvas_from_plan(
     On failure (base canvas couldn't be built, all variants failed),
     returns the base result with its failures intact.
     """
+    # Fold a hinted draw_style into the plan ONCE, so the pin offsets, the
+    # oversize map and every score below see the same parts the candidate
+    # builds do. Identity when no hint carries the key.
+    plan, _ = apply_draw_style_hints(plan, placement_hints)
     base = build_canvas_from_plan(
         plan, extractor, placement_hints=placement_hints,
         port_hints=port_hints, strict_shorts=strict_shorts,
@@ -2450,6 +2486,10 @@ def _trim_dangling_wires(canvas: SchematicCanvas, sheet_name: str) -> int:
     fixed: set[tuple[int, int]] = set()
     for inst in canvas.instances_on(sheet_name):
         fixed.update((e.x, e.y) for e in inst.all_pin_endpoints())
+        # A stub-label part's right/up stubs run on past their label by
+        # design; they end in empty space and must stay.
+        if inst.stub_macro is not None:
+            fixed.update(inst.stub_macro.anchors)
     fixed.update((lab.x, lab.y) for lab in canvas.labels_on(sheet_name))
     fixed.update((p.x, p.y) for p in canvas.power_ports_on(sheet_name))
     for be in canvas.bus_entries_on(sheet_name):
@@ -2877,8 +2917,15 @@ def _wire_sheet(
 
     body_obstacles: list[tuple[int, int, int, int]] = []
     for inst in instances:
-        bb = inst.world_bbox()
+        # keepout_bbox == world_bbox for every ordinary part; for a
+        # stub-label part it is the whole stub/label footprint, so no other
+        # stub, trunk or rail glyph is routed through it.
+        bb = inst.keepout_bbox()
         body_obstacles.append((bb.x_min, bb.y_min, bb.x_max, bb.y_max))
+    macros = {inst.refdes: inst.stub_macro for inst in instances
+              if inst.stub_macro is not None}
+    macro_segments: set[tuple[int, int, int, int, str]] = set()
+    macro_nets: set[str] = set()
 
     # Stagger counter per (refdes, direction) so two adjacent same-
     # direction stubs don't share an L-bend column.
@@ -2943,6 +2990,9 @@ def _wire_sheet(
                 continue
             if refdes_to_sheet.get(pin_ref.refdes) != sheet_name:
                 continue  # cross-sheet, handled on its home sheet
+            if pin_ref.refdes in macros:
+                macro_nets.add(net.name)
+                continue  # drawn by its part's stub-label macro
             endpoint = canvas.pin_world(pin_ref.refdes, pin_ref.pin)
             if endpoint is None:
                 result.failures.append(PipelineNote(
@@ -2983,6 +3033,17 @@ def _wire_sheet(
             net_actions.append((pin_ref, (end_x, end_y), endpoint.orientation))
         if net_actions:
             sheet_net_actions[net.name] = net_actions
+
+    # Stub-label macros: fixed copper, labels, glyphs and No-ERC marks. In
+    # the segment list from here on so the meeting cull, the junction pass
+    # and the floating-pin repair all see them -- but never cullable.
+    for _m in macros.values():
+        sheet_wire_segments.extend(_m.wires)
+        macro_segments.update(_m.wires)
+        canvas.add_labels(_m.labels)
+        canvas.add_power_ports(_m.ports)
+        canvas.add_no_ercs(_m.no_ercs)
+    macro_labels = {lb for _m in macros.values() for lb in _m.labels}
 
     # Pass 2 setup: every-other-net's stub-end becomes a point obstacle.
     all_stub_end_points: set[tuple[int, int]] = set()
@@ -3089,14 +3150,30 @@ def _wire_sheet(
             ),
         ))
 
+    # A net a stub-label part touches is already NAMED at that part, so the
+    # rest of it must carry the name too: one remaining pin gets its own
+    # label; two or more keep their representation, and a wired group is
+    # named once (wire_named, below).
+    for _name in sorted(macro_nets):
+        if (representations.get(_name) != "port"
+                and len(sheet_net_actions.get(_name, [])) <= 1):
+            representations[_name] = "label_per_pin"
+
     sheet_refdes = {
         pr.refdes for net in nets for pr in net.pins
         if refdes_to_sheet.get(pr.refdes) == sheet_name
-    }
+    } - set(macros)    # a stub-label part always has drawn copper
     left_labelled: list[str] = []
     promoted = _apply_no_stranded_parts_rule(
         nets, representations, sheet_refdes, left_labelled,
     )
+    # AFTER the promotion: a macro net still drawn as a plain wire reaches
+    # the part only by name, so its wire must carry that name. (A net the
+    # rule promoted already came out wire_named: removing the stub-label
+    # part from sheet_refdes makes it a net that leaves the wired set.)
+    for _name in sorted(macro_nets):
+        if representations.get(_name) == "wire":
+            representations[_name] = "wire_named"
     for net_name in promoted:
         result.notes.append(PipelineNote(
             severity="info",
@@ -3203,9 +3280,10 @@ def _wire_sheet(
                     # the sheet, or the planner asked for it. ONE label at a
                     # stub end -- always this net's own copper, and
                     # _trim_dangling_wires keeps wire up to a label, so it
-                    # cannot be left floating. (Only the stranded-parts rule
-                    # produces wire_named, and only for nets with two or
-                    # more pins here, so there is always a route to label.)
+                    # cannot be left floating. (The stranded-parts rule and
+                    # the stub-label rest-of-net rule produce wire_named,
+                    # both only for nets with two or more stub ends here,
+                    # so there is always a route to label.)
                     _pr, (ax, ay), a_orient = _name_anchor(
                         net_actions, segs,
                         [st for st in stub_segments if st[4] == net.name])
@@ -3250,7 +3328,8 @@ def _wire_sheet(
         cand_net = next((n for n in nets if n.name == candidate), None)
         rail = cand_net is not None and (
             _is_power_net(cand_net) or _is_ground_net(cand_net))
-        kept = [s for s in sheet_wire_segments if s[4] != candidate]
+        kept = [s for s in sheet_wire_segments
+                if s[4] != candidate or s in macro_segments]
         n_stranded = 0
         points: list[tuple[tuple[int, int], int]] = []
         # Rails keep the original all-segments drop: they are drawn with
@@ -3295,6 +3374,19 @@ def _wire_sheet(
 
     while True:
         offenders = _cross_net_meeting_counts(sheet_wire_segments)
+        if macro_segments and offenders:
+            # Only nets with copper the cull may drop are candidates; a
+            # meeting left between two macros is a placement fault (their
+            # footprints overlap), reported rather than looped on.
+            cullable = {s[4] for s in sheet_wire_segments
+                        if s not in macro_segments}
+            offenders = {n: c for n, c in offenders.items() if n in cullable}
+            if not offenders:
+                result.failures.append(PipelineNote(
+                    severity="error",
+                    text=(f"sheet {sheet_name!r}: two stub-label parts' "
+                          f"drawings touch; move them apart")))
+                break
         if not offenders:
             break
         # WEIGH THE CANDIDATES, do not just take the worst. Culling a net
@@ -3353,7 +3445,8 @@ def _wire_sheet(
     # reads as a floating label + floating power object in ERC). Repair every
     # such pin with a power port placed COINCIDENT with the pin: a power port
     # on a pin connects directly, with no wire to route, cull, or short.
-    _repair_floating_power_pins(canvas, sheet_name, plan, sheet_wire_segments)
+    _repair_floating_power_pins(canvas, sheet_name, plan, sheet_wire_segments,
+                                keep_labels=macro_labels)
 
     if shorted_to_label > 0:
         result.forced_label_count += shorted_to_label
@@ -4041,6 +4134,7 @@ def _repair_floating_power_pins(
     sheet_name: str,
     plan: DesignPlan,
     sheet_wire_segments: list[tuple[int, int, int, int, str]],
+    keep_labels: frozenset | set = frozenset(),
 ) -> None:
     """Ensure every power/ground pin actually connects in Altium.
 
@@ -4104,7 +4198,8 @@ def _repair_floating_power_pins(
         # drop them so they do not linger as floating net labels.
         canvas.labels[:] = [
             l for l in canvas.labels
-            if not (l.sheet == sheet_name and l.text == net.name)
+            if l in keep_labels
+            or not (l.sheet == sheet_name and l.text == net.name)
         ]
         # Drop orphaned glyphs: a port of this net sitting on neither a pin nor
         # a surviving spoke end is electrically floating.
@@ -4150,9 +4245,17 @@ def _oversized_half_map(plan: DesignPlan, symbols: dict) -> dict:
         for pr in net.pins:
             pins[pr.refdes] = pins.get(pr.refdes, 0) + 1
     out: dict[str, tuple[int, int]] = {}
+    stub_parts = stub_label_refdes(plan)
     for part in plan.parts:
         model = symbols.get((part.lib_path or "", part.lib_ref))
         if model is None:
+            continue
+        if part.refdes in stub_parts:
+            # Always the drawn footprint: the bucket knows nothing of stubs.
+            hx, hy = stub_label_half_extents(
+                model, _stub_pin_nets(plan, part.refdes, model))
+            est = _bbox_half(pins.get(part.refdes, 2))
+            out[part.refdes] = (max(hx, est), max(hy, est))
             continue
         bb = model.body_bbox
         hx = max(1, (bb.x_max - bb.x_min) // 2)

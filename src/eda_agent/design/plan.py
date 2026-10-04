@@ -15,7 +15,7 @@ helpers.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -116,6 +116,18 @@ class Part(BaseModel):
         default=None,
         description="One-line why-this-part, for audit logs, not sent to "
         "Altium. Useful when the planner re-iterates after a validation fail.",
+    )
+    draw_style: Optional[Literal["stub_labels"]] = Field(
+        default=None,
+        description="How the layout engine draws this part's connections. "
+        "None (default): the engine routes it like any other part. "
+        "'stub_labels': every used pin gets a straight 1100-mil stub and a "
+        "net label; adjacent pins of one supply net share a short rail and "
+        "ONE label; adjacent ground pins share a rail and ONE ground glyph "
+        "pointing outward; pins on no net get a No-ERC mark. The part's "
+        "nets reach the rest of the sheet by label. For dense ICs (many "
+        "same-net pins) whose routed drawing would be a fan of crossings. "
+        "Also settable per run with placement_hints[refdes]['draw_style'].",
     )
 
     def validate_atomic(self) -> list[str]:

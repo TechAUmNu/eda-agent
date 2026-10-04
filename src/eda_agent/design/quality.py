@@ -523,7 +523,12 @@ def score_canvas(
     through_body = _count_wires_through_bodies(
         wire_segs, body_rects, instances
     )
-    overlaps = _count_body_overlaps(body_rects)
+    # What each part OCCUPIES: world_bbox for an ordinary part, the whole
+    # stub/label footprint for a stub-label part, so a part parked in its
+    # stubs counts as an overlap.
+    overlaps = _count_body_overlaps([
+        inst.keepout_bbox() if hasattr(inst, "keepout_bbox") else body_rects[i]
+        for i, inst in enumerate(instances)])
     sheet_obj = next((s for s in canvas.sheets if s.name == sheet_name), None)
     target_ratio = 1.0
     if sheet_obj is not None and sheet_obj.height_mils:

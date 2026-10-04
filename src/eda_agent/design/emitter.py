@@ -399,6 +399,22 @@ def emit_canvas_delta(
                 bridge, result, sheet_name)
     _emit_bus_entries([e for e in canvas.bus_entries if e.sheet == sheet_name],
                       bridge, result, sheet_name)
+    # No-ERCs are NOT in _COPPER_TYPES: clearing every eNoERC would delete
+    # markers a person placed by hand. Only the ones the previous emit put
+    # down (recorded in the snapshot) are removed, then the current set.
+    for m in (snapshot or {}).get("no_ercs", []):
+        if m.get("sheet", sheet_name) != sheet_name:
+            continue
+        try:
+            bridge.send_command("generic.delete_objects", {
+                "scope": "active_doc", "object_type": "eNoERC",
+                "filter": f"Location.X={m['x']}|Location.Y={m['y']}"})
+        except Exception as exc:                # noqa: BLE001
+            result.notes.append(f"clearing No-ERC at ({m['x']},{m['y']}) "
+                                f"raised: {exc}")
+    marks = canvas.no_ercs_on(sheet_name)
+    if marks:
+        _emit_no_ercs(marks, bridge, result, sheet_name)
 
     result.delta = {
         "added": [i.refdes for i in added],
@@ -499,6 +515,26 @@ def _emit_sheet(
     ports = canvas.power_ports_on(sheet_name)
     if ports:
         _emit_power_ports(ports, bridge, result, sheet_name)
+    # 7. No-ERC marks (stub-label parts' unused pins).
+    marks = canvas.no_ercs_on(sheet_name)
+    if marks:
+        _emit_no_ercs(marks, bridge, result, sheet_name)
+
+
+def _emit_no_ercs(
+    marks: list, bridge: Any, result: EmitResult, sheet_name: str
+) -> None:
+    """One No-ERC per unused pin end. The bridge has a single-object
+    command only; a stub-label part carries a handful, so a loop is fine.
+    Stops on the first failure so a broken bridge does not spam notes."""
+    for m in marks:
+        try:
+            bridge.send_command("generic.place_no_erc",
+                                {"x": str(m.x), "y": str(m.y)},
+                                timeout=_BULK_TIMEOUT_S)
+        except Exception as exc:                # noqa: BLE001
+            result.notes.append(f"place_no_erc for {sheet_name} failed: {exc}")
+            break
 
 
 def _emit_mirrors(instances, bridge: Any, result: EmitResult) -> None:
