@@ -413,6 +413,46 @@ def test_a_missing_step_is_refused_before_the_save(monkeypatch, tmp_path,
     assert bridge.names() == []
 
 
+def test_a_replace_on_a_missing_footprint_is_refused_before_the_save(
+        monkeypatch, tmp_path, lib_file, step_file):
+    """Mutation: drop the footprint precheck from lib_link_3d_model.
+
+    The link handler refuses NO_FOOTPRINT only after reload_first has
+    saved and reopened the whole library.
+    """
+    bridge = _Bridge(replies={"library.get_footprints": {
+        "footprints": [{"name": "SOIC8"}]}})
+    _install(monkeypatch, tmp_path, bridge)
+    out = asyncio.run(_tools()["lib_link_3d_model"](
+        component_name="NOPE", model_path=step_file, library_path=lib_file,
+        replace=True))
+    assert out["ok"] is False and "not in" in out["reason"]
+    assert bridge.writes() == []
+
+
+def test_a_replace_sends_the_library_spelling_to_delete_and_link(
+        monkeypatch, tmp_path, lib_file, step_file):
+    """Mutation: send the caller's spelling on.
+
+    The delete matches a footprint name case-insensitively and the link
+    handler exactly: a case-different name would remove the old bodies
+    and then fail to add the new one.
+    """
+    bridge = _Bridge(replies={
+        "library.get_footprints": {"footprints": [{"name": "SOIC8"}]},
+        "library.get_footprint_bodies": {"bodies": [{"layer": "M13"}]},
+        "library.delete_footprint_primitives": {"removed": 1},
+        "library.link_3d_model": {"success": True}})
+    _install(monkeypatch, tmp_path, bridge)
+    asyncio.run(_tools()["lib_link_3d_model"](
+        component_name="soic8", model_path=step_file, library_path=lib_file,
+        replace=True))
+    assert bridge.params("library.delete_footprint_primitives")[0][
+        "footprint_name"] == "SOIC8"
+    assert bridge.params("library.link_3d_model")[0][
+        "component_name"] == "SOIC8"
+
+
 def test_a_replace_without_a_footprint_name_skips_the_reopen(
         monkeypatch, tmp_path, lib_file, step_file):
     """A reopen changes which footprint is current, and an empty

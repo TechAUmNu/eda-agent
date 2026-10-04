@@ -3792,8 +3792,10 @@ def register_library_tools(mcp):
                 so in ``warning`` and ``reload_first.skipped``) when
                 neither resolves or ``component_name`` is empty, because
                 a reopen changes which footprint is current. A
-                ``model_path`` that is not a file is refused BEFORE the
-                save.
+                ``model_path`` that is not a file, or a ``component_name``
+                the library does not hold (lib_get_footprints, read-only),
+                is refused BEFORE the save; a name matching in another
+                case is sent on in the library's own spelling.
                 The save writes every pending edit in that library; a
                 save that does not reach disk refuses the link. Ignored
                 without ``replace``, which removes nothing.
@@ -4008,6 +4010,19 @@ def register_library_tools(mcp):
                     f"saved, reopened, removed or linked")}
             if path:
                 params["library_path"] = path
+                # READ-ONLY, BEFORE the save, as the deletes do: a footprint
+                # that is not in the library must not cost a save and
+                # reopen. The library's own spelling then goes to BOTH the
+                # delete and the link: the delete matches the name
+                # case-insensitively and the link handler exactly, so a
+                # case-different name would remove the old bodies and then
+                # fail to add the new one.
+                precheck, why = await _precheck_footprint(bridge, path, fp)
+                if why:
+                    return {"ok": False, "reason": why, "precheck": precheck}
+                if precheck.get("name"):
+                    fp = precheck["name"]
+                    params["component_name"] = fp
             rec, refusal = await _reload_first(bridge, path,
                                                "replaced or linked",
                                                skip_reason=source)
@@ -4019,8 +4034,7 @@ def register_library_tools(mcp):
                 baseline, baseline_why = _saved_footprint(path, fp)
         if rec is not None and rec.get("ran"):
             result = await _replace_then_link(
-                bridge, params, path, str(component_name).strip(),
-                remove_from_board)
+                bridge, params, path, fp, remove_from_board)
         else:
             result = await bridge.send_command_async("library.link_3d_model",
                                                      params)
@@ -4039,8 +4053,7 @@ def register_library_tools(mcp):
                     f"nothing could be compared; read it with "
                     f"lib_read_pcblib_file after lib_save_library")}
             else:
-                check, entry = await _save_and_read(
-                    bridge, path, str(component_name).strip())
+                check, entry = await _save_and_read(bridge, path, fp)
                 if entry is not None:
                     removed = int((result.get("replaced") or {}).get(
                         "removed_bodies") or 0)
