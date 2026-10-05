@@ -858,10 +858,13 @@ def register_audit_tools(mcp):
         the orientation first.
 
         One deliberate exception: the layout engine may point a supply bar
-        DOWN (or sideways) when no up-facing position keeps its bar and
-        name off other copper. It does so only as a last resort, so a bar
-        listed here that the engine placed is a choice, not an accident.
-        Ground symbols are never re-aimed.
+        DOWN when no up-facing position keeps its bar, name and drop off
+        other copper and label text (sideways only when the layout was run
+        with ``allow_supply_flip="any"``). It does so only as a last resort
+        and lists every such bar in the layout notes ("points DOWN on
+        purpose"), so a bar listed here that the engine placed is a choice,
+        not an accident -- do not flip it back. Ground symbols are never
+        re-aimed.
 
         Returns:
             Dict with:

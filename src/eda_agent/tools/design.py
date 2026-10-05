@@ -1741,6 +1741,7 @@ def register_design_tools(mcp) -> None:
         fr_iterations: int = 80,
         placement_hints: Optional[dict[str, dict[str, Any]]] = None,
         render_png: Optional[str] = None,
+        allow_supply_flip: Union[str, bool] = "down",
     ) -> dict[str, Any]:
         """Compute the schematic layout for a DesignPlan, as pure data.
 
@@ -1779,6 +1780,13 @@ def register_design_tools(mcp) -> None:
                 "mirror"}}`` pinned positions, same as
                 ``design_execute_plan``.
             render_png: Optional path for a preview image of the layout.
+            allow_supply_flip: How far the post-layout glyph pass may
+                re-aim a supply bar whose bar, name or drop would sit on
+                other copper or a label. ``"down"`` (default): it may point
+                down as a last resort, and the notes list every bar it
+                pointed down; ``"any"``: sideways too; ``"off"``: every
+                bar points up (then such a glyph is left colliding and the
+                notes say so). Ground symbols always point down.
 
         Returns:
             Dict with ``ok`` / ``sheet`` / ``engine`` ("canvas") /
@@ -1789,7 +1797,7 @@ def register_design_tools(mcp) -> None:
         """
         result = layout_plan_from_json(
             plan_json, sheet=sheet, placement_hints=placement_hints,
-            render_png=render_png,
+            render_png=render_png, allow_supply_flip=allow_supply_flip,
         )
         if result.get("ok") and "placements" in result:
             result["summary"] = _schematic_summary(
@@ -1893,6 +1901,7 @@ def register_design_tools(mcp) -> None:
         use_canvas: bool = True,
         placement_hints: Optional[dict[str, dict[str, Any]]] = None,
         mode: str = "auto",
+        allow_supply_flip: Union[str, bool] = "down",
     ) -> dict[str, Any]:
         """Instantiate a DesignPlan in Altium.
 
@@ -1952,6 +1961,13 @@ def register_design_tools(mcp) -> None:
                 part where a person dragged it, read the sheet back with
                 ``design_hints_from_sheet`` and pass the result as
                 ``placement_hints``.
+            allow_supply_flip: How far the post-layout glyph pass may
+                re-aim a supply bar whose bar, name or drop would sit on
+                other copper or a label. ``"down"`` (default): it may point
+                down as a last resort, and the notes list every bar it
+                pointed down; ``"any"``: sideways too; ``"off"``: every
+                bar points up (then such a glyph is left colliding and the
+                notes say so). Ground symbols always point down.
 
         Returns:
             Result dict with ok / project_path / sheets_touched / placed
@@ -1966,7 +1982,7 @@ def register_design_tools(mcp) -> None:
             return execute_plan_via_canvas_from_json(
                 plan_json, project_path,
                 placement_hints=placement_hints,
-                mode=mode,
+                mode=mode, allow_supply_flip=allow_supply_flip,
             )
         if mode != "auto":
             return {"ok": False, "reason":
@@ -2108,6 +2124,7 @@ def register_design_tools(mcp) -> None:
         plan_json: Union[str, dict],
         output_svg_path: Optional[str] = None,
         placement_hints: Optional[dict[str, dict[str, Any]]] = None,
+        allow_supply_flip: Union[str, bool] = "down",
     ) -> dict[str, Any]:
         """Render a DesignPlan to SVG without emitting to Altium.
 
@@ -2127,6 +2144,13 @@ def register_design_tools(mcp) -> None:
                 refdes pin to the supplied position, the rest run through
                 algorithmic placement. Iterate preview→hints→preview to
                 refine a layout before a full emit.
+            allow_supply_flip: How far the post-layout glyph pass may
+                re-aim a supply bar whose bar, name or drop would sit on
+                other copper or a label. ``"down"`` (default): it may point
+                down as a last resort, and the notes list every bar it
+                pointed down; ``"any"``: sideways too; ``"off"``: every
+                bar points up (then such a glyph is left colliding and the
+                notes say so). Ground symbols always point down.
 
         Returns:
             Dict with ok / preview_svg_path / canvas (snapshot) /
@@ -2135,6 +2159,7 @@ def register_design_tools(mcp) -> None:
         """
         result = preview_plan_from_json(
             plan_json, output_svg_path, placement_hints=placement_hints,
+            allow_supply_flip=allow_supply_flip,
         )
         # Cache the most recent plan input for the dashboard's Plan tab.
         try:

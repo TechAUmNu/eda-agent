@@ -1401,9 +1401,10 @@ def build_best_canvas_from_plan(
     extractor: SymbolExtractor,
     *,
     n_tries: int = 5,
-    placement_hints: Optional[dict[str, dict[str, int]]] = None,
+    placement_hints: Optional[dict[str, dict[str, Any]]] = None,
     port_hints: Optional[dict[str, dict[str, int]]] = None,
     strict_shorts: bool = True,
+    allow_supply_flip: Any = "down",
 ) -> PipelineResult:
     """Multi-try plan -> canvas; return the lowest-scoring variant.
 
@@ -1428,7 +1429,16 @@ def build_best_canvas_from_plan(
 
     On failure (base canvas couldn't be built, all variants failed),
     returns the base result with its failures intact.
+
+    ``allow_supply_flip`` is handed to the post-selection glyph pass
+    (``port_glyphs.resolve_port_glyph_collisions``): "down" (default) lets a
+    supply bar point down as a last resort when no up-facing position is
+    clear, "any" allows sideways too, "off" keeps every bar up. Ground
+    symbols only ever point down.
     """
+    from eda_agent.design.port_glyphs import supply_flip_mode
+
+    allow_supply_flip = supply_flip_mode(allow_supply_flip)
     # Fold a hinted draw_style into the plan ONCE, so the pin offsets, the
     # oversize map and every score below see the same parts the candidate
     # builds do. Identity when no hint carries the key.
@@ -1902,22 +1912,63 @@ def build_best_canvas_from_plan(
     # moves wire, so running it per candidate would steer selection. It
     # repairs what the upgrade produced too (the PWR_IN_USB repair glyph
     # whose bar the 200-mil stub parked 20 mil under the EN wire).
+    glyph_report: dict = {}
     try:
         resolved = resolve_port_glyph_collisions(
-            best_result.canvas, plan, port_hints=port_hints)
+            best_result.canvas, plan, port_hints=port_hints,
+            allow_supply_flip=allow_supply_flip, report=glyph_report)
         if resolved:
             best_result.notes.append(PipelineNote(
                 severity="info",
                 text=(
                     f"{resolved} power port glyph(s) moved, re-aimed or "
-                    f"shared because their bar or name sat on other copper"),
+                    f"shared because their bar or name sat on other copper, "
+                    f"or their own drop crossed their net or a label"),
             ))
     except Exception as gl_exc:
+        # resolve_port_glyph_collisions restores and skips a failing sheet
+        # itself; reaching here means it failed before any sheet ran.
         best_result.notes.append(PipelineNote(
             severity="warning",
             text=(
                 "glyph collision pass failed and was skipped: "
                 f"{type(gl_exc).__name__}: {gl_exc}"),
+        ))
+    for g_sheet, g_err in glyph_report.get("errors", []):
+        best_result.notes.append(PipelineNote(
+            severity="warning",
+            text=(f"glyph collision pass failed on sheet {g_sheet!r} and "
+                  f"left that sheet as it was: {g_err}"),
+        ))
+    for g_sheet in glyph_report.get("reverted", []):
+        best_result.notes.append(PipelineNote(
+            severity="info",
+            text=(f"glyph collision pass reverted its changes on sheet "
+                  f"{g_sheet!r}: they would have added a cross-net meeting "
+                  f"or cut a power pin off its glyph"),
+        ))
+    for g_sheet, g_net, g_x, g_y, g_o in glyph_report.get("flipped", []):
+        way = {3: "DOWN", 0: "RIGHT", 2: "LEFT"}.get(g_o % 4, str(g_o))
+        best_result.notes.append(PipelineNote(
+            severity="info",
+            text=(f"power port {g_net}@({g_x},{g_y}) on sheet {g_sheet!r} "
+                  f"points {way} on purpose: no up-facing position kept its "
+                  f"bar, name and drop clear of other copper and labels. "
+                  f"audit_power_port_orientation will list it; that is this "
+                  f"choice, not an accident (allow_supply_flip='off' keeps "
+                  f"every bar up)"),
+        ))
+    remaining = glyph_report.get("remaining", [])
+    if remaining:
+        shown = "; ".join(
+            f"{r_net}@({r_x},{r_y}) on {r_sheet!r}: {', '.join(r_why)}"
+            for r_sheet, r_net, r_x, r_y, r_why in remaining[:12])
+        more = f" (+{len(remaining) - 12} more)" if len(remaining) > 12 else ""
+        best_result.notes.append(PipelineNote(
+            severity="warning",
+            text=(f"{len(remaining)} power port glyph(s) still collide after "
+                  f"the glyph pass, which found no candidate that clears "
+                  f"them: {shown}{more}"),
         ))
     if moved or resolved:
         # Designator/value text was placed against the OLD glyph

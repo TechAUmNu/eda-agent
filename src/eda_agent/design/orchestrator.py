@@ -57,8 +57,9 @@ def execute_plan_via_canvas_from_json(
     bridge: Any = None,
     cache_dir: Optional[Path] = None,
     write_preview_svg: bool = False,
-    placement_hints: Optional[dict[str, dict[str, int]]] = None,
+    placement_hints: Optional[dict[str, dict[str, Any]]] = None,
     mode: str = "auto",
+    allow_supply_flip: Any = "down",
 ) -> dict[str, Any]:
     """Parse + validate + run the canvas-based execute pipeline.
 
@@ -98,6 +99,8 @@ def execute_plan_via_canvas_from_json(
         - ``preview_svg_path``: where the SVG was written, when enabled.
     """
     out = _empty_result_dict(project_path)
+    if not _supply_flip_ok(allow_supply_flip, out):
+        return out
     payload = _parse_plan(plan_json, out)
     if payload is None:
         return out
@@ -134,6 +137,7 @@ def execute_plan_via_canvas_from_json(
     # if a cheaper compress-the-bbox variant scores better.
     pipeline_result = build_best_canvas_from_plan(
         plan, extractor, placement_hints=placement_hints,
+        allow_supply_flip=allow_supply_flip,
     )
     _merge_pipeline_result(out, pipeline_result)
     if not pipeline_result.ok:
@@ -736,10 +740,11 @@ def layout_plan_from_json(
     plan_json: Union[str, dict],
     *,
     sheet: str = "main",
-    placement_hints: Optional[dict[str, dict[str, int]]] = None,
+    placement_hints: Optional[dict[str, dict[str, Any]]] = None,
     render_png: Optional[str] = None,
     bridge: Any = None,
     cache_dir: Optional[Path] = None,
+    allow_supply_flip: Any = "down",
 ) -> dict[str, Any]:
     """Plan -> layout DATA from the canvas pipeline, without emitting.
 
@@ -760,6 +765,8 @@ def layout_plan_from_json(
     out: dict[str, Any] = {"ok": True, "sheet": sheet, "engine": "canvas",
                            "execution_accurate": True, "notes": [],
                            "failures": []}
+    if not _supply_flip_ok(allow_supply_flip, out):
+        return out
     payload = _parse_plan(plan_json, out)
     if payload is None:
         out["errors"] = list(out["notes"])
@@ -802,7 +809,8 @@ def layout_plan_from_json(
         try:
             result = build_best_canvas_from_plan(
                 plan, SymbolExtractor(bridge, SymbolCache(cache_dir)),
-                placement_hints=placement_hints)
+                placement_hints=placement_hints,
+                allow_supply_flip=allow_supply_flip)
             out["symbols"] = "altium"
         except Exception as exc:            # noqa: BLE001 - fall back below
             logger.info("symbol extraction failed, synthesising: %s", exc)
@@ -831,7 +839,8 @@ def layout_plan_from_json(
                 _part.lib_path = "synthetic"
         result = build_best_canvas_from_plan(
             preview_plan, SyntheticSymbolExtractor(preview_plan),
-            placement_hints=placement_hints)
+            placement_hints=placement_hints,
+            allow_supply_flip=allow_supply_flip)
         plan = preview_plan
         out["symbols"] = "synthetic"
         out["execution_accurate"] = False
@@ -932,7 +941,8 @@ def preview_plan_from_json(
     *,
     bridge: Any = None,
     cache_dir: Optional[Path] = None,
-    placement_hints: Optional[dict[str, dict[str, int]]] = None,
+    placement_hints: Optional[dict[str, dict[str, Any]]] = None,
+    allow_supply_flip: Any = "down",
 ) -> dict[str, Any]:
     """Run plan -> canvas + render SVG, **without** emitting to Altium.
 
@@ -966,6 +976,8 @@ def preview_plan_from_json(
         "notes": [],
         "failures": [],
     }
+    if not _supply_flip_ok(allow_supply_flip, out):
+        return out
     payload = _parse_plan(plan_json, out)
     if payload is None:
         return out
@@ -991,6 +1003,7 @@ def preview_plan_from_json(
     # land at a different layout than the eventual execute step.
     pipeline_result = build_best_canvas_from_plan(
         plan, extractor, placement_hints=placement_hints,
+        allow_supply_flip=allow_supply_flip,
     )
     out["canvas"] = pipeline_result.canvas.to_dict()
     out["counts"] = {
@@ -1040,6 +1053,20 @@ def _empty_result_dict(project_path: str) -> dict[str, Any]:
         "preview_svg_path": None,
         "canvas_snapshot_path": None,
     }
+
+
+def _supply_flip_ok(value: Any, out: dict[str, Any]) -> bool:
+    """Refuse an unknown ``allow_supply_flip`` up front, as a result rather
+    than an exception from deep inside the pipeline."""
+    from eda_agent.design.port_glyphs import supply_flip_mode
+
+    try:
+        supply_flip_mode(value)
+    except ValueError as exc:
+        out["ok"] = False
+        out.setdefault("notes", []).append(str(exc))
+        return False
+    return True
 
 
 def _parse_plan(

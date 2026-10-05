@@ -59,7 +59,8 @@ def _load(name: str):
     for i in fx["instances"]:
         cv.add_instance(SymbolInstance(
             refdes=i["refdes"], x=i["x"], y=i["y"], rotation=i["rotation"],
-            symbol=syms[i["lib"]], sheet=sheet))
+            symbol=syms[i["lib"]], sheet=sheet,
+            flipped=bool(i.get("flipped", False))))
     cv.add_wires([WireSegment(**w) for w in fx["wires"]])
     cv.add_labels([NetLabel(**lb) for lb in fx["labels"]])
     cv.add_power_ports([PowerPort(**p) for p in fx["power_ports"]])
@@ -267,16 +268,22 @@ def test_collision_free_glyph_is_never_touched():
 
 def test_barrel_out_glyph_drops_down():
     """H1, the human-approved hand fix: turn at x=9000 and point the bar
-    DOWN (a 400-mil drop rather than H1's 800, the first height whose name
-    clears the pin-7 GND name)."""
+    DOWN. 500 mil rather than H1's 800: 400 is the first height whose name
+    clears the pin-7 GND name, but its bar sits 38 mil from that name, so
+    the RANK_PAD clearance ranking takes the next grid step."""
     cv, plan, sheet = _load("barrel_u102_vin_prot")
     contacts0, cross0 = _contacts(cv, plan), _crossings(cv)
     assert G.resolve_port_glyph_collisions(cv, plan) == 1
     glyph = [p for p in cv.power_ports if p.text == "PWR_VIN_PROT"]
-    assert [(p.x, p.y, p.orientation) for p in glyph] == [(9000, 4900, 3)]
+    assert [(p.x, p.y, p.orientation) for p in glyph] == [(9000, 4800, 3)]
     assert _wires(cv, "PWR_VIN_PROT") >= {
         (9000, 5300, 9400, 5300, "PWR_VIN_PROT"),
-        (9000, 4900, 9000, 5300, "PWR_VIN_PROT")}
+        (9000, 4800, 9000, 5300, "PWR_VIN_PROT")}
+    ctx = G._GlyphSheet(cv, plan, sheet)
+    gi = next(i for i, p in ctx.ports() if p.text == "PWR_VIN_PROT")
+    g = cv.power_ports[gi]
+    assert ctx.hits(gi, g.x, g.y, g.text, g.style, g.orientation, ctx.wires(),
+                    ctx.ports(), pad=G.RANK_PAD)[0] == 0
     assert (8800, 5300, 8800, 5900, "PWR_VIN_PROT") not in _wires(cv)
     assert G.glyph_collisions(cv, plan, sheet) == {}
     assert _contacts(cv, plan) <= contacts0
@@ -288,8 +295,10 @@ def test_repair_glyph_between_rows_is_rerouted():
     reach0 = _reaches_glyph(cv, plan, sheet, "PWR_VIN_PROT")
     contacts0 = _contacts(cv, plan)
     assert G.resolve_port_glyph_collisions(cv, plan) == 1
+    # (18000, 9300), not the shortest clearing (18100, 9300): there the
+    # name ends ~70 mil from the GND riser at x=18500 (RANK_PAD ranking).
     moved = [p for p in cv.power_ports
-             if p.text == "PWR_VIN_PROT" and (p.x, p.y) == (18100, 9300)]
+             if p.text == "PWR_VIN_PROT" and (p.x, p.y) == (18000, 9300)]
     assert moved and moved[0].orientation == 3
     assert G.glyph_collisions(cv, plan, sheet) == {}
     assert _contacts(cv, plan) <= contacts0
@@ -298,11 +307,24 @@ def test_repair_glyph_between_rows_is_rerouted():
 
 
 def test_redundant_glyph_on_same_net_wire_is_shared():
-    """Literally steps (1) and (2) of the layout agent's manual cleanup."""
+    """Literally steps (1) and (2) of the layout agent's manual cleanup --
+    and step (3), the AGND spoke: its glyph's ink touches nothing, but its
+    drop crossed the PGND15/PGND16/EP rows with no junction. It is cut at
+    the first crossing, with a dot, leaving ONE GND glyph per converter."""
     cv, plan, sheet = _load("3v3_u105_gnd")
     reach0 = _reaches_glyph(cv, plan, sheet, "GND")
-    assert G.resolve_port_glyph_collisions(cv, plan) == 1
+    all0 = sum(1 for a in cv.wires for b in cv.wires
+               if a.net == b.net == "GND" and G._cross(
+                   (a.x1, a.y1, a.x2, a.y2), (b.x1, b.y1, b.x2, b.y2))) // 2
+    assert all0 >= 3
+    assert G.resolve_port_glyph_collisions(cv, plan) == 2
     assert (4300, 8400) not in {(p.x, p.y) for p in cv.power_ports}
+    assert (4500, 8200) not in {(p.x, p.y) for p in cv.power_ports}
+    assert (4500, 8500, 4500, 8600, "GND") in _wires(cv)
+    assert (4500, 8500) in {(j.x, j.y) for j in cv.junctions}
+    assert not any(a.net == b.net == "GND" and G._cross(
+        (a.x1, a.y1, a.x2, a.y2), (b.x1, b.y1, b.x2, b.y2))
+        for a in cv.wires for b in cv.wires)
     assert (4300, 8500, 4300, 8900, "GND") in _wires(cv)
     junctions = {(j.x, j.y) for j in cv.junctions}
     assert (4300, 8500) in junctions and (4300, 8400) not in junctions
@@ -553,6 +575,271 @@ def test_a_failure_mid_sheet_leaves_the_sheet_as_it_was(monkeypatch):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(G, "_apply", apply_then_fail)
-    with pytest.raises(RuntimeError):
-        G.resolve_port_glyph_collisions(cv, plan)
+    report: dict = {}
+    assert G.resolve_port_glyph_collisions(cv, plan, report=report) == 0
     assert cv.to_dict() == before
+    assert report["errors"] == [("PWR_IN_BARREL", "RuntimeError: boom")]
+
+
+def test_a_failing_sheet_does_not_stop_the_sheets_after_it(monkeypatch):
+    """Review L1: the exception used to propagate, so sheets after the
+    failing one were never visited while sheets before it kept their
+    changes -- and the pipeline then skipped the text re-placement. Now
+    the failing sheet is restored and the rest still run."""
+    import itertools
+
+    cv, plan, sheet = _load("barrel_u102_vin_prot")
+    cv2, _plan2, _ = _load("barrel_u102_vin_prot")
+    # Two copies of the same sheet under different names.
+    from eda_agent.design.canvas import Sheet as _Sheet
+    cv.add_sheet(_Sheet(name="COPY", size="A3"))
+    for inst in cv2.instances:
+        cv.add_instance(SymbolInstance(refdes=inst.refdes + "Z",
+                                       symbol=inst.symbol, x=inst.x, y=inst.y,
+                                       rotation=inst.rotation, sheet="COPY"))
+    cv.add_wires([WireSegment(w.x1, w.y1, w.x2, w.y2, sheet="COPY", net=w.net)
+                  for w in cv2.wires])
+    cv.add_power_ports([PowerPort(p.text, p.x, p.y, p.style, sheet="COPY")
+                        for p in cv2.power_ports])
+    raw = plan.model_dump()
+    for n in raw["nets"]:
+        n["pins"] += [{"refdes": pr["refdes"] + "Z", "pin": pr["pin"]}
+                      for pr in n["pins"]]
+    raw["parts"] += [dict(p, refdes=p["refdes"] + "Z", sheet="COPY")
+                     for p in raw["parts"]]
+    raw["sheets"] = raw["sheets"] + [{"name": "COPY"}]
+    plan = DesignPlan.model_validate(raw)
+    first = [s for s in cv.to_dict()["power_ports"] if s["sheet"] == sheet]
+    real = G._resolve_sheet
+    calls = itertools.count()
+
+    def fail_first(canvas, plan_, name, *a, **k):
+        if next(calls) == 0:
+            real(canvas, plan_, name, *a, **k)    # half-apply, then raise
+            raise RuntimeError("boom")
+        return real(canvas, plan_, name, *a, **k)
+
+    monkeypatch.setattr(G, "_resolve_sheet", fail_first)
+    report: dict = {}
+    assert G.resolve_port_glyph_collisions(cv, plan, report=report) == 1
+    assert [e[0] for e in report["errors"]] == [sheet]
+    assert [s for s in cv.to_dict()["power_ports"] if s["sheet"] == sheet] == first
+    copy_vin = [(p.x, p.y, p.orientation) for p in cv.power_ports
+                if p.sheet == "COPY" and p.text == "PWR_VIN_PROT"]
+    assert copy_vin == [(9000, 4800, 3)]
+
+
+# --------------------------------------- supply flip modes (review M2)
+
+def test_supply_flip_modes():
+    assert G.supply_flip_mode(True) == "any"
+    assert G.supply_flip_mode(False) == "off"
+    assert G.supply_flip_mode("down") == "down"
+    with pytest.raises(ValueError):
+        G.supply_flip_mode("sideways")
+    port = PowerPort("VCC", 0, 0, "bar")
+    anchor = {"x": 1000, "y": 1000, "u": (1, 0)}
+    orient = lambda mode: {g[2] for _s, g in G._reroute_candidates(port, anchor, mode)}
+    assert orient("off") == {1}
+    assert orient("down") == {1, 3}
+    assert orient("any") == {0, 1, 3}
+    gnd = PowerPort("GND", 0, 0, "gnd_power")
+    assert {g[2] for _s, g in G._reroute_candidates(gnd, anchor, "any")} == {3}
+
+
+@pytest.mark.parametrize("board", _BOARDS)
+def test_default_mode_never_points_a_supply_bar_sideways(board):
+    """The approved hand fix was "point the bar down"; sideways was never
+    asked for, so it is opt-in ("any") and the default cannot produce it."""
+    _off, on, _plan = _board_pair(board)
+    for p in on.power_ports:
+        assert G.port_orientation(p) in (1, 3), p
+
+
+def test_build_best_canvas_passes_the_flip_mode_through():
+    from eda_agent.design import pipeline
+
+    seen = []
+    real = G.resolve_port_glyph_collisions
+
+    def spy(canvas, plan, **kw):
+        seen.append(kw.get("allow_supply_flip"))
+        return real(canvas, plan, **kw)
+
+    plan = DesignPlan.model_validate(
+        json.loads((PLANS_DIR / "blinker555.json").read_text(encoding="utf-8")))
+    from eda_agent.design.benchmark import SyntheticSymbolExtractor
+    with mock.patch.object(pipeline, "resolve_port_glyph_collisions", spy):
+        pipeline.build_best_canvas_from_plan(
+            plan, SyntheticSymbolExtractor(plan), n_tries=1,
+            allow_supply_flip="off")
+        pipeline.build_best_canvas_from_plan(
+            plan, SyntheticSymbolExtractor(plan), n_tries=1)
+    assert seen == ["off", "down"]
+
+
+# ------------------------------------- kind-B moves and own-drop defects
+
+def test_a_hub_glyph_whose_bar_sits_on_a_label_moves_off_its_hub():
+    """Review (second) M1: the three PWR_1V8 VDD_5V glyphs hang off the
+    BIAS row (kind B), so only a share was ever tried and they were left
+    colliding with the SYNC label text -- and nothing said so. A kind-B
+    glyph may now move its drop: here down from the hub, the one direction
+    that clears the label, pointed down as the last resort it is."""
+    cv, plan, sheet = _load("1v8_u111_vdd5v")
+    hits0 = G.glyph_collisions(cv, plan, sheet)
+    assert any(cv.power_ports[i].text == "VDD_5V" for i in hits0)
+    report: dict = {}
+    assert G.resolve_port_glyph_collisions(cv, plan, report=report) >= 1
+    vdd = [p for p in cv.power_ports if p.text == "VDD_5V"]
+    assert [(p.x, p.y, p.orientation) for p in vdd] == [(6500, 8200, 3)]
+    assert (6500, 8400, 6500, 8800, "VDD_5V") not in _wires(cv)
+    assert (6500, 8200, 6500, 8400, "VDD_5V") in _wires(cv)
+    assert G.glyph_collisions(cv, plan, sheet) == {}
+    assert report["remaining"] == []
+    assert ("PWR_1V8", "VDD_5V", 6500, 8200, 3) in report["flipped"]
+
+
+def test_a_move_that_would_push_text_onto_copper_is_not_taken(monkeypatch):
+    """The text gate: designator/value text is re-placed after the pass,
+    so every improving candidate is run through the placer on a copy and
+    one that leaves annotation overlaps worse is refused (on the real
+    PWR_1V8 sheet, U103's VDD_5V: each down position pushed C145's text
+    onto a wire). With every candidate refused the glyph stays and is
+    reported."""
+    cv, plan, sheet = _load("1v8_u111_vdd5v")
+    calls = []
+
+    def gate(ctx, wires, ports):
+        calls.append(len(wires))
+        # Baseline (the sheet as it is) 0; every candidate makes it worse.
+        return 0 if wires == ctx.wires() else 1
+
+    monkeypatch.setattr(G, "_annotation_overlaps_after", gate)
+    report: dict = {}
+    G.resolve_port_glyph_collisions(cv, plan, report=report)
+    assert (6500, 8800) in {(p.x, p.y) for p in cv.power_ports
+                            if p.text == "VDD_5V"}
+    assert any(r[1] == "VDD_5V" for r in report["remaining"])
+    assert len(calls) >= 2
+
+
+def test_the_text_gate_counts_what_the_placer_produces():
+    """_annotation_overlaps_after runs the real placer on a COPY: a part
+    hemmed in by wires on every side scores > 0, and the canvas's own text
+    positions are left untouched."""
+    cv = _blank()
+    r1 = SymbolInstance(refdes="R1", x=2000, y=3000, rotation=0,
+                        symbol=_resistor(), value="10k")
+    cv.add_instance(r1)
+    plan = SimpleNamespace(nets=[])
+    ctx = G._GlyphSheet(cv, plan, "main")
+    assert G._annotation_overlaps_after(ctx, [], []) == 0
+    cage = [(1500, y, 3500, y, "N") for y in range(2500, 3600, 50)]
+    assert G._annotation_overlaps_after(ctx, cage, []) > 0
+    assert r1.designator_pos is None
+
+
+def test_a_riser_through_label_text_is_moved_clear():
+    """Review (second) M2: with Q108 mirrored, MCU_V3V3's riser ran through
+    the MCU_I2C_SDA and MCU_I2C_SCL texts. Neither the score nor the glyph
+    test saw it (the ink touches nothing). Counted now as an own-drop
+    defect; the drop leaves its hub to the right and rises clear, bar UP."""
+    cv, plan, sheet = _load("usb_q108_mirror_v3v3")
+    assert G.glyph_collisions(cv, plan, sheet) == {}
+    assert G.resolve_port_glyph_collisions(cv, plan) == 1
+    v = [p for p in cv.power_ports if p.text == "MCU_V3V3"]
+    assert [(p.x, p.y, p.orientation) for p in v] == [(11000, 2000, None)]
+    ctx = G._GlyphSheet(cv, plan, sheet)
+    own = [w[:4] for w in ctx.wires() if w[4] == "MCU_V3V3"]
+    assert G._own_defects(ctx, "MCU_V3V3", own, ctx.wires()) == 0
+
+
+def test_padding_only_ranks_it_never_flags():
+    """A bar 60 mil from a wire clears the unpadded test, so the pass must
+    leave it alone even though it is inside RANK_PAD."""
+    cv = _blank()
+    cv.add_wires([WireSegment(1000, 600, 1000, 1000, net="VCC"),
+                  WireSegment(600, 1140, 1400, 1140, net="OTHER")])
+    cv.add_power_ports([PowerPort("VCC", 1000, 1000, "bar")])
+    plan = SimpleNamespace(nets=[])
+    assert G.glyph_collisions(cv, plan, "main") == {}
+    before = cv.to_dict()
+    assert G.resolve_port_glyph_collisions(cv, plan) == 0
+    assert cv.to_dict() == before
+
+
+def test_a_new_path_never_crosses_its_own_net():
+    """Review L9: a same-net crossing reads as an ambiguous joint (no dot,
+    one name), so safe_path refuses it like a touch."""
+    cv = _blank()
+    ctx = G._GlyphSheet(cv, SimpleNamespace(nets=[]), "main")
+    wires = [(1500, 500, 1500, 2500, "VCC")]
+    assert not ctx.safe_path([(1000, 1000, 2000, 1000)], "VCC", wires, [])
+    assert ctx.safe_path([(1000, 1000, 2000, 1000)], "OTHER", wires, [])
+
+
+def test_the_report_lists_what_still_collides():
+    """Review (second) M1: a glyph the pass cannot fix is reported, so the
+    notes no longer imply a clean sheet."""
+    cv = _blank()
+    # A lone glyph on foreign copper with no wire of its own: no topology
+    # to work with, so no candidate, so it must be reported.
+    cv.add_instance(SymbolInstance(refdes="R1", x=4000, y=4000, rotation=0,
+                                   symbol=_resistor()))
+    cv.add_wires([WireSegment(700, 1100, 1300, 1100, net="OTHER")])
+    cv.add_power_ports([PowerPort("VCC", 1000, 1000, "bar")])
+    report: dict = {}
+    G.resolve_port_glyph_collisions(cv, SimpleNamespace(nets=[]), report=report)
+    assert report["remaining"] == [("main", "VCC", 1000, 1000, ["wire OTHER"])]
+
+
+def test_the_pipeline_turns_the_glyph_report_into_notes():
+    """What the pass could not fix, what it pointed away from up, and a
+    sheet it had to put back all reach the notes: an agent reading only
+    "N glyphs moved" assumed a clean sheet (second review M1, L5)."""
+    from eda_agent.design import pipeline
+    from eda_agent.design.benchmark import SyntheticSymbolExtractor
+
+    def fake(canvas, plan, **kw):
+        kw["report"].update(
+            errors=[("S1", "RuntimeError: boom")], reverted=["S2"],
+            flipped=[("S3", "VDD_5V", 6500, 13400, 3)],
+            remaining=[("S4", "GND", 100, 200, ["label"])])
+        return 1
+
+    plan = DesignPlan.model_validate(
+        json.loads((PLANS_DIR / "blinker555.json").read_text(encoding="utf-8")))
+    with mock.patch.object(pipeline, "resolve_port_glyph_collisions", fake):
+        res = pipeline.build_best_canvas_from_plan(
+            plan, SyntheticSymbolExtractor(plan), n_tries=1)
+    texts = [n.text for n in res.notes]
+    assert any("failed on sheet 'S1'" in t and "boom" in t for t in texts)
+    assert any("reverted its changes on sheet 'S2'" in t for t in texts)
+    assert any("VDD_5V@(6500,13400)" in t and "points DOWN on purpose" in t
+               and "audit_power_port_orientation" in t for t in texts)
+    assert any(t.startswith("1 power port glyph(s) still collide")
+               and "GND@(100,200)" in t for t in texts)
+
+
+def test_build_notes_are_listed_once():
+    """Review L7: an accepted polish rebuild's notes were merged with the
+    winner's, so every build note appeared twice."""
+    from eda_agent.design import pipeline
+    from eda_agent.design.benchmark import SyntheticSymbolExtractor
+
+    plan = DesignPlan.model_validate(
+        json.loads((PLANS_DIR / "mcu.json").read_text(encoding="utf-8")))
+    ref = plan.parts[0].refdes
+    # A bad hint value is reported by each of the build's two hint passes
+    # and again by every rebuild: the dedupe is what keeps it to one line.
+    res = pipeline.build_best_canvas_from_plan(
+        plan, SyntheticSymbolExtractor(plan), n_tries=1,
+        placement_hints={ref: {"rotation": "sideways"}})
+    keys = [(n.severity, n.text) for n in res.notes]
+    assert len(keys) == len(set(keys))
+    assert sum("is not an integer" in t for _s, t in keys) == 1
+    assert pipeline._dedupe_notes(
+        [pipeline.PipelineNote("info", "a"), pipeline.PipelineNote("info", "a"),
+         pipeline.PipelineNote("warning", "a")]
+    ) == [pipeline.PipelineNote("info", "a"), pipeline.PipelineNote("warning", "a")]

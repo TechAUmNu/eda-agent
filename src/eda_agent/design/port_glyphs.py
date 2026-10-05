@@ -70,6 +70,17 @@ MAX_RUN = 1200
 #: Shortest / longest leg after a turn.
 MIN_TURN_LEG = 200
 MAX_TURN_LEG = 1000
+#: Extra clearance used ONLY to RANK candidates that already clear the
+#: unpadded test, never to decide which glyphs need fixing: padding the test
+#: itself starts "fixing" glyphs nobody flagged. Among clearing positions it
+#: prefers one whose bar is not 38 mil from the next name over the shortest
+#: wire.
+RANK_PAD = 100
+
+#: ``allow_supply_flip`` modes. A ground symbol only ever points down.
+#: "down" (the default) lets a supply bar point down as a last resort;
+#: "any" also allows sideways; "off" keeps every bar pointing up.
+SUPPLY_FLIP_MODES = ("off", "down", "any")
 
 _DIRS = {0: (1, 0), 1: (0, 1), 2: (-1, 0), 3: (0, -1)}
 
@@ -292,16 +303,20 @@ class _GlyphSheet:
 
     # --------------------------------------------------------- collisions
     def hits(self, gi: int, x: int, y: int, text: str, style: str,
-             o: Optional[int], wires, ports) -> tuple[int, list[tuple]]:
+             o: Optional[int], wires, ports,
+             pad: int = 0) -> tuple[int, list[tuple]]:
         """Collision count of one glyph at (x, y, o) against a state.
 
         One per object: a wire not ending at the hotspot (ANY net -- a
         same-net wire that is not the glyph's own connection still reads as
         a glyph sitting on copper), a body, a foreign pin line, a net label,
-        another glyph.
+        another glyph. ``pad`` grows every clearance; it is only ever used
+        to RANK candidates (``RANK_PAD``), never to flag a glyph.
         """
         ink, tb = glyph_geometry(x, y, text, style, o)
-        region = _union([_seg_box(s, INK_CLR) for s in ink] + [tb])
+        if pad:
+            tb = (tb[0] - pad, tb[1] - pad, tb[2] + pad, tb[3] + pad)
+        region = _union([_seg_box(s, INK_CLR + pad) for s in ink] + [tb])
         n = 0
         out: list[tuple] = []
         for (x1, y1, x2, y2, net) in wires:
@@ -310,38 +325,40 @@ class _GlyphSheet:
                 continue
             if (x, y) in ((x1, y1), (x2, y2)):
                 continue                  # the glyph's own connection
-            if (any(_box_hit(_seg_box(s, INK_CLR), _norm(ws)) for s in ink)
+            if (any(_box_hit(_seg_box(s, INK_CLR + pad), _norm(ws))
+                    for s in ink)
                     or _box_hit(tb, _seg_box(ws, 0))):
                 n += 1
                 out.append(("wire", net, ws))
         for ref, bb in self.bodies:
             if not _near(region, bb, 1):
                 continue
-            if (any(_box_hit(_seg_box(s, 0), bb, -1) for s in ink)
+            if (any(_box_hit(_seg_box(s, pad), bb, -1) for s in ink)
                     or _box_hit(tb, bb, -1)):
                 n += 1
                 out.append(("body", ref, bb))
         for p in self.pins:
-            if p["net"] == text or not _near(region, p["box"], 45):
+            if p["net"] == text or not _near(region, p["box"], 45 + pad):
                 continue
-            if any(_box_hit(_seg_box(s, 20), _seg_box(p["line"], 20), -1)
+            if any(_box_hit(_seg_box(s, 20 + pad), _seg_box(p["line"], 20), -1)
                    for s in ink):
                 n += 1
                 out.append(("pin", f"{p['ref']}.{p['pid']}", p["line"]))
         for lb in self.labels:
-            if not _near(region, lb, 15):
+            if not _near(region, lb, 15 + pad):
                 continue
-            if _box_hit(tb, lb) or any(_box_hit(_seg_box(s, 10), lb) for s in ink):
+            if (_box_hit(tb, lb)
+                    or any(_box_hit(_seg_box(s, 10 + pad), lb) for s in ink)):
                 n += 1
                 out.append(("label", None, lb))
-        mine = [_seg_box(s, 10) for s in ink] + [tb]
+        mine = [_seg_box(s, 10 + pad) for s in ink] + [tb]
         for j, q in ports:
             if j == gi:
                 continue
             qi, qt = glyph_geometry(q.x, q.y, q.text, q.style,
                                     getattr(q, "orientation", None))
             theirs = [_seg_box(s, 10) for s in qi] + [qt]
-            if not _near(region, _union(theirs), 15):
+            if not _near(region, _union(theirs), 15 + pad):
                 continue
             if any(_box_hit(a, b) for a in mine for b in theirs):
                 n += 1
@@ -463,6 +480,8 @@ class _GlyphSheet:
                 elif (_on_seg(p["x"], p["y"], s)
                       and (p["x"], p["y"]) not in ((s[0], s[1]), (s[2], s[3]))):
                     return False      # through an own-net pin: an unintended merge
+                elif _collinear_overlap(s, p["line"]):
+                    return False      # drawn over an own-net pin's line
             for _j, q in ports:
                 if q.text != net and _on_seg(q.x, q.y, s):
                     return False
@@ -474,6 +493,12 @@ class _GlyphSheet:
                          or _on_seg(x1, y1, s) or _on_seg(x2, y2, s)
                          or _collinear_overlap(s, w))
                 if not touch:
+                    # A plain crossing of the glyph's OWN net reads as an
+                    # ambiguous junction (no dot, the same name on both
+                    # wires), so it is refused like a touch. Foreign
+                    # crossings are counted by _evaluate and may not rise.
+                    if wn == net and _cross(s, w):
+                        return False
                     continue
                 if wn != net:
                     return False
@@ -574,22 +599,47 @@ def _evaluate(ctx: _GlyphSheet, gi: int, port: PowerPort, old_segs, new_segs,
     return dcoll, dcross, cost
 
 
-def _reroute_candidates(port: PowerPort, anchor: dict, allow_supply_flip: bool):
-    """Glyph positions reached from the anchor pin by a straight run, or a
-    run then one turn. A ground symbol only ever points DOWN; a supply bar
-    points up unless ``allow_supply_flip`` lets it turn as a last resort
-    (the flip is penalised in the score, so it wins only when no natural
-    candidate clears as many collisions)."""
+def supply_flip_mode(value: Any) -> str:
+    """Normalise ``allow_supply_flip``: ``"off"`` | ``"down"`` | ``"any"``.
+
+    ``True`` keeps its original meaning (any direction) and ``False`` means
+    off, so a caller written against the boolean is unchanged; the default
+    everywhere is ``"down"``.
+    """
+    if value is True:
+        return "any"
+    if value is False or value is None:
+        return "off"
+    v = str(value).strip().lower()
+    if v in ("none", "no", "false"):
+        v = "off"
+    if v not in SUPPLY_FLIP_MODES:
+        raise ValueError(f"allow_supply_flip must be one of {SUPPLY_FLIP_MODES} "
+                         f"(or a bool); got {value!r}")
+    return v
+
+
+def _reroute_candidates(port: PowerPort, anchor: dict, flip_mode: Any):
+    """Glyph positions reached from the anchor by a straight run, or a run
+    then one turn. A ground symbol only ever points DOWN; a supply bar
+    points up unless the flip mode lets it turn as a last resort ("down":
+    down only; "any": sideways too). The flip is penalised in the score, so
+    it wins only when no natural candidate clears as much."""
     qx, qy = anchor["x"], anchor["y"]
     ux, uy = anchor["u"]
     px, py = -uy, ux
     nat = natural_orientation(port.style)
     gnd = is_ground_style(port.style)
+    mode = supply_flip_mode(flip_mode)
 
     def allowed(o: int) -> bool:
         if gnd:
             return o == 3
-        return allow_supply_flip or o == nat
+        if mode == "any":
+            return True
+        if mode == "down":
+            return o in (nat, 3)
+        return o == nat
 
     for k in range(GRID, MAX_RUN + GRID, GRID):
         tx, ty = qx + k * ux, qy + k * uy
@@ -603,6 +653,158 @@ def _reroute_candidates(port: PowerPort, anchor: dict, allow_supply_flip: bool):
                 gx, gy = tx + leg * dx, ty + leg * dy
                 yield ([(qx, qy, tx, ty), (tx, ty, gx, gy)],
                        (gx, gy, _orient(dx, dy)))
+
+
+def _own_defects(ctx: _GlyphSheet, net: str, own: Iterable[Seg],
+                 state) -> int:
+    """Defects of a glyph's OWN copper (its drop or private path).
+
+    * a plain crossing of another wire of the SAME net -- no junction dot,
+      the same name on both sides, so it reads as an ambiguous joint
+      (PWR_3V3's AGND spoke across the PGND/EP rows);
+    * a run through a net label's TEXT, which makes the name unreadable
+      (the MCU_V3V3 riser through MCU_I2C_SDA/SCL on PWR_IN_USB).
+
+    Foreign crossings are not counted here; _evaluate keeps those from
+    rising on their own.
+    """
+    own = list(own)
+    mine = set(own)
+    n = 0
+    for sg in own:
+        sb = _norm(sg)
+        for w in state:
+            if (w[4] == net and w[:4] not in mine and _near(sb, _norm(w[:4]), 1)
+                    and _cross(sg, w[:4])):
+                n += 1
+        for lb in ctx.labels:
+            if _box_hit(lb, sb):
+                n += 1
+    return n
+
+
+def _chain_wires(net: str, path_pts, wires) -> tuple[list, list[Seg], list[Seg]]:
+    """``(chain_wires, chain_segs, kept)`` for a glyph's own drop.
+
+    ``chain_wires`` are the same-net wires lying along the drop; ``kept`` is
+    what of them remains outside it (a merged wire that runs on past its
+    hub), which must survive any change to the drop.
+    """
+    chain_segs = _path_segments(list(reversed(path_pts))) if path_pts else []
+    chain_wires = [w for w in wires if w[4] == net
+                   and any(_collinear_overlap(w[:4], sg) for sg in chain_segs)]
+    kept: list[Seg] = []
+    for w in chain_wires:
+        kept += _subtract(w[:4], chain_segs)
+    return chain_wires, chain_segs, kept
+
+
+def _arm_dirs(pt: tuple[int, int], net: str, state) -> set:
+    """Directions in which same-net copper of ``state`` leaves ``pt``."""
+    out = set()
+    for w in state:
+        if w[4] != net:
+            continue
+        a, b = (w[0], w[1]), (w[2], w[3])
+        if not _on_seg(pt[0], pt[1], w[:4]):
+            continue
+        for end in (a, b):
+            if end == pt:
+                continue
+            sx = (end[0] > pt[0]) - (end[0] < pt[0])
+            sy = (end[1] > pt[1]) - (end[1] < pt[1])
+            if (sx, sy) in _DIRS.values():
+                out.add((sx, sy))
+    return out
+
+
+def _hub_anchors(net: str, hub: tuple[int, int], drop_dir: tuple[int, int],
+                 state) -> list[dict]:
+    """Starting points for a kind-B glyph's new drop.
+
+    The glyph owns only its drop from the hub, so the drop may leave the
+    hub in any direction no other arm uses (the old drop's own direction is
+    the "slide" case), or -- "the other side of the cluster" -- from the
+    far end of the straight copper run through the hub, continuing away
+    from where the old drop was.
+    """
+    out = []
+    used = _arm_dirs(hub, net, state)
+    for d in _DIRS.values():
+        if d not in used:
+            out.append({"x": hub[0], "y": hub[1], "u": d})
+    back = (-drop_dir[0], -drop_dir[1])
+    if back in used:
+        cur = hub
+        for _ in range(200):
+            nxt = None
+            for w in state:
+                if w[4] != net or not _on_seg(cur[0], cur[1], w[:4]):
+                    continue
+                for end in ((w[0], w[1]), (w[2], w[3])):
+                    sx = (end[0] > cur[0]) - (end[0] < cur[0])
+                    sy = (end[1] > cur[1]) - (end[1] < cur[1])
+                    if (sx, sy) == back:
+                        dist = abs(end[0] - cur[0]) + abs(end[1] - cur[1])
+                        if nxt is None or dist > nxt[0]:
+                            nxt = (dist, end)
+            if nxt is None:
+                break
+            cur = nxt[1]
+        if cur != hub and back not in _arm_dirs(cur, net, state):
+            out.append({"x": cur[0], "y": cur[1], "u": back})
+    return out
+
+
+#: How many of a glyph's best-ranked candidates are run through the text
+#: placer before it is left as it is.
+_TEXT_GATE_TRIES = 8
+
+
+def _annotation_overlaps_after(ctx: _GlyphSheet, wires, ports) -> int:
+    """Annotation overlaps on ``ctx``'s sheet once designator/value text is
+    re-placed against ``wires`` / ``ports`` -- which is what the pipeline
+    does after this pass (``place_instance_text``).
+
+    Runs the placer on a private copy of the sheet (instances copied, so
+    the real text positions are untouched) and counts every designator or
+    value line overlapping a wire, another body, a glyph, a net label or
+    another text line.
+    """
+    import copy
+
+    from eda_agent.design.text_placement import place_instance_text
+
+    canvas = ctx.canvas
+    sheet = next(sh for sh in canvas.sheets if sh.name == ctx.sheet)
+    sub = SchematicCanvas()
+    sub.add_sheet(sheet)
+    sub.instances = [copy.copy(i) for i in canvas.instances_on(ctx.sheet)]
+    sub.wires = [WireSegment(x1=w[0], y1=w[1], x2=w[2], y2=w[3],
+                             sheet=ctx.sheet, net=w[4]) for w in wires]
+    sub.labels = list(canvas.labels_on(ctx.sheet))
+    sub.power_ports = [q for _j, q in ports if q is not None]
+    place_instance_text(sub)
+    texts: list[tuple[str, Box]] = []
+    for inst in sub.instances:
+        for pos, txt in ((inst.designator_pos, inst.refdes),
+                         (inst.value_pos, inst.value or "")):
+            if pos is not None and txt:
+                texts.append((inst.refdes, (pos[0], pos[1],
+                                            pos[0] + CHAR_W * len(txt),
+                                            pos[1] + LINE_H)))
+    obstacles: list[tuple[str, Box]] = []
+    obstacles += [("", _norm(w[:4])) for w in wires]
+    obstacles += [(i.refdes, (b.x_min, b.y_min, b.x_max, b.y_max))
+                  for i in sub.instances for b in (i.world_bbox(),)]
+    obstacles += [("", glyph_extent(q)) for q in sub.power_ports]
+    obstacles += [("", label_text_box(lb)) for lb in sub.labels]
+    n = 0
+    for k, (ref, box) in enumerate(texts):
+        n += sum(1 for oref, ob in obstacles
+                 if oref != ref and _box_hit(box, ob))
+        n += sum(1 for _r2, other in texts[k + 1:] if _box_hit(box, other))
+    return n
 
 
 def _share_candidate(ctx: _GlyphSheet, gi: int, port: PowerPort, kind: str,
@@ -729,9 +931,21 @@ def glyph_collisions(canvas: SchematicCanvas, plan: Any, sheet: str) -> dict[int
 
 
 def _resolve_sheet(canvas: SchematicCanvas, plan: Any, sheet: str,
-                   skip_nets: set, allow_supply_flip: bool,
-                   log: Optional[Callable[[str], None]]) -> tuple[int, set]:
-    """Resolve one sheet; returns (glyphs changed, nets they belong to)."""
+                   skip_nets: set, flip_mode: Any,
+                   log: Optional[Callable[[str], None]],
+                   flipped: Optional[list] = None) -> tuple[int, set]:
+    """Resolve one sheet; returns (glyphs changed, nets they belong to).
+
+    A glyph is visited when its bar or name collides (``hits``) OR its own
+    drop crosses same-net copper or runs through label text
+    (``_own_defects``). Candidates are ranked on the change in that total,
+    then on clearance with ``RANK_PAD`` (ranking only), then on the
+    engine's weights; one is applied only if the total strictly falls, the
+    sheet's collisions do not rise and its crossings do not rise, and the
+    first of the best ``_TEXT_GATE_TRIES`` whose re-placed annotation text
+    overlaps no more objects than before (``_annotation_overlaps_after``)
+    is the one taken.
+    """
     ctx = _GlyphSheet(canvas, plan, sheet)
     changed = 0
     touched_nets: set = set()
@@ -755,58 +969,132 @@ def _resolve_sheet(canvas: SchematicCanvas, plan: Any, sheet: str,
             continue
         if (port.text, port.x, port.y) in macro_ports:
             continue
+        net = port.text
         wires = ctx.wires()
         ports = ctx.ports()
         c_old, _why = ctx.hits(gi, port.x, port.y, port.text, port.style,
                                getattr(port, "orientation", None), wires, ports)
-        if c_old == 0:
-            continue                      # collision-free: never touched
         topo = ctx.topology(gi, port, wires, ports)
+        own_old = 0
+        if topo is not None:
+            own_old = _own_defects(
+                ctx, net, _path_segments(list(reversed(topo[2]))), wires)
+        if c_old == 0 and own_old == 0:
+            continue                      # clean: never touched
         if topo is None:
             if log:
-                log(f"skip {port.text}@({port.x},{port.y}): unsupported topology")
+                log(f"skip {net}@({port.x},{port.y}): unsupported topology")
             continue
         kind, root, path_pts = topo
         best = None   # (key, description, (removed, added, glyph))
+
+        cands: list = []   # (key, description, change, after_wires, after_ports)
+
+        def consider(removed, added, glyph, new_own, label) -> None:
+            dcoll, dcross, cost = _evaluate(ctx, gi, port, removed, added,
+                                            glyph, wires, ports)
+            if dcross > 0 or dcoll > 0:
+                return
+            rm = set(removed)
+            after = [w for w in wires if not (w[4] == net and w[:4] in rm)]
+            after += [(*sg, net) for sg in added]
+            down = (_own_defects(ctx, net, new_own, after)
+                    - _own_defects(ctx, net, removed, wires))
+            total = dcoll + down
+            if total >= 0:
+                return
+            pad = 0
+            ports_after = [(j, q) for j, q in ports if j != gi]
+            if glyph is not None:
+                gx, gy, go = glyph
+                stored = None if go == natural_orientation(port.style) else go
+                moved = replace(port, x=gx, y=gy, orientation=stored)
+                ports_after.append((gi, moved))
+                pad, _ = ctx.hits(gi, gx, gy, port.text, port.style, go, after,
+                                  [(j, (moved if j == gi else q))
+                                   for j, q in ports], pad=RANK_PAD)
+                # The new drop itself: a riser that clears a label's text
+                # by 40 mil reads as touching it (the label-width estimate
+                # is approximate), so a run within half the pad ranks lower.
+                half = RANK_PAD // 2
+                pad += sum(1 for sg in new_own for lb in ctx.labels
+                           if _box_hit((lb[0] - half, lb[1] - half,
+                                        lb[2] + half, lb[3] + half), _norm(sg)))
+            cands.append(((total, pad, cost), label,
+                          (removed, added, glyph), after, ports_after))
+
         shared = _share_candidate(ctx, gi, port, kind, path_pts, wires, ports)
         if shared is not None:
             removed, added, cut = shared
-            dcoll, dcross, cost = _evaluate(ctx, gi, port, removed, added,
-                                            None, wires, ports)
-            if dcross <= 0 and dcoll < 0 and not _cuts_macro(removed):
-                best = ((dcoll, cost), f"share@{cut}", (removed, added, None))
-        old_wires: list[Seg] = []
+            if not _cuts_macro(removed):
+                consider(removed, added, None, added, f"share@{cut}")
         if kind == "A":
             old_segs = _path_segments(list(reversed(path_pts))) if path_pts else []
-            old_wires = [w[:4] for w in wires if w[4] == port.text
-                         and any(_collinear_overlap(w[:4], s) for s in old_segs)]
-        if kind == "A" and not _cuts_macro(old_wires):
-            anchor = root
-            base = [w for w in wires
-                    if not (w[4] == port.text and w[:4] in old_wires)]
-            others = [(j, q) for j, q in ports if j != gi]
-            for segs, glyph in _reroute_candidates(port, anchor, allow_supply_flip):
-                if not ctx.safe_path(segs, port.text, base, others,
-                                     allow_same_net_at=((anchor["x"], anchor["y"]),)):
-                    continue
-                dcoll, dcross, cost = _evaluate(ctx, gi, port, old_wires, segs,
-                                                glyph, wires, ports)
-                if dcross > 0 or dcoll >= 0:
-                    continue
-                key = (dcoll, cost)
-                if best is None or key < best[0]:
-                    best = (key, f"move -> {glyph}", (old_wires, segs, glyph))
+            old_wires = [w[:4] for w in wires if w[4] == net
+                         and any(_collinear_overlap(w[:4], sg) for sg in old_segs)]
+            if not _cuts_macro(old_wires):
+                anchor = root
+                base = [w for w in wires
+                        if not (w[4] == net and w[:4] in old_wires)]
+                others = [(j, q) for j, q in ports if j != gi]
+                for segs, glyph in _reroute_candidates(port, anchor, flip_mode):
+                    if not ctx.safe_path(
+                            segs, net, base, others,
+                            allow_same_net_at=((anchor["x"], anchor["y"]),)):
+                        continue
+                    consider(old_wires, segs, glyph, segs, f"move -> {glyph}")
+        elif kind == "B" and len(path_pts) >= 2:
+            chain_wires, chain_segs, kept = _chain_wires(net, path_pts, wires)
+            removed_b = [w[:4] for w in chain_wires]
+            if chain_wires and not _cuts_macro(removed_b):
+                hub = path_pts[-1]
+                nb = path_pts[-2]
+                drop_dir = ((nb[0] > hub[0]) - (nb[0] < hub[0]),
+                            (nb[1] > hub[1]) - (nb[1] < hub[1]))
+                base = ([w for w in wires if w not in chain_wires]
+                        + [(*k, net) for k in kept])
+                others = [(j, q) for j, q in ports if j != gi]
+                for anchor in _hub_anchors(net, hub, drop_dir, base):
+                    start = (anchor["x"], anchor["y"])
+                    for segs, glyph in _reroute_candidates(port, anchor,
+                                                           flip_mode):
+                        if not ctx.safe_path(segs, net, base, others,
+                                             allow_same_net_at=(start,)):
+                            continue
+                        consider(removed_b, kept + segs, glyph, kept + segs,
+                                 f"move from hub {start} -> {glyph}")
+        # THE CONSEQUENCE, NOT A PROXY. Designator/value text is re-placed
+        # after this pass, so a glyph parked where text sat moves the text,
+        # and on a crowded spot the placer's next-best side can be across a
+        # wire (PWR_1V8: a down-pointing VDD_5V took C145's spot and its
+        # text landed on C145's own wire). So the best few candidates are
+        # run through the placer on a copy of the sheet, and the first that
+        # leaves annotation overlaps no worse than doing nothing wins.
+        cands.sort(key=lambda c: c[0])
+        if cands:
+            text0 = _annotation_overlaps_after(ctx, wires, ports)
+            for cand in cands[:_TEXT_GATE_TRIES]:
+                if _annotation_overlaps_after(ctx, cand[3], cand[4]) <= text0:
+                    best = cand
+                    break
         if best is None:
             if log:
-                log(f"keep {port.text}@({port.x},{port.y}) [{kind}] "
-                    f"collisions={c_old}: no improving candidate")
+                why = ("no improving candidate" if not cands else
+                       f"{len(cands)} improving candidate(s), each would push "
+                       f"annotation text onto other objects")
+                log(f"keep {net}@({port.x},{port.y}) [{kind}] "
+                    f"collisions={c_old} own={own_old}: {why}")
             continue
         if log:
-            log(f"fix {port.text}@({port.x},{port.y}) [{kind}] "
-                f"collisions={c_old}: {best[1]}")
+            log(f"fix {net}@({port.x},{port.y}) [{kind}] "
+                f"collisions={c_old} own={own_old}: {best[1]}")
         removed, added, glyph = best[2]
         _apply(canvas, sheet, gi, port, removed, added, glyph)
-        touched_nets.add(port.text)
+        if (flipped is not None and glyph is not None
+                and not is_ground_style(port.style)
+                and glyph[2] != natural_orientation(port.style)):
+            flipped.append((sheet, net, glyph[0], glyph[1], glyph[2]))
+        touched_nets.add(net)
         changed += 1
     return changed, touched_nets
 
@@ -816,32 +1104,54 @@ def resolve_port_glyph_collisions(
     plan: Any,
     *,
     port_hints: Optional[dict[str, Any]] = None,
-    allow_supply_flip: bool = True,
+    allow_supply_flip: Any = "down",
     log: Optional[Callable[[str], None]] = None,
+    report: Optional[dict] = None,
 ) -> int:
-    """Move, re-aim or share every glyph whose bar or name sits on other copper.
+    """Move, re-aim or share every glyph whose bar or name sits on other
+    copper, or whose own drop crosses its own net or runs through a label.
 
     Runs on the FINISHED canvas, after selection and after
     ``upgrade_repair_ports_to_stubs`` (it repairs what that pass produced).
-    For each colliding glyph two kinds of candidate are scored:
+    For each such glyph three kinds of candidate are scored:
 
     * re-route its private wire (only when the glyph hangs off one pin that
       nothing else touches): out along the pin 100..1200 mil, then
       optionally turn 200..1000 mil, glyph facing the last leg;
+    * move its drop (when the glyph hangs off a hub of three or more arms):
+      from the hub in any free direction, or from the far end of the
+      straight run through the hub, the same runs and turns;
     * share: cut its own drop where it first meets same-net copper that
       still leads to another glyph of the net, and delete it.
 
-    Ranked first on the change in the sheet's total glyph collisions, then
-    on the engine's own weights (crossings, wire length, ports) plus the
+    Ranked first on the change in the glyph's defects (collisions plus
+    own-drop defects), then on clearance padded by ``RANK_PAD``, then on
+    the engine's own weights (crossings, wire length, ports) plus the
     flow-reversal weight for a glyph not facing its natural way. A
-    candidate is applied only if collisions strictly fall and crossings do
-    not rise. Glyphs of nets with a ``port_hint`` are never touched.
+    candidate is applied only if the defects strictly fall, collisions and
+    crossings do not rise, and the designator/value text the pipeline then
+    re-places would overlap no more objects than before (checked by running
+    the text placer on a copy). Glyphs of nets with a ``port_hint`` are
+    never touched. ``allow_supply_flip``: "down" (default) lets a supply bar point
+    down as a last resort, "any" sideways too, "off" never (True/False are
+    accepted as "any"/"off").
 
     Belt and braces: if a sheet ends up with a new cross-net wire meeting,
     or a power pin that reached its glyph no longer does, that sheet is
-    put back exactly as it was. Returns the number of glyphs changed.
+    put back exactly as it was. A sheet whose pass RAISES is put back too
+    and the others still run. Returns the number of glyphs changed.
+
+    ``report``, when given, is filled with ``errors`` [(sheet, message)],
+    ``reverted`` [sheet], ``flipped`` [(sheet, net, x, y, orientation)] for
+    supply bars left pointing away from up, and ``remaining``
+    [(sheet, net, x, y, [hit kinds])] for glyphs that still collide after
+    the pass, so the caller can say so instead of implying a clean sheet.
     """
+    mode = supply_flip_mode(allow_supply_flip)
     skip = set(port_hints or {})
+    rep: dict = report if report is not None else {}
+    for key in ("errors", "reverted", "flipped", "remaining"):
+        rep.setdefault(key, [])
     total = 0
     for sh in canvas.sheets:
         if not canvas.instances_on(sh.name):
@@ -855,12 +1165,18 @@ def resolve_port_glyph_collisions(
             canvas.power_ports[:] = snap_ports
             canvas.junctions[:] = snap_junctions
 
+        flipped_here: list = []
         try:
-            n, nets = _resolve_sheet(canvas, plan, sh.name, skip,
-                                     allow_supply_flip, log)
-        except Exception:
-            _restore()          # never leave a half-applied sheet behind
-            raise
+            n, nets = _resolve_sheet(canvas, plan, sh.name, skip, mode, log,
+                                     flipped_here)
+        except Exception as exc:          # noqa: BLE001 - one sheet only
+            # Never leave a half-applied sheet behind, and never let one
+            # sheet's failure leave the sheets after it unvisited.
+            _restore()
+            rep["errors"].append((sh.name, f"{type(exc).__name__}: {exc}"))
+            logger.warning("glyph pass failed on sheet %r and left it as it "
+                           "was: %s", sh.name, exc)
+            continue
         canvas.power_ports[:] = [p for p in canvas.power_ports if p is not None]
         if not n:
             continue
@@ -881,9 +1197,23 @@ def resolve_port_glyph_collisions(
                     break
         if worse:
             _restore()
+            rep["reverted"].append(sh.name)
             logger.warning("glyph pass reverted on sheet %r: it would have "
                            "added a cross-net meeting or cut a power pin "
                            "off its glyph", sh.name)
             continue
+        rep["flipped"] += flipped_here
         total += n
+    for sh in canvas.sheets:
+        if not canvas.instances_on(sh.name):
+            continue
+        try:
+            left = glyph_collisions(canvas, plan, sh.name)
+        except Exception:                 # noqa: BLE001 - report only
+            continue
+        for gi, why in sorted(left.items()):
+            q = canvas.power_ports[gi]
+            rep["remaining"].append(
+                (sh.name, q.text, q.x, q.y,
+                 sorted({f"{h[0]} {h[1]}" if h[1] else h[0] for h in why})))
     return total
