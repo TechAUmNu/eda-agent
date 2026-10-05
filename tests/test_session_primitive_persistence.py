@@ -24,11 +24,12 @@ footprint" too), then delete, then save again and read the FILE
   footprint, unresolvable selector, missing STEP) costs no save;
 * the focused .PcbLib is used when library_path is empty, and a skip is
   said at the TOP of the reply;
-* park_current is asked for only after reload_first ran, never with
-  remove_from_board;
+* park_current is asked for by default, with or without reload_first
+  (measured 2026-10-05: being CURRENT is enough to bring a removed
+  primitive back), never with remove_from_board;
 * the same rule on lib_delete_footprint_primitives and on
   lib_link_3d_model / lib_auto_link_3d_models with replace (which replace
-  through the delete, parked);
+  through the delete, parked, with or without reload_first);
 * the handler-side diagnostics one live call needs (target_was_current,
   parked_elsewhere, target_current_during_removal, board_still_listed,
   marked_modified), read-only.
@@ -151,10 +152,14 @@ def test_the_library_is_saved_and_reopened_before_the_delete(
 
 
 @pytest.mark.parametrize("tool", sorted(_DELETES))
-def test_the_footprint_is_parked_only_after_reload_first(
+def test_the_footprint_is_parked_by_default_never_with_the_board_half(
         monkeypatch, tmp_path, lib_file, tool):
-    """Mutation: ask for park_current without the reload, or with
-    remove_from_board (whose board half needs the footprint current)."""
+    """Mutation: drop park_current from either route, or send it with
+    remove_from_board (whose board half needs the footprint current).
+
+    Measured 2026-10-05 (step 31 item 3b): a disk-loaded pad removed while
+    its footprint was CURRENT came back with the save, so the no-reload
+    route parks too."""
     kwargs, command = _DELETES[tool]
     bridge = _Bridge()
     _install(monkeypatch, tmp_path, bridge)
@@ -164,7 +169,7 @@ def test_the_footprint_is_parked_only_after_reload_first(
     bridge.commands.clear()
     asyncio.run(_tools()[tool](library_path=lib_file, reload_first=False,
                                **kwargs))
-    assert "park_current" not in bridge.params(command)[-1]
+    assert bridge.params(command)[-1].get("park_current") == "true"
 
     bridge.commands.clear()
     asyncio.run(_tools()[tool](library_path=lib_file, remove_from_board=True,
@@ -481,7 +486,10 @@ def test_auto_link_reopens_once_before_the_first_replace(monkeypatch,
         model_dir=str(models), library_path=lib_file, replace=True))
     writes = bridge.writes()
     assert writes[:2] == ["library.save_library", "library.reload_library"]
-    assert writes.count("library.save_library") == 1
+    # reload_first's save, then ONE verifying save after the last link.
+    assert writes.count("library.save_library") == 2
+    assert writes[-1] == "library.save_library"
+    assert "library.reload_library" not in writes[2:]
     assert writes.count("library.link_3d_model") == 2
     assert writes.count("library.delete_footprint_primitives") == 2
     assert all(p["replace"] == "false"
