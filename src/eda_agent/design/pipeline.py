@@ -1946,7 +1946,28 @@ def build_best_canvas_from_plan(
     best_result.wire_count = len(best_result.canvas.wires)
     best_result.junction_count = len(best_result.canvas.junctions)
     best_result.power_port_count = len(best_result.canvas.power_ports)
+    # EACH NOTE ONCE. An accepted polish rebuild carries every note the
+    # winner's own build wrote, and the winner's are merged in after it, so
+    # the same "promoted"/"labelled"/"deduplicated" line appeared twice (19
+    # refdes listed twice on the carrier's STUBS sheets); a hint warning is
+    # also written by each of the two hint applications in one build. Same
+    # severity and text = same note; first occurrence kept, order kept.
+    best_result.notes[:] = _dedupe_notes(best_result.notes)
+    best_result.failures[:] = _dedupe_notes(best_result.failures)
     return best_result
+
+
+def _dedupe_notes(notes: list) -> list:
+    """``notes`` with exact repeats (same severity and text) dropped."""
+    seen: set = set()
+    out = []
+    for n in notes:
+        key = (getattr(n, "severity", None), getattr(n, "text", n))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(n)
+    return out
 
 
 def _neat_engine_overrides(plan):  # type: ignore[no-untyped-def]
@@ -2452,6 +2473,129 @@ def _name_anchor(net_actions, segs, stubs):
         if _arms(act[1]) <= 2:
             return act
     return net_actions[0]
+
+
+# Clearance around a named anchor's text when choosing where it goes: a
+# label in a 100-mil pin fan touches the next row with no pad at all, and
+# reads as cramped; the pad separates "clear" from "clear with room".
+_NAME_ANCHOR_PAD = 50
+
+
+def _reanchor_named_labels(canvas, sheet_name: str,
+                           named_anchor: dict[str, Any],
+                           segments: list[tuple[int, int, int, int, str]],
+                           body_boxes: list[tuple[int, int, int, int]],
+                           pin_boxes: list[tuple[tuple[int, int, int, int], str]],
+                           ) -> int:
+    """Move each wire_named net's one label to the cleanest spot on its copper.
+
+    ``_name_anchor`` picks a stub end while the sheet is still being routed,
+    so it cannot see what the text will land on: on PWR_FAN_MON the
+    PWR_IMON label went to U120.4's stub end inside the IC's 100-mil pin
+    fan, its text on the next pin's row, while 4800 mil of the net's own
+    empty run sat beside it. Run once routing and the cull are done, this
+    weighs the current anchor against the two ends of every horizontal run
+    of the net that can hold the text (the start of the longest straight
+    run, justified along it, is what the hand-labelling script did), and
+    keeps the current one unless another is clearer:
+
+        (collisions, collisions with _NAME_ANCHOR_PAD, not-current,
+         -run length, x, y)
+
+    A candidate is a point on the net's own wire, never on another net's
+    copper or pin and never on a junction of its own net, so moving the
+    label cannot change what it bonds to. Labels carry no score weight, so
+    selection is unaffected. Returns how many labels moved.
+    """
+    from eda_agent.design.port_glyphs import glyph_extent
+    from eda_agent.design.text_placement import label_text_box
+
+    def hit(a, b) -> bool:
+        return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
+
+    def seg_box(sg):
+        return (min(sg[0], sg[2]), min(sg[1], sg[3]),
+                max(sg[0], sg[2]), max(sg[1], sg[3]))
+
+    moved = 0
+    for net_name, lab in list(named_anchor.items()):
+        if lab not in canvas.labels:
+            continue
+        own = [sg for sg in segments if sg[4] == net_name]
+        foreign = [sg for sg in segments if sg[4] != net_name]
+        obstacles: list[tuple[int, int, int, int]] = []
+        obstacles += [seg_box(sg) for sg in foreign]
+        obstacles += body_boxes
+        obstacles += [b for b, n in pin_boxes if n != net_name]
+        obstacles += [label_text_box(other) for other in canvas.labels
+                      if other.sheet == sheet_name and other is not lab]
+        obstacles += [glyph_extent(q) for q in canvas.power_ports
+                      if q.sheet == sheet_name]
+
+        def arms(pt) -> int:
+            n = 0
+            for sg in own:
+                if (sg[0], sg[1]) == pt or (sg[2], sg[3]) == pt:
+                    n += 1
+                elif _point_on_segment(pt[0], pt[1], *sg[:4]):
+                    n += 2
+            return n
+
+        def legal(pt) -> bool:
+            if arms(pt) > 2:
+                return False
+            if any(_point_on_segment(pt[0], pt[1], *sg[:4]) for sg in foreign):
+                return False
+            return not any(b[0] <= pt[0] <= b[2] and b[1] <= pt[1] <= b[3]
+                           for b, n in pin_boxes if n != net_name)
+
+        def score(cand, current: bool, run_len: int):
+            box = label_text_box(cand)
+            own_cross = [seg_box(sg) for sg in own
+                         if not (sg[1] == sg[3] == cand.y)]
+            pad = _NAME_ANCHOR_PAD
+            padded = (box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad)
+            n0 = (sum(hit(box, o) for o in obstacles)
+                  + sum(hit(box, o) for o in own_cross))
+            n1 = (sum(hit(padded, o) for o in obstacles)
+                  + sum(hit(padded, o) for o in own_cross))
+            return (n0, n1, 0 if current else 1, -run_len, cand.x, cand.y)
+
+        best = (score(lab, True, 0), lab)
+        # Horizontal runs: same-net horizontal segments merged on each row.
+        rows: dict[int, list[list[int]]] = {}
+        for sg in own:
+            if sg[1] == sg[3] and sg[0] != sg[2]:
+                rows.setdefault(sg[1], []).append(
+                    [min(sg[0], sg[2]), max(sg[0], sg[2])])
+        for y, spans in sorted(rows.items()):
+            spans.sort()
+            merged: list[list[int]] = []
+            for lo, hi in spans:
+                if merged and lo <= merged[-1][1]:
+                    merged[-1][1] = max(merged[-1][1], hi)
+                else:
+                    merged.append([lo, hi])
+            for lo, hi in merged:
+                w = label_text_box(replace(lab, x=0, y=0, justification=0))[2]
+                if hi - lo < w + 100:
+                    continue
+                for x, just in ((lo, 0), (lo + 100, 0), (hi, 2), (hi - 100, 2)):
+                    if not legal((x, y)):
+                        continue
+                    cand = replace(lab, x=x, y=y, justification=just)
+                    sc = score(cand, False, hi - lo)
+                    if sc < best[0]:
+                        best = (sc, cand)
+        if best[1] is not lab:
+            idx = next((i for i, other in enumerate(canvas.labels)
+                        if other is lab),
+                       next(i for i, other in enumerate(canvas.labels)
+                            if other == lab))
+            canvas.labels[idx] = best[1]
+            named_anchor[net_name] = best[1]
+            moved += 1
+    return moved
 
 
 def _unnamed_pins(canvas, plan, sheet_name):
@@ -3519,6 +3663,12 @@ def _wire_sheet(
                 ),
             ))
         shorted_to_label += 1
+
+    # The one label of each wire_named net, re-placed now that every net is
+    # routed and culled and the whole sheet's copper is known.
+    if named_anchor:
+        _reanchor_named_labels(canvas, sheet_name, named_anchor,
+                               sheet_wire_segments, body_obstacles, pin_boxes)
 
     # Guarantee power/ground connectivity. A power spoke that the cull loop
     # above dropped leaves its pins on bare net labels -- but a net label sat

@@ -229,3 +229,55 @@ def test_single_sheet_plans_never_take_the_named_wire_path(monkeypatch) -> None:
     for plan in plans:
         res = pipeline.build_best_canvas_from_plan(plan, SyntheticSymbolExtractor(plan))
         assert res.canvas.wires
+
+
+# --------------------------- where the one label goes (second review, L1)
+
+def _fan_canvas():
+    """The PWR_FAN_MON PWR_IMON shape: the net's stub end sits in an IC's
+    100-mil pin fan, right under the next pin's wire, while the net runs
+    4800 mil of empty straight wire to its other pin."""
+    from eda_agent.design.canvas import NetLabel, SchematicCanvas, Sheet as CSheet
+
+    cv = SchematicCanvas()
+    cv.add_sheet(CSheet(name="main", width_mils=20000, height_mils=15000))
+    segs = [(10700, 7500, 10700, 9500, "SIG"), (10700, 9500, 15500, 9500, "SIG"),
+            (15500, 9500, 16000, 9500, "SIG"),
+            (15400, 9600, 16000, 9600, "VDD")]          # the next pin's row
+    anchor = NetLabel(text="SIG", x=15500, y=9500, orientation=0,
+                      sheet="main", justification=2)
+    cv.add_labels([anchor])
+    return cv, segs, anchor
+
+
+def test_a_cramped_named_label_moves_to_the_start_of_its_longest_run():
+    cv, segs, anchor = _fan_canvas()
+    named = {"SIG": anchor}
+    assert pipeline._reanchor_named_labels(cv, "main", named, segs, [], []) == 1
+    lab = named["SIG"]
+    # One grid step into the run: at the corner itself the riser's copper
+    # is inside the clearance pad.
+    assert (lab.x, lab.y, lab.justification) == (10800, 9500, 0)
+    assert cv.labels == [lab]
+
+
+def test_a_clean_named_label_stays_where_it_is():
+    """Control: without the cramping wire the stub-end anchor is clean
+    (even with padding), so nothing moves."""
+    cv, segs, anchor = _fan_canvas()
+    named = {"SIG": anchor}
+    assert pipeline._reanchor_named_labels(cv, "main", named, segs[:3], [], []) == 0
+    assert named["SIG"] is anchor
+
+
+def test_a_named_label_never_lands_on_another_nets_copper():
+    """The run's start is crossed by a foreign wire there: the candidate is
+    illegal (a label on two nets' copper is a short), so the next one is
+    taken."""
+    cv, segs, anchor = _fan_canvas()
+    segs = segs + [(10700, 9000, 10700, 9500, "OTHER")]
+    named = {"SIG": anchor}
+    pipeline._reanchor_named_labels(cv, "main", named, segs, [], [])
+    lab = named["SIG"]
+    assert (lab.x, lab.y) != (10700, 9500)
+    assert lab.y == 9500 and 10700 < lab.x < 16000
