@@ -338,8 +338,16 @@ def emit_canvas_delta(
         reorient = old_rot != inst.rotation % 360 or old_flip != inst.flipped
         try:
             if reorient and old_flip:
-                bridge.send_command("generic.mirror_component", {
+                resp = bridge.send_command("generic.mirror_component", {
                     "designator": inst.refdes, "mirrored": "false"})
+                if not _mirror_confirmed(resp, False):
+                    # Turning a part that is still mirrored is the
+                    # unmeasured path the ordering above exists to avoid.
+                    result.ok = False
+                    result.failures.append(EmitFailure(
+                        refdes=inst.refdes, code="MIRROR_FAILED",
+                        reason=f"un-mirror did not confirm: {resp!r}"))
+                    continue
             old_o = altium_orientation(old_rot, old_flip)
             new_o = altium_orientation(inst.rotation, inst.flipped)
             if old_o != new_o:
@@ -352,8 +360,15 @@ def emit_canvas_delta(
                 "filter": f"Designator={inst.refdes}",
                 "set": f"Location.X={inst.x}|Location.Y={inst.y}"})
             if reorient and inst.flipped:
-                bridge.send_command("generic.mirror_component", {
+                resp = bridge.send_command("generic.mirror_component", {
                     "designator": inst.refdes, "mirrored": "true"})
+                # Same check as the full emit: the canvas wired the MIRRORED
+                # pin positions, so an unconfirmed mirror is a wrong netlist.
+                if not _mirror_confirmed(resp, True):
+                    result.ok = False
+                    result.failures.append(EmitFailure(
+                        refdes=inst.refdes, code="MIRROR_FAILED",
+                        reason=f"mirror_component did not confirm: {resp!r}"))
         except Exception as exc:                # noqa: BLE001
             result.ok = False
             result.failures.append(EmitFailure(
@@ -537,6 +552,15 @@ def _emit_no_ercs(
             break
 
 
+def _mirror_confirmed(resp: Any, want: bool) -> bool:
+    """True when a ``generic.mirror_component`` reply reports ``want``.
+
+    The ONE test both emit paths use: the handler answers
+    ``{"mirrored": <state>}``; anything else (an error dict, None, a
+    missing key) is not a confirmation."""
+    return isinstance(resp, dict) and resp.get("mirrored") is want
+
+
 def _emit_mirrors(instances, bridge: Any, result: EmitResult) -> None:
     """Mirror each flipped, successfully placed instance on the ACTIVE sheet.
 
@@ -555,7 +579,7 @@ def _emit_mirrors(instances, bridge: Any, result: EmitResult) -> None:
                 refdes=inst.refdes, code="MIRROR_FAILED",
                 reason=f"mirror_component raised: {exc}"))
             continue
-        if not isinstance(resp, dict) or resp.get("mirrored") is not True:
+        if not _mirror_confirmed(resp, True):
             result.failures.append(EmitFailure(
                 refdes=inst.refdes, code="MIRROR_FAILED",
                 reason=f"mirror_component did not confirm: {resp!r}"))

@@ -334,6 +334,10 @@ def hints_from_sheet(
         # The LIVE mirror, not the snapshot's: a part mirrored by hand
         # after the emit has a centre offset of the opposite sign in x.
         flipped = bool(pos.get("mirror", False))
+        from eda_agent.design.canvas import (
+            MIRROR_90_NOTE, mirror_readback_unmeasured)
+        if mirror_readback_unmeasured(pos, inst):
+            out["notes"].append(f"{refdes} {MIRROR_90_NOTE}")
         rotation = int(pos["rotation"])     # canvas frame already
         off_x, off_y = _center_offset(symbol, rotation, flipped)
         out["hints"][refdes] = {

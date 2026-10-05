@@ -78,6 +78,37 @@ def altium_orientation(rotation: int, flipped: bool) -> int:
     return (360 - r) % 360 if flipped else r
 
 
+def mirror_readback_unmeasured(live: dict, snapshot_inst: Optional[dict]) -> bool:
+    """True when a live part's canvas rotation rests on the UNMEASURED half
+    of :func:`altium_orientation`.
+
+    ``altium_orientation`` assumes Altium mirrors in the WORLD frame. That
+    was measured at Orientation 0 only, where both frames agree; at 90/270
+    they disagree by 180 degrees. A part the engine itself mirrored reads
+    back self-consistently (it wrote Orientation -r and reads -r back), so
+    only a part mirrored or turned BY HAND at 90/270 is in doubt. ``live``
+    is a ``learner._query_post_edit_positions`` row; ``snapshot_inst`` the
+    canvas snapshot's instance dict (or None).
+    """
+    if not live.get("mirror"):
+        return False
+    stored = int(live.get("altium_orientation", 0)) % 360
+    if stored % 180 == 0:
+        return False
+    if snapshot_inst and snapshot_inst.get("flipped"):
+        wrote = altium_orientation(int(snapshot_inst.get("rotation", 0)), True)
+        if wrote == stored:
+            return False
+    return True
+
+
+MIRROR_90_NOTE = (
+    "is mirrored at Orientation 90/270 by hand; the engine reads such a "
+    "part assuming Altium mirrors in the world frame, which has only been "
+    "measured at Orientation 0, so its rotation may be read 180 degrees off "
+    "-- check it on the sheet before relying on it")
+
+
 @dataclass
 class PinEndpoint:
     """One pin's world-frame endpoint + outward direction.

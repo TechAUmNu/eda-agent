@@ -202,3 +202,21 @@ def test_delta_an_unmirrored_snapshot_without_the_key_is_untouched():
     br = _Bridge()
     res = emit_canvas_delta(_cv(0, False), _snap(0, False), "p.PrjPcb", br)
     assert res.delta["untouched"] == ["Q1"] and _component_ops(br) == []
+
+
+def test_delta_an_unconfirmed_mirror_is_a_failure():
+    """Review L6: the full emit records MIRROR_FAILED when the bridge does
+    not confirm; the delta path used to ignore the reply."""
+    br = _Bridge(mirror_reply={"error": "NOT_FOUND"})
+    res = emit_canvas_delta(_cv(0, True), _snap(0, False), "p.PrjPcb", br)
+    assert [f.code for f in res.failures] == ["MIRROR_FAILED"]
+    assert res.ok is False
+
+
+def test_delta_an_unconfirmed_unmirror_stops_before_turning():
+    """Turning a part that is still mirrored is the unmeasured path the
+    un-mirror-first ordering exists to avoid, so the part is left alone."""
+    br = _Bridge(mirror_reply={"mirrored": True})     # did not un-mirror
+    res = emit_canvas_delta(_cv(90, True), _snap(0, True), "p.PrjPcb", br)
+    assert [f.code for f in res.failures] == ["MIRROR_FAILED"]
+    assert _component_ops(br) == [("generic.mirror_component", "false")]

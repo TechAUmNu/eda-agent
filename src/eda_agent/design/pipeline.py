@@ -1276,9 +1276,44 @@ def _hint_mirror(refdes: str, hint: dict, current: bool,
     return current
 
 
+def _hint_int(refdes: str, hint: dict, key: str, current: int,
+              result: "PipelineResult") -> int:
+    """``hint[key]`` as an int, or ``current`` with a warning.
+
+    The MCP layer types a hint as ``dict[str, Any]`` (it also carries
+    ``mirror`` and ``draw_style``), so it no longer rejects ``"x": "abc"``
+    at the boundary. Accepted here: an int, an integral float, or a string
+    that parses as one -- what pydantic's int coercion used to accept.
+    Anything else is reported and the field keeps its placed value, instead
+    of raising halfway through the pipeline."""
+    if key not in hint:
+        return current
+    v = hint[key]
+    if isinstance(v, bool):
+        ok = False
+    elif isinstance(v, int):
+        return v
+    elif isinstance(v, float):
+        ok = v.is_integer()
+        if ok:
+            return int(v)
+    elif isinstance(v, str):
+        try:
+            return int(v.strip())
+        except ValueError:
+            ok = False
+    else:
+        ok = False
+    result.notes.append(PipelineNote(
+        severity="warning",
+        text=(f"placement_hint {refdes}.{key}={v!r} is not an integer; "
+              f"ignored (kept {current})")))
+    return current
+
+
 def _apply_placement_hints(
     placements: list,
-    hints: dict[str, dict[str, int]],
+    hints: dict[str, dict[str, Any]],
     result: PipelineResult,
 ) -> list:
     """Override (x, y, rotation) on hinted refdes, leave others alone.
@@ -1297,12 +1332,34 @@ def _apply_placement_hints(
         if hint is None:
             out.append(placement)
             continue
-        new_x = int(hint.get("x", placement.x_mils))
-        new_y = int(hint.get("y", placement.y_mils))
-        new_rot = int(hint.get("rotation", placement.rotation)) % 360
+        if not isinstance(hint, dict):
+            result.notes.append(PipelineNote(
+                severity="warning",
+                text=(f"placement_hint {placement.refdes}={hint!r} is not an "
+                      f"object of x/y/rotation/mirror; ignored")))
+            out.append(placement)
+            continue
+        new_x = _hint_int(placement.refdes, hint, "x", placement.x_mils, result)
+        new_y = _hint_int(placement.refdes, hint, "y", placement.y_mils, result)
+        new_rot = _hint_int(placement.refdes, hint, "rotation",
+                            placement.rotation, result) % 360
         flipped = _hint_mirror(placement.refdes, hint,
                                bool(getattr(placement, "flipped", False)),
                                result)
+        if flipped and new_rot % 180 == 90 and (
+                "mirror" in hint or "flipped" in hint):
+            # The pins are wired and emitted exactly at every rotation; what
+            # is unmeasured is which (Orientation, IsMirrored) pair Altium
+            # keeps for a mirror at 90/270, which Update From Libraries and
+            # a later hand toggle re-read (canvas.altium_orientation).
+            result.notes.append(PipelineNote(
+                severity="warning",
+                text=(f"placement_hint {placement.refdes} mirrors the part at "
+                      f"{new_rot} degrees: the emitted pins are exact, but how "
+                      f"Altium stores a mirror at 90/270 is unmeasured, so an "
+                      f"Update From Libraries could move them. Prefer mirror "
+                      f"at 0/180 until that is measured, or re-check the pins "
+                      f"after an update")))
         # Snap to 100-mil grid so anchored positions don't accidentally
         # land off-grid (which Altium would auto-snap anyway, but worse:
         # the wires routed by the pipeline expect grid alignment).

@@ -206,5 +206,102 @@ def test_learner_reads_a_mirrored_part_at_rest_as_unrotated():
                                  "Location.Y": 0, "Orientation": 1,
                                  "IsMirrored": "false"}]}
     pos = _query_post_edit_positions("p.PrjPcb", B(), {"ok": True, "notes": []})
-    assert pos["Q1"] == {"x": 0, "y": 0, "rotation": 90, "mirror": True}
-    assert pos["Q2"] == {"x": 0, "y": 0, "rotation": 90}
+    assert pos["Q1"] == {"x": 0, "y": 0, "rotation": 90, "mirror": True,
+                         "altium_orientation": 270}
+    assert pos["Q2"] == {"x": 0, "y": 0, "rotation": 90,
+                         "altium_orientation": 90}
+
+
+# ------------------------------------------- the unmeasured half (review M1)
+
+def _snapshot_project(tmp_path, inst_extra):
+    lib = tmp_path / "LIB.SchLib"
+    lib.write_text("", encoding="utf-8")
+    cache = SymbolCache(tmp_path / "c")
+    cache.put(_dual_fet(str(lib)))
+    project = tmp_path / "m.PrjPcb"
+    project.write_text("", encoding="utf-8")
+    inst = {"refdes": "Q1", "lib_path": str(lib), "lib_ref": "BSS138PS",
+            "x": 0, "y": 0, "rotation": 0, **inst_extra}
+    project.with_suffix(".canvas.json").write_text(json.dumps(
+        {"plan": {}, "canvas": {"instances": [inst]}}), encoding="utf-8")
+    return project
+
+
+def _live(orientation, mirrored):
+    class B:
+        def send_command(self, command, params=None, **kw):
+            return {"objects": [{"Designator.Text": "Q1", "Location.X": 5000,
+                                 "Location.Y": 3000, "Orientation": orientation,
+                                 "IsMirrored": "true" if mirrored else "false"}]}
+    return B()
+
+
+def test_a_hand_mirror_at_90_or_270_is_flagged(tmp_path):
+    """altium_orientation assumes a world-frame mirror, measured at
+    Orientation 0 only. A part mirrored BY HAND at 90/270 reads back on
+    that assumption, so the hint carries a warning note."""
+    project = _snapshot_project(tmp_path, {})
+    for o, flagged in ((0, False), (2, False), (1, True), (3, True)):
+        out = hints_from_sheet(str(project), bridge=_live(o, True),
+                               cache_dir=tmp_path / "c")
+        notes = [n for n in out["notes"] if "Orientation 90/270" in n]
+        assert bool(notes) is flagged, (o, out["notes"])
+    out = hints_from_sheet(str(project), bridge=_live(1, False),
+                           cache_dir=tmp_path / "c")
+    assert not [n for n in out["notes"] if "Orientation 90/270" in n]
+
+
+def test_an_engine_written_mirror_at_90_reads_back_without_a_note(tmp_path):
+    """The engine wrote Orientation altium_orientation(90, True) itself, so
+    reading the same value back is self-consistent whatever Altium's model:
+    no warning for the case the engine controls."""
+    project = _snapshot_project(tmp_path, {"rotation": 90, "flipped": True})
+    out = hints_from_sheet(
+        str(project), bridge=_live(altium_orientation(90, True) // 90, True),
+        cache_dir=tmp_path / "c")
+    assert out["hints"]["Q1"]["rotation"] == 90
+    assert not [n for n in out["notes"] if "Orientation 90/270" in n]
+
+
+def _learn(tmp_path, snap_inst, live_bridge):
+    from eda_agent.design.learner import learn_from_layout
+
+    plan = {"spec": "s", "summary": "m", "sheets": [{"name": "main"}],
+            "parts": [{"refdes": "Q1", "lib_ref": "X", "role": "switch"},
+                      {"refdes": "U1", "lib_ref": "Y", "role": "ic"}],
+            "nets": [{"name": "N1", "pins": [{"refdes": "Q1", "pin": "1"},
+                                             {"refdes": "U1", "pin": "1"}]}]}
+    project = tmp_path / "l.PrjPcb"
+    project.write_text("", encoding="utf-8")
+    project.with_suffix(".canvas.json").write_text(json.dumps({
+        "plan": plan, "canvas": {"instances": [
+            {"refdes": "Q1", "x": 0, "y": 0, "rotation": 0, **snap_inst},
+            {"refdes": "U1", "x": 9000, "y": 9000, "rotation": 0}]}}),
+        encoding="utf-8")
+
+    class B:
+        def send_command(self, command, params=None, **kw):
+            rows = live_bridge.send_command(command, params)["objects"]
+            rows.append({"Designator.Text": "U1", "Location.X": 9000,
+                         "Location.Y": 9000, "Orientation": 0,
+                         "IsMirrored": "false"})
+            return {"objects": rows}
+    return learn_from_layout(str(project), bridge=B(),
+                             log_path=tmp_path / "edits.jsonl")
+
+
+def test_the_learner_does_not_record_a_mirror_change(tmp_path):
+    """Review L8: a hand mirror at 0 used to record nothing silently, and
+    at 90/270 a bogus 180-degree rot_delta. Both are skipped, with a note."""
+    for o in (0, 1):
+        out = _learn(tmp_path, {}, _live(o, True))
+        assert out["rows_appended"] == 0, out
+        assert out.get("rows_skipped_mirror") == 1
+        assert any("mirrored or un-mirrored by hand" in n for n in out["notes"])
+
+
+def test_the_learner_skips_a_hand_turned_mirrored_part_at_90(tmp_path):
+    out = _learn(tmp_path, {"flipped": True}, _live(1, True))
+    assert out["rows_appended"] == 0
+    assert any("Orientation 90/270" in n for n in out["notes"])

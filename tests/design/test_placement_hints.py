@@ -303,3 +303,52 @@ def test_pipeline_mirrors_a_hinted_part_end_to_end():
     assert d1.orientation == 2 and d2.orientation == 2 and d1.y > d2.y
     e1, e2 = q1.pin_world("6"), q1.pin_world("3")
     assert e1.orientation == 2 and e2.y > e1.y
+
+
+# ------------------------------------------------ hint values (review L3)
+
+def test_a_non_numeric_coordinate_is_reported_and_skipped():
+    """The MCP layer types a hint as dict[str, Any] now (it carries mirror
+    and draw_style too), so "x": "abc" is no longer refused at the
+    boundary. It must not raise halfway through the pipeline either."""
+    res = PipelineResult()
+    out = _apply_placement_hints(
+        [_pp()], {"Q1": {"x": "abc", "y": 2000, "rotation": [90]}}, res)
+    assert (out[0].x_mils, out[0].y_mils, out[0].rotation) == (1000, 2000, 0)
+    texts = [n.text for n in res.notes if n.severity == "warning"]
+    assert any("Q1.x='abc' is not an integer" in t for t in texts)
+    assert any("Q1.rotation=[90] is not an integer" in t for t in texts)
+
+
+def test_numeric_strings_and_integral_floats_still_work():
+    """What pydantic's int coercion accepted before the schema widened."""
+    res = PipelineResult()
+    out = _apply_placement_hints(
+        [_pp()], {"Q1": {"x": "3000", "y": 2000.0, "rotation": "90"}}, res)
+    assert (out[0].x_mils, out[0].y_mils, out[0].rotation) == (3000, 2000, 90)
+    assert not [n for n in res.notes if n.severity == "warning"]
+    res = PipelineResult()
+    out = _apply_placement_hints([_pp()], {"Q1": {"x": 1000.5}}, res)
+    assert out[0].x_mils == 1000
+    assert any("not an integer" in n.text for n in res.notes)
+
+
+def test_a_hint_that_is_not_an_object_is_reported():
+    res = PipelineResult()
+    out = _apply_placement_hints([_pp()], {"Q1": 5}, res)
+    assert out[0] == _pp()
+    assert any("is not an object" in n.text for n in res.notes)
+
+
+def test_a_mirror_hint_at_90_or_270_warns():
+    """Review M1: which (Orientation, IsMirrored) pair Altium stores for a
+    mirror at 90/270 is unmeasured. The emit is pin-exact, so it is a
+    warning, not a refusal; 0/180 and unmirrored hints stay quiet."""
+    for rot, mirror, warned in ((90, True, True), (270, True, True),
+                                (0, True, False), (180, True, False),
+                                (90, False, False)):
+        res = PipelineResult()
+        _apply_placement_hints([_pp()], {"Q1": {"rotation": rot,
+                                                "mirror": mirror}}, res)
+        hit = [n for n in res.notes if "how Altium stores a mirror" in n.text]
+        assert bool(hit) is warned, (rot, mirror)
