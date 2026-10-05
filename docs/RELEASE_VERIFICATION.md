@@ -52,7 +52,7 @@ works elsewhere cannot be an undeclared identifier:
 | 27, current model | `IsCurrent` | yes, `Lib_NormalizeImplementations` | low |
 | 28, No-ERC on a pin | `Location` | yes, `Gen_PlaceNetLabel` | low |
 | 30, batch rename | `Name` on a footprint | yes, `Lib_RenameFootprint` | low |
-| 31, STEP Z offset | `SetState` on a model, now with a non-zero Dz | yes, `Body3D_ApplyModelState` ran it live with Dz 0 | low: whether this build honours Dz is read from the saved file |
+| 31, STEP Z offset | `SetState` on a model, now with a non-zero Dz | yes, `Body3D_ApplyModelState` ran it live with Dz 0 | settled 2026-10-05: Dz 3 stored and built into both heights (+3 mil exactly) |
 | 31, delete diagnostics | `BoardIterator_Destroy` (the library-board walk), read-only | yes, `LibBoardRemoveEntries` ran it live | low |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
@@ -1658,7 +1658,7 @@ first anyway, on a scratch library, because the batch tool chains them.
 
 ---
 
-## 31. Deletes that stick, a STEP on its footprint, and the saved-file reader (not yet run live)
+## 31. Deletes that stick, a STEP on its footprint, and the saved-file reader (run live 2026-10-05, results at the end)
 
 Four fixes from one live session on 2026-10-04 (the previous bridge build,
 carrier.PcbLib, throwaway footprint `ZZ_BRIDGE_TEST`, frame origin
@@ -1863,6 +1863,75 @@ FOLLOW-UPS RECORDED HERE, not fixed by this change:
   Whether that lifts a STEP model on a BOARD is unmeasured; in a library
   it did not. Measure it (place with `standoff_height=50`, look in 3D,
   save the board), then route it through the model's Dz if it does not.
+
+
+### Results 2026-10-05
+
+Run on Altium 26.10.1.5, bridge `2026.10.04.11`, library
+`carrier.PcbLib`, footprint `ZZ_BRIDGE_TEST`. Item numbers are the ones
+that run used; the list above in brackets where it differs.
+
+* **Item 1, the reader** (above: 2): PASS. `lib_read_pcblib_file` read 97
+  footprints, `incomplete: []`, the footprint's state as expected.
+* **Item 3, session-added pad, default delete**: PASS.
+  `reload_first` ran, saved and reloaded; `removed: 1`;
+  `target_was_current: false`, `parked_elsewhere: false`,
+  `board_still_listed: null`; `persisted: {absent: ["3"], ok: true}`.
+  `marked_modified` was FALSE: the delete does not set the library's
+  dirty flag. Harmless here (verify_on_disk saves anyway), still open.
+* **Item 3b, which theory**: SETTLED, the second one. Pad `5`
+  disk-loaded (saved + reloaded), the footprint made CURRENT with
+  `lib_set_current_footprint`, deleted with `reload_first=false`:
+  `target_was_current: true`, `target_current_during_removal: true`,
+  `parked_elsewhere: false`, `board_still_listed: 1`. After
+  `lib_save_library` pad `5` was STILL IN THE FILE. **Being CURRENT is
+  what brings a removed primitive back**, not having been added this
+  session: the library board holds the current footprint's primitives
+  and the save writes them back. Item 3 passed because after the reopen
+  the target was not current. Parking alone (without a reload) could not
+  be measured: `park_current` was sent only when reload_first ran. FIXED
+  in the tools since: both deletes now send `park_current` by default
+  with or without reload_first (`park_current=False` opts out; with
+  `remove_from_board` it is never sent).
+* **Item 6, primitives delete** (above: 5): PASS, `persisted` tracks
+  2 -> 1.
+* **Item 7, replace link, Dz 0** (above: 6, the control): PASS. The
+  saved model: x 10.5, y -20, rot 90/0/45, dz 0. Body bbox
+  -24.2986..68.4048 / -77.9048..14.7986 mil, on the footprint;
+  standoff -39.3701, overall 39.3701 mil.
+* **Item 8, offset_z 3** (above: 6, the lift): PASS. File `dz_mils` 3,
+  and both heights moved by exactly +3 (standoff -36.3701, overall
+  42.3701): Altium honours SetState's Dz and builds it into the heights.
+* **Item 9, offset_x 5000** (above: 7): correctly `ok: false`, gap
+  4832.2 mil, with the undo hint; the componentbody delete removed both
+  bodies and persisted.
+* **Item 10, align** (above: 8): `center` put the box centre exactly on
+  (10.5, -20); `pads` exactly on the pads' centre + offset (62, 27.5).
+* **Item 13, IPC batch** (above: 10): FAILED for a NEW reason: the
+  options read empty because COM was not initialised on the executor
+  thread. Being fixed on its own branch (`bridge-com-thread`).
+* **Also seen**: `lib_add_footprint_tracks` and
+  `lib_modify_footprint_pads` leave the library's Modified flag false
+  too (`lib_save_library` then reports `was_modified: false` and still
+  writes). Harmless with lib_save_library; `app_save_all` relies on the
+  flag, so an edit made only through these tools may be skipped by it.
+* **Real use**: a STEP that is a one-instance ASSEMBLY wrapper (written
+  by FreeCAD, the transform carried by the assembly placement), linked
+  with `align="none"` and zero offsets, lands correctly: body at (0, 0),
+  correct heights.
+
+Still open after this run:
+
+* Parking WITHOUT a reload, now the default on both deletes, is not yet
+  measured live: repeat item 3b with the new default (expect
+  `parked_elsewhere: true`, `target_current_during_removal: false`) and
+  read the file.
+* `marked_modified` (and the Modified flag after track adds and pad
+  edits) still reads false.
+* The IPC batch's COM initialisation, on `bridge-com-thread`.
+* `lib_auto_link_3d_models` gained `layer` (bare footprints otherwise get
+  Mechanical 1, the house convention is Mechanical 13), `model_map` and a
+  per-footprint `persisted` check; not yet run live.
 
 ---
 

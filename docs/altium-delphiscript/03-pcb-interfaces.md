@@ -639,6 +639,21 @@ a footprint's primitives, and read its `FileName`.
 **`LibraryIterator_Create` / `LibraryIterator_Destroy`**
 Enumerate the library's footprints.
 
+**The CURRENT footprint is written back from the library board on save
+(measured 2026-10-05, AD26 26.10.1.5).** The library board holds the
+primitives of the current footprint, and a save rebuilds that footprint
+from the board's copy. So a primitive removed from the footprint only
+(`Fp.RemovePCBObject`) while the footprint is CURRENT comes back with the
+next save, even when it was loaded from disk: a disk-loaded pad removed
+from a footprint made current with `SetState_CurrentComponent` was still
+in the saved file (`docs/RELEASE_VERIFICATION.md` step 31, item 3b). The
+same removal on a footprint that is NOT current persisted. The library
+tools therefore make another footprint current first
+(`LibParkCurrentElsewhere` in Library.pas) before a footprint-only
+removal. A removal also leaves `Modified` false on this build (and so do
+track adds and pad edits through the tools): an explicit save of the
+library still writes, a save that relies on the dirty flag may skip it.
+
 ```pascal
 PcbLib := PCBServer.GetCurrentPCBLibrary;
 Fp := PCBServer.CreatePCBLibComp;
@@ -771,9 +786,11 @@ The model behind the body. Written by every placement here; read by
 `Body3D_GetModel` (new 2026-10-04, unverified live).
 
 **`StandoffHeight : TCoord`** / **`OverallHeight : TCoord`**  *(properties)*
-The body's underside and top above the board. `StandoffHeight` is
-written by `lib_link_3d_model` (confirmed live); both are read by the
-footprint height sweep and the layout model.
+The body's underside and top above the board, read by the footprint
+height sweep and the layout model. On a STEP body both are DERIVED from
+the model by `SetState_FromModel` (including the model's `Dz`, below);
+`lib_link_3d_model` no longer writes `StandoffHeight`, which was measured
+to store a standoff without lifting the model.
 
 ### `IPCB_Model`: UNVERIFIED on a live session
 
@@ -800,11 +817,15 @@ is placed in Z: Altium's own example libraries store e.g.
 and writing `StandoffHeight` on a STEP body was measured NOT to lift
 the model. Call it before `SetState_FromModel` so the body's heights
 are derived from the placed model.
+**Dz is honoured and built into the heights (measured 2026-10-05,
+26.10.1.5):** `Dz` = 3 mil stored `MODEL.3D.DZ=3mil` and moved BOTH
+derived heights by exactly +3 mil (standoff -39.3701 -> -36.3701,
+overall 39.3701 -> 42.3701 on the same STEP with Dz 0).
 
 **`GetState(out RotX, RotY, RotZ : Double; out Dz : Integer)`**
 The same four, read back. **Does not work from DelphiScript** (measured
-2026-10-04): the call returns without faulting and leaves every local
-at 0, beside a saved file holding ROTX 90 / ROTZ 45. An OUT parameter of
+2026-10-04): the call returns without faulting and every OUT parameter
+comes back 0, beside a saved file holding ROTX 90 / ROTZ 45. An OUT parameter of
 an Altium method does not come back through a script local. Do not call
 it; read the saved file instead (`lib_read_pcblib_file`).
 
@@ -830,4 +851,8 @@ footprint origin (`Footprint.X/Y`, which read (50000, 50000) mils on the
 carrier library). The saved `MODEL.2D.X/Y` is relative to the footprint
 origin, so a model left there is stored about -50000mil away from its
 pads. `lib_link_3d_model` moves it by the footprint origin plus the
-offsets for `align='none'`.
+offsets for `align='none'`. Confirmed 2026-10-05: with that move the
+saved model reads x 10.5 / y -20 for offsets (10.5, -20), and a STEP
+that is a one-instance ASSEMBLY wrapper (FreeCAD-written, transform in
+the assembly placement) lands at the footprint origin with correct
+heights at zero offsets.

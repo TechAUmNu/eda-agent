@@ -308,9 +308,12 @@ async def _reload_first(bridge, library_path: str, what: str,
     The delete that persisted was on a disk-loaded footprint that was
     probably NOT current, and a reopen does not choose which footprint is
     current. So the callers also ask the handler to park the current
-    footprint elsewhere (``park_current``) once this has run, and then save
-    again and read the FILE (``verify_on_disk``), which settles whether
-    the removal stuck whichever theory holds.
+    footprint elsewhere (``park_current``), and then save again and read
+    the FILE (``verify_on_disk``), which settles whether the removal stuck
+    whichever theory holds. MEASURED 2026-10-05 (step 31 item 3b): the
+    second theory holds. A disk-loaded pad removed while its footprint
+    was CURRENT came back with the save, so the deletes now park by
+    default even when this does not run (_park_choice).
 
     Refuses rather than deletes when the save does not reach disk (a
     reload of a dirty library raises Altium's Unsaved Changes prompt and
@@ -774,6 +777,32 @@ async def _replace_then_link(bridge, params: dict, path: str,
     if layer_source and isinstance(out.get("applied"), dict):
         out["applied"] = dict(out["applied"], layer_source=layer_source)
     return out
+
+
+def _park_choice(park_current: Optional[bool],
+                 remove_from_board: bool) -> tuple[bool, Optional[str]]:
+    """Whether a library delete asks the handler to park the footprint.
+
+    ``(park, refusal)``. Default (None): park whenever ``remove_from_board``
+    is off, with or without reload_first. MEASURED 2026-10-05
+    (docs/RELEASE_VERIFICATION.md step 31, item 3b): a DISK-LOADED pad,
+    removed while its footprint was CURRENT, was written back by the next
+    save; the default route works because after the reopen the target was
+    not current. Being current is what brings a removed primitive back
+    (the library board holds the current footprint's primitives and the
+    save writes them), so a no-reload delete parks too. The handler parks
+    only a footprint that IS current (Library.pas LibParkCurrentElsewhere)
+    and never with remove_from_board, whose board half needs it current,
+    so True with remove_from_board is refused rather than ignored.
+    """
+    if park_current is None:
+        return (not remove_from_board), None
+    if park_current and remove_from_board:
+        return False, (
+            "park_current=True and remove_from_board=True contradict: the "
+            "board half needs the footprint CURRENT, and parking makes "
+            "another footprint current. Nothing was sent")
+    return bool(park_current), None
 
 
 def _rename_ops(renames) -> tuple[list[str], list[dict]]:
@@ -4169,63 +4198,116 @@ def register_library_tools(mcp):
 
     @mcp.tool()
     async def lib_auto_link_3d_models(
-        model_dir: str,
+        model_dir: str = "",
         library_path: Optional[str] = None,
         replace: bool = False,
         align: str = "none",
         remove_from_board: bool = False,
         reload_first: bool = True,
+        layer: str = "",
+        model_map: Optional[dict[str, str]] = None,
+        verify_on_disk: bool = True,
     ) -> dict[str, Any]:
-        """Batch-link STEP models to footprints by matching file names.
+        """Batch-link STEP models to footprints, by file name or by a map.
 
-        Enumerates every footprint in the PcbLib, scans `model_dir` for
-        .step/.stp files, and links each footprint whose name matches a model
-        file's stem (case-insensitive). Builds on lib_link_3d_model, with no
-        offsets or rotations: adjust a model that needs it with a single
-        lib_link_3d_model call afterwards.
+        Enumerates every footprint in the PcbLib and links each one that
+        has a model. A model comes from ``model_map`` (footprint name ->
+        model file) when the map names the footprint, otherwise from
+        ``model_dir``: a .step/.stp file there whose stem matches the
+        footprint name (case-insensitive). Builds on lib_link_3d_model,
+        with no offsets or rotations: adjust a model that needs it with a
+        single lib_link_3d_model call afterwards.
 
         Args:
-            model_dir: Folder containing .step/.stp model files.
+            model_dir: Folder containing .step/.stp model files matched by
+                stem. May be empty when ``model_map`` is given; when both
+                are given, a relative path in the map is resolved against
+                it.
             library_path: Optional .PcbLib to focus first; uses the focused
                 document otherwise.
             replace: remove each matched footprint's existing 3D bodies
                 first, which swaps a library's IPC generator placeholders
-                for real models in one call. See lib_link_3d_model.
+                for real models in one call. See lib_link_3d_model. Also
+                the switch for the save-and-verify below: a footprint with
+                no body to replace is linked the same way, so
+                ``replace=True`` is how a batch onto bare footprints gets
+                its ``persisted`` proof.
             align: passed to every link: ``"none"``, ``"center"`` or
                 ``"pads"``. See lib_link_3d_model.
             remove_from_board: with ``replace``, passed to every link.
                 Off by default; see lib_link_3d_model.
             reload_first: with ``replace``, ON by default: save the
                 library and reopen it ONCE before the first link, so the
-                bodies being replaced are loaded from disk (a body created
-                in this session comes back with the next save otherwise;
-                see lib_link_3d_model), and then replace each through the
-                delete-then-link route (old bodies removed with the
+                bodies being replaced are loaded from disk (a removed
+                primitive of the CURRENT footprint is written back by the
+                next save, measured 2026-10-05; see
+                lib_delete_footprint_pads), and then replace each through
+                the delete-then-link route (old bodies removed with the
                 footprint parked). Runs only when at least one footprint
-                matches a model. Uses ``library_path`` or the focused
+                has a model. Uses ``library_path`` or the focused
                 .PcbLib; skipped (``reload_first.skipped``) when neither
-                resolves. Persistence proof afterwards: lib_save_library,
-                then lib_read_pcblib_file.
+                resolves.
+            layer: the layer for EVERY linked body, by name as the library
+                spells it (the house convention is a mechanical layer such
+                as "Mechanical 13"). Passed to every link and it WINS over
+                the replaced body's layer, exactly as on
+                lib_link_3d_model. Empty: a replaced footprint keeps its
+                placeholder's layer, a bare footprint gets Altium's
+                default (Mechanical 1). An unknown name is refused by the
+                first link, and the batch STOPS there (``stopped``): with
+                replace every later link would remove its old bodies and
+                then be refused the same way.
+            model_map: optional ``{footprint name: model file}`` for
+                models whose file stem differs from the footprint name or
+                that live in per-footprint folders (e.g.
+                ``<dir>/<fp>/oriented/<fp>.step``). Footprint names match
+                case-insensitively and are sent in the library's spelling.
+                EVERY file is checked before anything is saved or linked:
+                one that is not a file refuses the whole call
+                (``missing_models``). A name the library does not hold is
+                reported in ``unknown_footprints`` (and ``success`` is
+                false) while the rest are linked.
+            verify_on_disk: when reload_first ran, ON by default: after
+                the last link, save the library ONCE and read every linked
+                footprint back from the SAVED FILE, as lib_link_3d_model
+                does for one: each ``linked`` entry gets ``persisted``
+                (body count before - removed + 1, and a saved body
+                carrying ``expected_in_file``). A footprint whose saved
+                state does not match moves to ``failed``
+                (``NOT_PERSISTED``). The verifying save is SKIPPED when
+                any link failed, because a failed entry can be a misplaced
+                body (the save would write it) or old bodies removed
+                before a refused link (lib_reload_library restores them,
+                but not after a save).
 
         Returns:
-            {"linked": [{footprint, model, applied, replaced, bbox,
-             placement}], "failed": [{footprint, model, error, code}],
+            {"success", "summary": {footprints, matched, linked, failed,
+             unmatched_footprints, unused_models, unknown_footprints,
+             persisted_ok, persisted_checked}, "linked": [{footprint,
+             model, model_source ("map" or "dir"), applied, replaced,
+             bbox, body, placement, expected_in_file, persisted?}],
+             "failed": [{footprint, model, error, code}],
              "unmatched_footprints": [...], "unused_models": [...],
+             "unknown_footprints": [...], "stopped"?, "verify"?,
              "reload_first"?}. A link that Altium refused, or whose body
             fails the placement check (``placement_ok`` false: not on its
             footprint), is listed under ``failed`` rather than
             ``linked``. A placement failure carries
             ``body_added_in_memory: true`` and ``undo``: the body IS on
             the footprint in memory and the next save writes it.
-            Persistence proof: lib_save_library, then
-            lib_read_pcblib_file.
+            ``verify`` is the batch's verifying save (``{ran, saved?,
+            save?, reason?}``). Persistence proof by hand:
+            lib_save_library, then lib_read_pcblib_file.
         """
-        from pathlib import Path
-
         from ..bridge.exceptions import AltiumNotRunningError, AltiumTimeoutError
 
-        d = Path(model_dir)
-        if not d.is_dir():
+        model_dir = str(model_dir or "").strip()
+        if not model_dir and not model_map:
+            return {"ok": False, "reason": (
+                "give model_dir (models matched by file stem) or model_map "
+                "({footprint name: model file})")}
+        d = Path(model_dir) if model_dir else None
+        if d is not None and not d.is_dir():
             return {"ok": False, "reason": f"not a directory: {model_dir}"}
         align = (align or "none").strip().lower()
         if align not in _FOOTPRINT_3D_ALIGN:
@@ -4236,11 +4318,50 @@ def register_library_tools(mcp):
             return {"ok": False, "reason": (
                 "remove_from_board needs replace=True: it takes the "
                 "replaced bodies off the library board.")}
+        layer = str(layer or "").strip()
+
+        # model_map, checked IN FULL before the library is touched: a file
+        # that is not there must not cost a save and reopen, nor leave the
+        # batch half-linked.
+        mapped: dict[str, tuple[str, str]] = {}
+        if model_map is not None:
+            if not isinstance(model_map, dict):
+                return {"ok": False, "reason": (
+                    "model_map must be a {footprint name: model file} dict")}
+            missing: list[dict[str, str]] = []
+            for raw_name, raw_path in model_map.items():
+                name = str(raw_name or "").strip()
+                given = str(raw_path or "").strip()
+                if not name:
+                    return {"ok": False, "reason": (
+                        "model_map has an empty footprint name. Nothing was "
+                        "saved, reopened or linked")}
+                if name.lower() in mapped:
+                    return {"ok": False, "reason": (
+                        f"model_map names footprint {name!r} twice (names "
+                        f"match case-insensitively). Nothing was saved, "
+                        f"reopened or linked")}
+                p = Path(given)
+                if given and not p.is_absolute() and d is not None:
+                    p = d / p
+                if not given or not p.is_file():
+                    missing.append({"footprint": name, "model": given,
+                                    "resolved": str(p) if given else ""})
+                    continue
+                mapped[name.lower()] = (name, str(p))
+            if missing:
+                return {"ok": False, "missing_models": missing, "reason": (
+                    f"{len(missing)} model_map file(s) are not files: "
+                    + ", ".join(f"{m['footprint']} -> {m['model']!r}"
+                                for m in missing[:5])
+                    + (" ..." if len(missing) > 5 else "")
+                    + ". Nothing was saved, reopened or linked")}
 
         models: dict[str, str] = {}
-        for f in d.iterdir():
-            if f.is_file() and f.suffix.lower() in (".step", ".stp"):
-                models[f.stem.lower()] = str(f)
+        if d is not None:
+            for f in d.iterdir():
+                if f.is_file() and f.suffix.lower() in (".step", ".stp"):
+                    models[f.stem.lower()] = str(f)
 
         bridge = get_bridge()
         params: dict[str, Any] = {}
@@ -4248,13 +4369,25 @@ def register_library_tools(mcp):
             params["library_path"] = library_path
         fp_data = await bridge.send_command_async("library.get_footprints", params)
         footprints = fp_data.get("footprints", []) if isinstance(fp_data, dict) else []
+        names = [str(fp.get("name", "")).strip() for fp in footprints
+                 if isinstance(fp, dict)]
+        held = {n.lower() for n in names}
+        unknown = [orig for key, (orig, _p) in mapped.items()
+                   if key not in held]
+
+        def model_for(key: str) -> tuple[Optional[str], str]:
+            if key in mapped:
+                return mapped[key][1], "map"
+            if key in models:
+                return models[key], "dir"
+            return None, ""
 
         # reload_first only when there is something to replace: a folder
         # that matches no footprint must not cost a save of the library.
         rec = None
         reloaded = False
-        matches_any = any(str(fp.get("name", "")).strip().lower() in models
-                          for fp in footprints if isinstance(fp, dict))
+        path = ""
+        matches_any = any(model_for(n.lower())[0] is not None for n in names)
         if replace and reload_first and matches_any:
             path, source = await _resolve_library_path(bridge,
                                                        library_path or "")
@@ -4268,25 +4401,36 @@ def register_library_tools(mcp):
                 # Pin every link to the library that was saved and reopened.
                 library_path = path
 
+        verify = reloaded and verify_on_disk
+        baselines: dict[str, tuple[Optional[dict], Optional[str]]] = {}
+
         linked: list[dict[str, Any]] = []
         failed: list[dict[str, Any]] = []
-        unmatched: list[str] = []
-        used: set[str] = set()
-        for fp in footprints:
-            fname = str(fp.get("name", "")).strip()
+        # Decided up front, so a batch that stops early still reports every
+        # footprint without a model and every model no footprint takes.
+        unmatched = [n for n in names if model_for(n.lower())[0] is None]
+        matched = [n for n in names if model_for(n.lower())[0] is not None]
+        used = {n.lower() for n in matched if model_for(n.lower())[1] == "dir"}
+        stopped: Optional[dict[str, Any]] = None
+        for fname in matched:
             key = fname.lower()
-            if key not in models:
-                unmatched.append(fname)
-                continue
-            used.add(key)
+            model, source_kind = model_for(key)
+            if verify:
+                # The saved file right after reload_first's save is the
+                # state BEFORE this footprint's replace: its baseline.
+                baselines[fname] = _saved_footprint(path, fname)
             link_params: dict[str, Any] = {
                 "component_name": fname,
-                "model_path": models[key],
+                "model_path": model,
                 "offset_x": 0, "offset_y": 0, "offset_z": 0,
                 "rotation_x": 0, "rotation_y": 0, "rotation_z": 0,
                 "replace": "true" if replace else "false",
                 "align": align,
             }
+            if layer:
+                # Explicit layer wins: _replace_then_link inherits the
+                # replaced body's layer only when "layer" is absent.
+                link_params["layer"] = layer
             if remove_from_board:
                 link_params["remove_from_board"] = "true"
             # EVERY link names the library. get_footprints above is a read,
@@ -4298,6 +4442,8 @@ def register_library_tools(mcp):
             # refuses when another document ends up in front.
             if library_path:
                 link_params["library_path"] = library_path
+            base = {"footprint": fname, "model": model,
+                    "model_source": source_kind}
             try:
                 if reloaded:
                     res = await _replace_then_link(
@@ -4310,35 +4456,49 @@ def register_library_tools(mcp):
             except (AltiumNotRunningError, AltiumTimeoutError) as e:
                 # The bridge itself is gone: every later link would fail
                 # the same way, so stop and say where it stopped.
-                failed.append({"footprint": fname, "model": models[key],
-                               "error": str(e),
-                               "code": getattr(e, "code", "")})
+                failed.append(dict(base, error=str(e),
+                                   code=getattr(e, "code", "")))
+                stopped = {"at": fname, "reason": (
+                    "the bridge stopped answering; later footprints were "
+                    "not attempted")}
                 break
             except Exception as e:
-                failed.append({"footprint": fname, "model": models[key],
-                               "error": str(e),
-                               "code": getattr(e, "code", "")})
+                code = getattr(e, "code", "")
+                failed.append(dict(base, error=str(e), code=code))
+                if code == "UNKNOWN_LAYER":
+                    stopped = {"at": fname, "reason": (
+                        f"layer {layer!r} is not in this library: every "
+                        f"later link would be refused the same way")}
+                    break
                 continue
             res = res if isinstance(res, dict) else {}
             if res.get("ok") is False and res.get("placement_ok") is not False:
                 # The delete route removed the old bodies and the link
                 # then failed: said so in the reason, with the restore.
-                failed.append({"footprint": fname, "model": models[key],
-                               "code": res.get("code", "LINK_FAILED"),
-                               "error": str(res.get("reason")),
-                               "replaced": res.get("replaced")})
+                code = res.get("code", "LINK_FAILED")
+                failed.append(dict(base, code=code,
+                                   error=str(res.get("reason")),
+                                   replaced=res.get("replaced")))
+                if code == "UNKNOWN_LAYER":
+                    stopped = {"at": fname, "reason": (
+                        f"layer {layer!r} is not in this library: with "
+                        f"replace every later link would remove its old "
+                        f"bodies and then be refused the same way. "
+                        f"lib_reload_library (before any save) restores "
+                        f"{fname!r}'s bodies")}
+                    break
                 continue
             if res.get("placement_ok") is False:
-                failed.append({
-                    "footprint": fname, "model": models[key],
-                    "code": "PLACEMENT_FAR_FROM_FOOTPRINT",
-                    "error": str((res.get("placement") or {}).get(
+                failed.append(dict(
+                    base,
+                    code="PLACEMENT_FAR_FROM_FOOTPRINT",
+                    error=str((res.get("placement") or {}).get(
                         "problem") or "placement check failed"),
-                    "placement": res.get("placement"),
+                    placement=res.get("placement"),
                     # Listed as failed, but the body IS on the footprint in
                     # memory and the next save writes it.
-                    "body_added_in_memory": True,
-                    "undo": (
+                    body_added_in_memory=True,
+                    undo=(
                         "the body is in memory and the next save writes "
                         "it: remove it with lib_delete_footprint_primitives"
                         f"(footprint_name={fname!r}, object_type="
@@ -4348,24 +4508,117 @@ def register_library_tools(mcp):
                         "to disk first; the delete then removes it), or "
                         "link again with replace=True and corrected "
                         "offsets"),
-                })
+                ))
                 continue
-            linked.append({
-                "footprint": fname,
-                "model": models[key],
-                "applied": res.get("applied"),
-                "replaced": res.get("replaced"),
-                "bbox": (res.get("body") or {}).get("bbox"),
-                "placement": res.get("placement"),
-            })
+            body = res.get("body") or {}
+            linked.append(dict(
+                base,
+                applied=res.get("applied"),
+                replaced=res.get("replaced"),
+                bbox=body.get("bbox"),
+                body={k: body.get(k) for k in (
+                    "layer", "standoff_height_mils", "overall_height_mils")},
+                placement=res.get("placement"),
+                expected_in_file=res.get("expected_in_file"),
+            ))
 
-        out = {
-            "success": not failed,
+        verify_rec: Optional[dict[str, Any]] = None
+        if verify and linked:
+            if failed:
+                verify_rec = {"ran": False, "reason": (
+                    f"{len(failed)} link(s) failed, and a verifying save "
+                    f"would write a misplaced body, or make old bodies "
+                    f"removed before a refused link unrecoverable "
+                    f"(lib_reload_library restores them only before a "
+                    f"save). Settle the failures, then lib_save_library "
+                    f"and lib_read_pcblib_file")}
+                for row in linked:
+                    row["persisted"] = {"checked": False,
+                                        "reason": verify_rec["reason"]}
+            else:
+                save = await _save_library_verified(bridge, path)
+                verify_rec = {"ran": True, "saved": bool(save.get("ok")),
+                              "save": save, "library_path": path}
+                still_linked: list[dict[str, Any]] = []
+                for row in linked:
+                    fname = row["footprint"]
+                    if not save.get("ok"):
+                        row["persisted"] = {
+                            "checked": False, "saved": False, "reason": (
+                                "the verifying save did not reach disk, so "
+                                "the link is in memory only: "
+                                + str(save.get("reason")))}
+                        still_linked.append(row)
+                        continue
+                    baseline, why = baselines.get(fname, (None, "no baseline"))
+                    if baseline is None:
+                        row["persisted"] = {"checked": False, "saved": True,
+                                            "reason": (
+                            f"no baseline from the saved file ({why}); read "
+                            f"it with lib_read_pcblib_file")}
+                        still_linked.append(row)
+                        continue
+                    entry, why = _saved_footprint(path, fname)
+                    if entry is None:
+                        row["persisted"] = {"checked": False, "saved": True,
+                                            "reason": why}
+                        still_linked.append(row)
+                        continue
+                    removed = int((row.get("replaced") or {}).get(
+                        "removed_bodies") or 0)
+                    check = {"checked": True, "saved": True}
+                    check.update(_link_persisted(
+                        baseline, entry, removed,
+                        row.get("expected_in_file")))
+                    row["persisted"] = check
+                    if check.get("ok"):
+                        still_linked.append(row)
+                    else:
+                        failed.append(dict(
+                            row, code="NOT_PERSISTED", error=(
+                                "the saved file does not hold what the link "
+                                f"reported (expected "
+                                f"{check.get('expected_bodies_after')} bodies"
+                                f", found {check.get('bodies_after')}; "
+                                f"{len(check.get('matching_bodies') or [])} "
+                                f"carry the expected placement, rotation and "
+                                f"Dz)")))
+                linked = still_linked
+                if not save.get("ok"):
+                    verify_rec["reason"] = str(save.get("reason"))
+
+        unused = [models[k] for k in models if k not in used]
+        persisted_rows = [r.get("persisted") for r in linked
+                          if isinstance(r.get("persisted"), dict)]
+        out: dict[str, Any] = {
+            "success": not failed and not unknown and not (
+                verify_rec and verify_rec.get("ran")
+                and not verify_rec.get("saved")),
+            "summary": {
+                "footprints": len(names),
+                "matched": len(matched),
+                "linked": len(linked),
+                "failed": len(failed),
+                "unmatched_footprints": len(unmatched),
+                "unused_models": len(unused),
+                "unknown_footprints": len(unknown),
+                "persisted_checked": sum(1 for p in persisted_rows
+                                         if p.get("checked")),
+                "persisted_ok": sum(1 for p in persisted_rows
+                                    if p.get("checked") and p.get("ok")),
+            },
             "linked": linked,
             "failed": failed,
             "unmatched_footprints": unmatched,
-            "unused_models": [models[k] for k in models if k not in used],
+            "unused_models": unused,
+            "unknown_footprints": unknown,
         }
+        if layer:
+            out["layer"] = layer
+        if stopped is not None:
+            out["stopped"] = stopped
+        if verify_rec is not None:
+            out["verify"] = verify_rec
         if rec is not None:
             out["reload_first"] = rec
         return out
@@ -6219,6 +6472,7 @@ def register_library_tools(mcp):
         remove_from_board: bool = False,
         reload_first: bool = True,
         verify_on_disk: bool = True,
+        park_current: Optional[bool] = None,
     ) -> dict[str, Any]:
         """Delete primitives inside ONE footprint of a PCB library.
 
@@ -6254,6 +6508,19 @@ def register_library_tools(mcp):
         that is not current, and with ``verify_on_disk`` the library is
         saved again and the footprint read back from the FILE in the same
         call (``persisted``), which settles whether the removal stuck.
+
+        BEING CURRENT IS WHAT BRINGS A REMOVED PRIMITIVE BACK (measured
+        2026-10-05, docs/RELEASE_VERIFICATION.md step 31 item 3b): a
+        DISK-LOADED pad, removed with reload_first=False while its
+        footprint was the current one, was still in the file after
+        lib_save_library. The library board holds the current
+        footprint's primitives and the save writes them back. The default
+        route worked because after the reopen the target was not current.
+        So ``park_current`` now defaults ON whether or not reload_first
+        runs: a current footprint is parked before the removal. Parking
+        WITHOUT a reload has not yet been measured live; without
+        reload_first nothing is verified on disk either, so prove it with
+        lib_save_library + lib_read_pcblib_file.
 
         THE SIDE EFFECT, stated: with reload_first the call saves the
         library (every pending edit in it) before removing, and again
@@ -6299,6 +6566,15 @@ def register_library_tools(mcp):
                 footprint's record total with the file before it
                 (``persisted``); a removed primitive the save wrote back
                 is ``ok``/``success`` false.
+            park_current: default (None) = ON unless
+                ``remove_from_board``: when the footprint is the current
+                one, another footprint is made current (verified) before
+                the removal, so the removal runs on a footprint the
+                library board does not hold. Sent with or without
+                reload_first. False removes from a current footprint, the
+                combination measured to come back. True with
+                ``remove_from_board`` is refused (its board half needs the
+                footprint current).
 
         PROOF IT PERSISTED: ``persisted`` in the reply, or by hand
         ``lib_save_library``, then
@@ -6356,6 +6632,11 @@ def register_library_tools(mcp):
             params["confirm"] = "true"
         if remove_from_board:
             params["remove_from_board"] = "true"
+        park, why = _park_choice(park_current, remove_from_board)
+        if why:
+            return {"ok": False, "reason": why}
+        if park:
+            params["park_current"] = "true"
 
         bridge = get_bridge()
         rec = None
@@ -6378,11 +6659,8 @@ def register_library_tools(mcp):
                                                skip_reason=source)
             if refusal is not None:
                 return refusal
-            if rec.get("ran"):
-                if not remove_from_board:
-                    params["park_current"] = "true"
-                if verify_on_disk:
-                    baseline, baseline_why = _saved_footprint(path, fp)
+            if rec.get("ran") and verify_on_disk:
+                baseline, baseline_why = _saved_footprint(path, fp)
         result = await bridge.send_command_async(
             "library.delete_footprint_primitives", params)
         result = _with_reload_record(result, rec)
@@ -6517,6 +6795,7 @@ def register_library_tools(mcp):
         remove_from_board: bool = False,
         reload_first: bool = True,
         verify_on_disk: bool = True,
+        park_current: Optional[bool] = None,
     ) -> dict[str, Any]:
         """Delete individual pads from ONE PcbLib footprint.
 
@@ -6545,6 +6824,18 @@ def register_library_tools(mcp):
         the current footprint from the board" as well as "session-created".
         The selectors are resolved after the reopen, in the reopened
         library's pad order.
+
+        MEASURED 2026-10-05 (docs/RELEASE_VERIFICATION.md step 31, item
+        3b): the second theory holds. A DISK-LOADED pad, removed with
+        reload_first=False while its footprint was CURRENT (made so with
+        lib_set_current_footprint), was still in the file after
+        lib_save_library (target_current_during_removal true,
+        board_still_listed 1). Being current is what makes a removed
+        primitive come back: the library board holds the current
+        footprint's primitives and the save writes them back. The default
+        route (item 3) passed because after the reopen the target was not
+        current. So ``park_current`` now defaults ON with or without
+        reload_first. Parking without a reload is not yet measured live.
 
         THE SIDE EFFECT, stated: with reload_first the call SAVES the
         library (every pending edit in it) before removing anything, and
@@ -6588,6 +6879,13 @@ def register_library_tools(mcp):
                 save again after the delete and compare the SAVED pads
                 with the file before it (``persisted``). False leaves the
                 delete in memory, unsaved.
+            park_current: default (None) = ON unless
+                ``remove_from_board``: a footprint that is current is
+                parked (another made current, verified) before its pads
+                are removed. Sent with or without reload_first, so a
+                no-reload delete is safe too. False removes from a current
+                footprint, measured to come back. True with
+                ``remove_from_board`` is refused.
 
         Returns:
             {library, footprint, removed, selectors, results, pads_before,
@@ -6630,6 +6928,11 @@ def register_library_tools(mcp):
             params["library_path"] = str(library_path).strip()
         if remove_from_board:
             params["remove_from_board"] = "true"
+        park, why = _park_choice(park_current, remove_from_board)
+        if why:
+            return {"ok": False, "reason": why}
+        if park:
+            params["park_current"] = "true"
         bridge = get_bridge()
         rec = None
         baseline = None
@@ -6674,11 +6977,8 @@ def register_library_tools(mcp):
                                                skip_reason=source)
             if refusal is not None:
                 return refusal
-            if rec.get("ran"):
-                if not remove_from_board:
-                    params["park_current"] = "true"
-                if verify_on_disk:
-                    baseline, baseline_why = _saved_footprint(path, fp)
+            if rec.get("ran") and verify_on_disk:
+                baseline, baseline_why = _saved_footprint(path, fp)
         result = await bridge.send_command_async(
             "library.delete_footprint_pads", params, timeout=120.0)
         result = _with_reload_record(result, rec)
