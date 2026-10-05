@@ -271,13 +271,16 @@ def register_uiauto_tools(mcp):
                                  "driven and no dialog is waiting")}
 
         loop = asyncio.get_running_loop()
+        # Every executor target here enters controls.com_apartment: a
+        # worker thread has no COM of its own, and an accessible read on
+        # one returns NOTHING rather than failing (see controls.py).
         report = await loop.run_in_executor(
-            None, lambda: dialog_driver.drive(
+            None, controls.in_com_apartment(lambda: dialog_driver.drive(
                 pid, intent="proceed",
                 allow_commit=bool(confirm_execute_eco),
                 allow_confirm=bool(answer_confirmations),
                 wait_first=float(first_step_timeout),
-                dry_run=dry_run))
+                dry_run=dry_run)))
 
         if opened is not None:
             report["opened_by_menu"] = opened
@@ -574,6 +577,7 @@ def register_uiauto_tools(mcp):
         if problem:
             return problem
 
+        @controls.in_com_apartment
         def press():
             open_dialogs = windows.dialogs(pid)
             if not open_dialogs:
@@ -726,6 +730,7 @@ def register_uiauto_tools(mcp):
 
         loop = asyncio.get_running_loop()
 
+        @controls.in_com_apartment
         def run():
             return dialog_driver.drive(
                 pid, intent=intent, allow_commit=allow_commit,
@@ -794,6 +799,7 @@ def register_uiauto_tools(mcp):
         if not clicked.get("ok"):
             return {"ok": False, "stage": "menu", "menu": clicked}
 
+        @controls.in_com_apartment
         def run():
             return dialog_driver.drive(
                 pid, intent="proceed", allow_commit=allow_commit,

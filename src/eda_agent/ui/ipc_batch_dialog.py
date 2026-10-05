@@ -159,6 +159,7 @@ def _option(described: list, words: Iterable[str], role: str):
     return None
 
 
+@controls.in_com_apartment
 def snapshot(dialog) -> dict:
     """What the batch form shows, read without changing anything."""
     texts = windows.window_text_dump(dialog, limit=120)
@@ -178,6 +179,17 @@ def snapshot(dialog) -> dict:
     except Exception as exc:                     # noqa: BLE001
         out["options_error"] = str(exc)
         return out
+    unread = controls.unread_reason(dialog, described)
+    if unread:
+        # An empty list here used to read as "this form has no options"
+        # (MEASURED 2026-10-05: options [] beside a text dump holding every
+        # caption). No "options" key at all, so nothing downstream can
+        # mistake a failed read for an answer.
+        out["options_error"] = unread
+        out["options_unread"] = [c.text for c in
+                                 controls.option_like_controls(dialog)]
+        out["queue_readable"] = False
+        return out
     out["options"] = [
         {"label": c.get("label") or c.get("name"), "role": c.get("role"),
          "checked": c.get("checked"), "enabled": c.get("enabled")}
@@ -195,6 +207,7 @@ def snapshot(dialog) -> dict:
     return out
 
 
+@controls.in_com_apartment
 def set_option(dialog, words: Iterable[str], want: bool, role: str) -> dict:
     """Set one checkbox or radio found by caption words, and read it back."""
     words = tuple(words)
@@ -210,6 +223,10 @@ def set_option(dialog, words: Iterable[str], want: bool, role: str) -> dict:
     except Exception as exc:                     # noqa: BLE001
         return {"ok": False, "words": list(words), "role": role,
                 "reason": f"the dialog's options could not be read: {exc}"}
+    unread = controls.unread_reason(dialog, described)
+    if unread:
+        return {"ok": False, "words": list(words), "role": role,
+                "unread": True, "offered": [], "reason": unread}
     found = _option(described, words, role)
     if found is None:
         return {"ok": False, "words": list(words), "role": role,
@@ -333,6 +350,7 @@ def _destination_path(label: str) -> Optional[str]:
     return named
 
 
+@controls.in_com_apartment
 def set_destination(dialog, library_path: str) -> dict:
     """Select the destination radio (see destination_choice) and read it back.
 
@@ -346,6 +364,13 @@ def set_destination(dialog, library_path: str) -> dict:
     except Exception as exc:                     # noqa: BLE001
         return {"ok": False, "reason": (
             f"the dialog's options could not be read: {exc}")}
+    unread = controls.unread_reason(dialog, described)
+    if unread:
+        # Still a refusal, which is the safe outcome, but one that says the
+        # radios were never READ rather than "no radiobutton reads ...",
+        # which sent the 2026-10-05 diagnosis after a caption that was on
+        # screen all along.
+        return {"ok": False, "unread": True, "offered": [], "reason": unread}
     choice = destination_choice(described, library_path)
     if not choice.get("ok"):
         return {k: v for k, v in choice.items() if k != "found"}
@@ -374,6 +399,7 @@ def _press(window, caption: str) -> dict:
     return {"ok": True, "pressed": button.text}
 
 
+@controls.in_com_apartment
 def close_form(dialog) -> dict:
     """Close the batch form: before Start, or after a run has finished.
 
@@ -451,6 +477,7 @@ def _file_name_by_handle(file_dialog, path: str) -> dict:
     return {"ok": True, "route": "handle", "readback": got}
 
 
+@controls.in_com_apartment
 def add_file(pid: int, dialog, csv_path: str, timeout: float,
              may_steal_focus: bool) -> dict:
     """Press Add Files and hand the file dialog one full path."""
@@ -524,6 +551,7 @@ def watch_for_dialog(pid: int, known: set, seconds: float) -> list:
         time.sleep(0.1)
 
 
+@controls.in_com_apartment
 def start_and_wait(pid: int, dialog, report_dirs: list, csv_path: str,
                    timeout: float, quiet_after: float = 8.0,
                    poll: float = 0.25) -> dict:
@@ -606,6 +634,7 @@ def start_and_wait(pid: int, dialog, report_dirs: list, csv_path: str,
     return out
 
 
+@controls.in_com_apartment
 def drive_one(pid: int, csv_path: str, report_dirs: list, *,
               dialog_timeout: float = 30.0, run_timeout: float = 180.0,
               open_report: Optional[bool] = None,

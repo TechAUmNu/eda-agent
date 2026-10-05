@@ -47,7 +47,7 @@ from typing import Optional
 from ..atomicfile import replace_with_retry
 from ..bridge.altium_bridge import PROTOCOL_VERSION
 from ..libimport import ipc_batch as files
-from ..ui import dialog_report, ipc_batch_dialog
+from ..ui import controls, dialog_report, ipc_batch_dialog
 
 #: The extension's batch command (FootprintWizard.rcs: Command=
 #: 'PCB:BatchPCBLibCreate', Caption 'IPC Compliant Footprints Batch
@@ -70,6 +70,7 @@ def _failure(command: str, exc: BaseException) -> dict:
             "details": getattr(exc, "details", None)}
 
 
+@controls.in_com_apartment
 def _screen_report(pid: int) -> dict:
     """``dialog_report.report``, which never raises here.
 
@@ -77,6 +78,10 @@ def _screen_report(pid: int) -> dict:
     failure, a window that vanished mid-read) would replace the stop
     record with a bare traceback, which is the one thing a stop exists
     to prevent.
+
+    Runs in an executor, so in com_apartment like every such entry: the
+    report reads Win32 and OCR today, and a reader added later that
+    reaches MSAA or UIA must not come back empty on a worker thread.
     """
     try:
         return dialog_report.report(pid)
@@ -94,6 +99,7 @@ def _form_still_open(pid: int) -> bool:
         return True
 
 
+@controls.in_com_apartment
 def _drive_one_reporting(pid: int, csv_path: str, dirs: list,
                          **kwargs) -> dict:
     """``drive_one``, with any exception turned into a stop record.
@@ -103,6 +109,11 @@ def _drive_one_reporting(pid: int, csv_path: str, dirs: list,
     windows.click, an accessibility read failing, OCR in a dialog report)
     used to end the whole call as a traceback with the form still up, the
     bridge still blocked and nothing saying so.
+
+    In an executor is also why this enters com_apartment: on a worker
+    without COM the form's options read as an empty list (MEASURED
+    2026-10-05, see controls.py). drive_one carries the same guard; nested,
+    the inner one is a no-op.
     """
     try:
         return ipc_batch_dialog.drive_one(pid, csv_path, dirs, **kwargs)

@@ -32,8 +32,11 @@ the pointer nor need the window in front.
 """
 from __future__ import annotations
 
+import threading
 from collections import deque
 from typing import Any, Optional
+
+from . import controls as _controls
 
 try:                                            # pragma: no cover - platform
     import comtypes.client as _cc
@@ -46,9 +49,17 @@ except Exception:                               # pragma: no cover - platform
     _AVAILABLE = False
 
 #: Cached automation object. Creating it is the expensive part and it is
-#: stateless, so one per process is right. A fresh one per call showed up
-#: as latency on every read.
-_AUTOMATION = None
+#: stateless, so it is created once and reused. A fresh one per call showed
+#: up as latency on every read.
+#:
+#: ONCE PER APARTMENT, not once per process. It used to be one global, made
+#: by whichever thread asked first; a COM object belongs to the apartment
+#: that made it, and executor workers now enter and LEAVE apartments
+#: (controls.com_apartment). A global made inside a worker's apartment
+#: would outlive it and be handed to the next caller on another thread.
+#: Keyed by controls.apartment_token, and dropped when the apartment that
+#: made it ends, the object is only ever used where it is valid.
+_LOCAL = threading.local()
 
 
 def available() -> bool:
@@ -56,17 +67,27 @@ def available() -> bool:
     return _AVAILABLE
 
 
+def _forget() -> None:
+    _LOCAL.automation = None
+    _LOCAL.token = None
+
+
 def _uia():
-    global _AUTOMATION
     if not _AVAILABLE:
         return None
-    if _AUTOMATION is None:
-        try:
-            _AUTOMATION = _cc.CreateObject(
-                _UIA.CUIAutomation, interface=_UIA.IUIAutomation)
-        except Exception:                       # noqa: BLE001
-            return None
-    return _AUTOMATION
+    token = _controls.apartment_token()
+    cached = getattr(_LOCAL, "automation", None)
+    if cached is not None and getattr(_LOCAL, "token", None) == token:
+        return cached
+    try:
+        made = _cc.CreateObject(
+            _UIA.CUIAutomation, interface=_UIA.IUIAutomation)
+    except Exception:                           # noqa: BLE001
+        return None
+    _LOCAL.automation = made
+    _LOCAL.token = token
+    _controls.at_apartment_exit(_forget)
+    return made
 
 
 def _element(hwnd: int):

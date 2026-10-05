@@ -53,6 +53,7 @@ import ctypes
 import time
 from ctypes import POINTER, byref, c_long, wintypes
 
+from . import controls
 from . import windows as win
 
 try:                                            # pragma: no cover - platform
@@ -425,20 +426,11 @@ def click_path(pid: int, path: str, settle: float = 1.2) -> dict:
     # it, and callers run this in an executor because it sleeps between
     # clicks. Without this every accessible call on the worker fails and
     # a real menu reads as EMPTY rather than as broken, which is exactly
-    # how it first presented.
-    try:
-        comtypes.CoInitialize()
-        owned = True
-    except Exception:                            # pragma: no cover - guard
-        owned = False
-    try:
+    # how it first presented. The guard is controls.com_apartment, the one
+    # every executor entry shares (the batch dialog driver had none and
+    # read a form full of options as having none).
+    with controls.com_apartment():
         return _click_path(pid, path, settle)
-    finally:
-        if owned:
-            try:
-                comtypes.CoUninitialize()
-            except Exception:                    # pragma: no cover - guard
-                pass
 
 
 def bring_to_front(pid: int) -> bool:
@@ -584,19 +576,8 @@ def list_path(pid: int, path: str = "", settle: float = 1.2) -> dict:
         return {"ok": False, "reason": (
             "menu driving needs pywin32 and comtypes on Windows")}
 
-    try:
-        comtypes.CoInitialize()
-        owned = True
-    except Exception:                            # pragma: no cover - guard
-        owned = False
-    try:
+    with controls.com_apartment():               # see click_path
         return _list_path(pid, path, settle)
-    finally:
-        if owned:
-            try:
-                comtypes.CoUninitialize()
-            except Exception:                    # pragma: no cover - guard
-                pass
 
 
 def _levels(path) -> list:

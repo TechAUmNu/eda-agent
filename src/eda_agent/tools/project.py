@@ -280,7 +280,18 @@ def register_project_tools(mcp):
         Returns (answered, discarded, refusal). Presses nothing unless
         every document the prompt lists is in ``members``. Loops because
         a close retried by the handler can raise a second prompt.
+
+        In a thread means in a COM apartment: this reads the prompt through
+        UI Automation, which on a worker without COM finds nothing to read
+        and nothing to press (see ui/controls.py com_apartment).
         """
+        from ..ui import controls
+
+        with controls.com_apartment():
+            return _answer_close_prompts_unguarded(bridge, members, prompt,
+                                                   budget)
+
+    def _answer_close_prompts_unguarded(bridge, members, prompt, budget):
         import time as _time
         from ..ui import uia, windows
 

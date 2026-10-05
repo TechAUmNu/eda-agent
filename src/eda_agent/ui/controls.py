@@ -30,15 +30,25 @@ from here, which is stated rather than papered over.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
+import functools
+import threading
 import time
 from ctypes import POINTER, byref, c_long, wintypes
-from typing import Optional
+from typing import Callable, Optional
 
 from . import windows as win
 
+#: comtypes itself, kept apart from _AVAILABLE: the apartment guard below
+#: needs CoInitialize even on a host where oleacc's type library failed.
+#: None where comtypes does not import at all, which makes the guard a
+#: no-op rather than an error.
+_comtypes = None
+
 try:                                            # pragma: no cover - platform
     import comtypes
+    _comtypes = comtypes
     import comtypes.client
     from comtypes import COMError
     from comtypes.automation import VARIANT
@@ -73,6 +83,117 @@ SETTABLE = ("checkbox", "radiobutton")
 
 def available() -> bool:
     return _AVAILABLE and win.available()
+
+
+# ---------------------------------------------------------------------------
+# COM apartments: one guard for every thread that reads the accessible layer.
+#
+# COM IS PER THREAD. comtypes initialises the thread that first IMPORTS it
+# and no other, and the UI work here routinely runs in an executor because
+# it sleeps and polls. On a worker that was never initialised every
+# AccessibleObjectFromWindow fails, read() reports "no accessible object",
+# describe_all() skips the control, and a dialog full of options reads as
+# a dialog with NONE. Nothing raises.
+#
+# MEASURED 2026-10-05 on a fresh MCP server process: the IPC batch form's
+# before.options was [] and queue_readable false while the plain Win32 text
+# dump of the same form held 'Generate all footprints in
+# H:\git\multiviewer\hardware\multiviewer\carrier.PcbLib' and every other
+# caption. The previous day, in an older process, the same form gave all 7
+# options. Whether a worker could read MSAA depended on which thread had
+# happened to import comtypes first. menu.py had found this on its own
+# (a real menu reading as EMPTY) and guarded its two entry points; the
+# batch dialog driver, run through run_in_executor, had no guard at all.
+#
+# So the guard lives here, once, and every executor entry that can reach
+# MSAA or UIA enters it. It is re-entrant: only the OUTERMOST entry on a
+# thread calls CoInitialize, so nesting (drive_one -> snapshot ->
+# describe_all) costs nothing and cannot unbalance the count.
+#
+# WHAT "OWNED" MEANS. CoInitialize succeeding covers both S_OK (a new
+# apartment) and S_FALSE (the thread already had one, the import thread
+# for instance). COM's rule is that BOTH must be balanced by one
+# CoUninitialize, and balancing an S_FALSE only drops the count back to
+# where it was, so it never tears down an apartment someone else made.
+# comtypes returns neither code, so "owned" is simply "the call did not
+# raise". A raise, RPC_E_CHANGED_MODE for a thread already in the
+# multithreaded apartment or anything else, means we own nothing and
+# uninitialise nothing; MSAA works from an MTA thread anyway.
+
+_COM_STATE = threading.local()
+
+
+@contextlib.contextmanager
+def com_apartment():
+    """Run the body with COM initialised on THIS thread. Never raises.
+
+    Safe on any host: without comtypes it does nothing. Safe to nest: an
+    inner entry neither initialises nor uninitialises.
+    """
+    depth = getattr(_COM_STATE, "depth", 0)
+    owned = False
+    if depth == 0 and _comtypes is not None:
+        try:
+            _comtypes.CoInitialize()
+            owned = True
+        except Exception:                        # noqa: BLE001 - guard
+            owned = False
+    _COM_STATE.depth = depth + 1
+    if depth == 0:
+        _COM_STATE.exits = []
+    try:
+        yield
+    finally:
+        _COM_STATE.depth = depth
+        if depth == 0:
+            # Objects cached against this apartment are dropped BEFORE it
+            # ends, on the thread that made them, rather than released
+            # later from a thread that never knew the apartment.
+            for drop in reversed(getattr(_COM_STATE, "exits", [])):
+                try:
+                    drop()
+                except Exception:                # noqa: BLE001 - guard
+                    pass
+            _COM_STATE.exits = []
+            if owned:
+                try:
+                    _comtypes.CoUninitialize()
+                except Exception:                # noqa: BLE001 - guard
+                    pass
+                _COM_STATE.generation = (
+                    getattr(_COM_STATE, "generation", 0) + 1)
+
+
+def in_com_apartment(fn: Callable) -> Callable:
+    """Decorator form of com_apartment, for functions run in an executor."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with com_apartment():
+            return fn(*args, **kwargs)
+    return wrapper
+
+
+def apartment_token() -> tuple:
+    """Identifies the apartment this thread is in NOW, for caches.
+
+    The pair changes when the thread changes or when an apartment this
+    guard owned has ended, so a COM object cached under one token is
+    never handed out under another (uia.py's automation object).
+    """
+    return (threading.get_ident(), getattr(_COM_STATE, "generation", 0))
+
+
+def at_apartment_exit(drop: Callable) -> bool:
+    """Run ``drop`` when the outermost com_apartment on this thread exits.
+
+    False, and nothing registered, when the thread is not inside one: its
+    COM state then belongs to whoever initialised it (the import thread)
+    and lives as long as the process.
+    """
+    if getattr(_COM_STATE, "depth", 0) <= 0:
+        return False
+    _COM_STATE.exits.append(drop)
+    return True
 
 
 def _acc(hwnd):
@@ -162,6 +283,61 @@ def describe_all(window) -> list:
         info["label"] = control.text
         out.append(info)
     return out
+
+
+#: Stock "Button" styles (BS_* in the low nibble) that are a checkbox or a
+#: radio: CHECKBOX, AUTOCHECKBOX, RADIOBUTTON, 3STATE, AUTO3STATE,
+#: AUTORADIOBUTTON.
+_BS_OPTION_STYLES = (0x2, 0x3, 0x4, 0x5, 0x6, 0x9)
+
+
+def option_like_controls(window) -> list:
+    """Visible, captioned controls that Win32 ALONE says are options.
+
+    Read without the accessible layer, so it still answers when that layer
+    returns nothing: the class name for Altium's VCL controls
+    (TXPCheckBox, TXPRadioButton), the style bits for a stock "Button".
+    """
+    found = []
+    for control in getattr(window, "controls", None) or []:
+        if not control.text or not getattr(control, "visible", True):
+            continue
+        name = (control.class_name or "").lower()
+        if "checkbox" in name or "radio" in name:
+            found.append(control)
+        elif (name == "button"
+              and (getattr(control, "style", 0) & 0xF) in _BS_OPTION_STYLES):
+            found.append(control)
+    return found
+
+
+def unread_reason(window, described: list) -> Optional[str]:
+    """Why an EMPTY describe_all is a failed read, not an answer.
+
+    None when ``described`` holds anything, or when Win32 shows no option
+    controls either (then empty may be the truth). Otherwise a reason that
+    names the likely cause, so "no options" is never reported for a
+    dialog whose checkboxes and radios are plainly on screen.
+    """
+    if described:
+        return None
+    options = option_like_controls(window)
+    if options:
+        what = f"{len(options)} checkbox/radio control(s)"
+    else:
+        # No option class, but a captioned windowed control (a button, a
+        # label with a handle) is described by MSAA too, so an empty read
+        # beside one is still a failed read.
+        options = [c for c in getattr(window, "controls", None) or []
+                   if c.text and getattr(c, "visible", True)]
+        what = f"{len(options)} captioned control(s)"
+    if not options:
+        return None
+    sample = ", ".join(repr(c.text) for c in options[:3])
+    return (f"the accessibility read returned nothing for this dialog, "
+            f"although Win32 shows {what} ({sample}). The options are "
+            f"UNREAD, not absent: most likely COM is not initialised on "
+            f"this thread (an executor entry without com_apartment)")
 
 
 def find(window, label: str, role: Optional[str] = None,
