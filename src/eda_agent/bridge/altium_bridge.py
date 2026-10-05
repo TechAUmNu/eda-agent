@@ -886,16 +886,25 @@ class AltiumBridge:
 
         Returns None rather than raising, always. A probe that fails
         must not replace the timeout the caller actually needs to see.
+
+        It runs on the bridge's _executor thread, so it enters the COM
+        apartment guard like every other executor entry. dialog_report is
+        Win32 + OCR (a subprocess) today and reaches no COM - the same
+        report _screen_report already guards - so this is the rule kept
+        without an exception: every executor entry that could reach MSAA
+        or UIA is guarded, and nobody has to remember this one the day
+        dialog_report grows an accessible read.
         """
         try:
-            from ..ui import dialog_report, windows
+            from ..ui import controls, dialog_report, windows
 
             if not windows.available():
                 return None
             process = self.process_manager.get_altium_info()
             if not process:
                 return None
-            report = dialog_report.report(process.pid)
+            with controls.com_apartment():
+                report = dialog_report.report(process.pid)
             return report if report.get("dialog_count") else None
         except Exception:                        # pragma: no cover - guard
             return None

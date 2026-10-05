@@ -238,3 +238,65 @@ def test_a_retried_close_does_not_list_a_path_twice(altium):
     assert out["discarded"] == [PROJECT, SHEET]
     assert out["attempts"] == 2
     assert fake.presses == []
+
+
+def test_the_prompt_is_read_in_a_com_apartment_on_the_worker(
+        altium, monkeypatch):
+    """The prompt is answered from run_in_executor, and UI Automation is COM.
+
+    COM is per thread: a worker that never called CoInitialize reads an
+    EMPTY prompt through UIA and can press nothing (the 2026-10-05 batch
+    dialog failure, ui/controls.py com_apartment). The fake screen here
+    behaves that way - it reads and presses only on a thread whose fake
+    COM count is up - so this passes only if _answer_close_prompts enters
+    the guard on the executor thread itself, and balances it on the way
+    out. With the guard removed the read is empty and the tool refuses
+    with "could not read which documents", pressing nothing.
+    """
+    import threading
+
+    from eda_agent.ui import controls
+
+    class FakeCom:
+        def __init__(self):
+            self.calls, self.counts = [], {}
+
+        def CoInitialize(self):                  # noqa: N802
+            ident = threading.get_ident()
+            self.calls.append(("init", ident))
+            self.counts[ident] = self.counts.get(ident, 0) + 1
+
+        def CoUninitialize(self):                # noqa: N802
+            ident = threading.get_ident()
+            self.calls.append(("uninit", ident))
+            self.counts[ident] -= 1
+
+        def up(self):
+            return self.counts.get(threading.get_ident(), 0) > 0
+
+    com = FakeCom()
+    monkeypatch.setattr(controls, "_comtypes", com)
+    fake, close = altium()
+    read_on, real_describe, real_invoke = [], fake.describe_window, fake.invoke
+
+    def describe_window(hwnd, depth=4, limit=400):
+        read_on.append(threading.get_ident())
+        if not com.up():
+            return {"ok": True, "elements": []}
+        return real_describe(hwnd, depth, limit)
+
+    def invoke(hwnd, name):
+        if not com.up():
+            return {"ok": False, "reason": "no UIA element"}
+        return real_invoke(hwnd, name)
+
+    monkeypatch.setattr(uia, "describe_window", describe_window)
+    monkeypatch.setattr(uia, "invoke", invoke)
+
+    out = _close(close, project_path=PROJECT, save=False)
+    assert [name for _, name in fake.presses] == ["Save None", "OK"]
+    assert out["closed"] is True, out.get("reason")
+    worker = read_on[0]
+    assert worker != threading.get_ident(), "read off the caller's thread"
+    assert com.calls == [("init", worker), ("uninit", worker)], (
+        "one CoInitialize on the worker, balanced by one CoUninitialize")

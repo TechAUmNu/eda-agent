@@ -286,6 +286,40 @@ def test_the_body_error_still_balances(monkeypatch):
     assert [name for name, _ in com.calls] == ["init", "uninit"]
 
 
+def test_a_raising_body_releases_its_com_objects_before_uninit(monkeypatch):
+    """A raise must not carry COM proxies past CoUninitialize.
+
+    The traceback holds every finished frame of the body and so their
+    IAccessible / UIA locals; freed later on another thread they would be
+    Released against an ended apartment. The fake proxy records, at its
+    own release, whether its thread's COM was still up. pytest.raises
+    keeps the exception (and so the traceback) alive well past the guard,
+    which is exactly the executor future holding it: without the frame
+    clearing this proxy is still alive after uninit, and the test fails.
+    """
+    com = FakeCom()
+    monkeypatch.setattr(controls, "_comtypes", com)
+    released: list = []
+
+    class Proxy:
+        def __del__(self):
+            released.append(com.initialised())
+
+    def deep():
+        proxy = Proxy()                          # noqa: F841 - held by frame
+        raise ValueError("inside, with a live proxy in this frame")
+
+    @controls.in_com_apartment
+    def boom():
+        deep()
+
+    with pytest.raises(ValueError):
+        _on_fresh_thread(boom)
+    assert released == [True], (
+        "the proxy must die inside the apartment, on its own thread")
+    assert [name for name, _ in com.calls] == ["init", "uninit"]
+
+
 def test_objects_cached_in_an_apartment_die_with_it(monkeypatch):
     """uia's automation object is per apartment, not per process."""
     com = FakeCom()
@@ -373,3 +407,26 @@ def test_stock_button_styles_count_as_options():
     w = win.Window(hwnd=9, class_name="X", title="t", pid=1,
                    controls=[radio, push, hidden])
     assert controls.option_like_controls(w) == [radio]
+
+
+def test_a_radio_group_box_is_not_counted_as_an_option():
+    """TRadioGroup / TXPRadioGroup is the captioned box, not a radio."""
+    radio = win.Control(hwnd=1, class_name="TXPRadioButton", text="Per file")
+    box = win.Control(hwnd=2, class_name="TXPRadioGroup", text="Output")
+    vcl = win.Control(hwnd=3, class_name="TRadioGroup", text="Mode")
+    w = win.Window(hwnd=9, class_name="X", title="t", pid=1,
+                   controls=[box, radio, vcl])
+    assert controls.option_like_controls(w) == [radio]
+    reason = controls.unread_reason(w, [])
+    assert "1 checkbox/radio" in reason and "'Output'" not in reason
+
+
+def test_the_bridge_timeout_probe_enters_the_guard_too():
+    """_dialog_probe runs on the bridge's _executor thread and calls the
+    same dialog_report.report that _screen_report guards."""
+    from eda_agent.bridge.altium_bridge import AltiumBridge
+
+    source = inspect.getsource(AltiumBridge._dialog_probe)
+    assert "with controls.com_apartment():" in source
+    assert source.index("com_apartment") < source.index(
+        "dialog_report.report(")

@@ -33,8 +33,10 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import functools
+import gc
 import threading
 import time
+import traceback
 from ctypes import POINTER, byref, c_long, wintypes
 from typing import Callable, Optional
 
@@ -143,6 +145,10 @@ def com_apartment():
         _COM_STATE.exits = []
     try:
         yield
+    except BaseException as exc:
+        if depth == 0 and owned:
+            _release_traceback_locals(exc)
+        raise
     finally:
         _COM_STATE.depth = depth
         if depth == 0:
@@ -162,6 +168,31 @@ def com_apartment():
                     pass
                 _COM_STATE.generation = (
                     getattr(_COM_STATE, "generation", 0) + 1)
+
+
+# THE EXCEPTION PATH. On success every entry returns plain dicts, so no COM
+# object outlives the body. On a RAISE the traceback still holds every
+# finished frame of the body, and with them their IAccessible / UIA locals,
+# while the finally above runs CoUninitialize. Those proxies were then
+# Released LATER, on whichever thread freed the exception - usually the
+# event-loop thread, when the executor future's exception was dropped -
+# against an apartment that had already ended. comtypes' __del__ swallows
+# the error, but Release on a disconnected STA proxy can still fault.
+# So before an apartment WE own ends on a raise, the body's finished
+# frames are cleared (the frames still executing - the with-statement's
+# own, this generator's - are skipped by clear_frames) and a collection
+# runs, so those objects die here, on their own thread, while COM is up.
+# The exception and its line numbers survive; only the locals go, which
+# nothing reads after the guard. tests/test_com_apartment.py proves the
+# order (released BEFORE uninit) and fails without this.
+
+
+def _release_traceback_locals(exc: BaseException) -> None:
+    try:
+        traceback.clear_frames(exc.__traceback__)
+        gc.collect()
+    except Exception:                            # noqa: BLE001 - guard
+        pass
 
 
 def in_com_apartment(fn: Callable) -> Callable:
@@ -297,12 +328,18 @@ def option_like_controls(window) -> list:
     Read without the accessible layer, so it still answers when that layer
     returns nothing: the class name for Altium's VCL controls
     (TXPCheckBox, TXPRadioButton), the style bits for a stock "Button".
+    A radio GROUP (TRadioGroup, TXPRadioGroup) is the captioned box the
+    radios sit in, not an option, so a class naming "group" is skipped;
+    otherwise the count and the sample in unread_reason would list the
+    box's caption as if it were a radio.
     """
     found = []
     for control in getattr(window, "controls", None) or []:
         if not control.text or not getattr(control, "visible", True):
             continue
         name = (control.class_name or "").lower()
+        if "group" in name:
+            continue
         if "checkbox" in name or "radio" in name:
             found.append(control)
         elif (name == "button"
