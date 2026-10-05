@@ -435,16 +435,21 @@ def fake(monkeypatch, tmp_path):
     return bridge
 
 
-def test_link_sends_rotation_replace_and_align(fake):
+def test_link_sends_rotation_replace_and_align(fake, tmp_path):
+    step = tmp_path / "soic8.step"
+    step.write_text("x")
     tools = _tools()
     asyncio.run(tools["lib_link_3d_model"](
-        component_name="SOIC8", model_path=r"C:\m\soic8.step",
+        component_name="SOIC8", model_path=str(step),
         rotation_x=90, offset_z=2.5, replace=True, align="center"))
     command, params = fake.commands[-1]
     assert command == "library.link_3d_model"
     assert params["rotation_x"] == 90.0 and params["rotation_z"] == 0.0
     assert params["offset_z"] == 2.5
-    assert params["replace"] == "true"
+    # A named replace removes through the parked delete, then links plain.
+    assert params["replace"] == "false"
+    assert any(c == "library.delete_footprint_primitives"
+               for c, _p in fake.commands)
     assert params["align"] == "center"
     assert "library_path" not in params
 
@@ -533,7 +538,10 @@ def test_auto_link_reports_a_refused_link_as_failed(monkeypatch, tmp_path):
     assert result["unmatched_footprints"] == ["QFN16"]
     assert result["success"] is False
     link = [p for c, p in bridge.commands if c == "library.link_3d_model"]
-    assert link and link[0]["replace"] == "true"
+    # The replace removed through the parked delete, then linked plain.
+    assert link and link[0]["replace"] == "false"
+    assert any(c == "library.delete_footprint_primitives"
+               for c, _p in bridge.commands)
 
 
 def test_replace_keeps_the_placeholder_layer(handlers):

@@ -1885,14 +1885,22 @@ that run used; the list above in brackets where it differs.
   `target_was_current: true`, `target_current_during_removal: true`,
   `parked_elsewhere: false`, `board_still_listed: 1`. After
   `lib_save_library` pad `5` was STILL IN THE FILE. **Being CURRENT is
-  what brings a removed primitive back**, not having been added this
-  session: the library board holds the current footprint's primitives
-  and the save writes them back. Item 3 passed because after the reopen
-  the target was not current. Parking alone (without a reload) could not
-  be measured: `park_current` was sent only when reload_first ran. FIXED
-  in the tools since: both deletes now send `park_current` by default
-  with or without reload_first (`park_current=False` opts out; with
-  `remove_from_board` it is never sent).
+  sufficient to bring a removed primitive back**, even one loaded from
+  disk. This does NOT show that having been added this session is not
+  also sufficient: no run has removed a session-created primitive from a
+  footprint that was not current, without a reload. The mechanism (the
+  save writing the library board's copy of the current footprint) is
+  inferred, not measured. Item 3 passed because after the reopen the
+  target was not current. Parking alone (without a reload) could not be
+  measured: `park_current` was sent only when reload_first ran. CHANGED
+  in the tools since (not yet re-measured): both deletes now send
+  `park_current` by default with or without reload_first
+  (`park_current=False` opts out; with `remove_from_board` it is never
+  sent), and a 3D replace that names its footprint always removes the
+  old bodies through the parked delete, with or without reload_first
+  (the link handler's own replace removes from the CURRENT footprint;
+  with no footprint named it still runs, and the reply warns). All of
+  it measured on PADS only.
 * **Item 6, primitives delete** (above: 5): PASS, `persisted` tracks
   2 -> 1.
 * **Item 7, replace link, Dz 0** (above: 6, the control): PASS. The
@@ -1923,15 +1931,40 @@ that run used; the list above in brackets where it differs.
 Still open after this run:
 
 * Parking WITHOUT a reload, now the default on both deletes, is not yet
-  measured live: repeat item 3b with the new default (expect
-  `parked_elsewhere: true`, `target_current_during_removal: false`) and
-  read the file.
+  measured live. Two runs, because they answer different questions:
+  * (a) repeat item 3b (a DISK-LOADED pad, footprint made current,
+    `reload_first=false`) with the new default: expect
+    `parked_elsewhere: true`, `target_current_during_removal: false`,
+    and the pad ABSENT from the saved file. Settles "parking is enough
+    for a disk-loaded primitive".
+  * (b) add a pad with `lib_add_footprint_pads` (session-created), then
+    `lib_delete_footprint_pads(reload_first=false)` with the default
+    park, `lib_save_library`, `lib_read_pcblib_file`. Settles whether
+    parking alone is enough for a SESSION-CREATED primitive, which is
+    the case the no-reload default (and the no-reload 3D replace) now
+    relies on. If the pad comes back, being added this session is a
+    second sufficient cause and no-reload removals must be refused or
+    warned.
+* The handlers park BEFORE they validate: `Lib_DeleteFootprintPrimitives`
+  before the `layer` check (INVALID_LAYER), `Lib_DeleteFootprintPads`
+  before resolving the pad selectors. A delete they then refuse still
+  leaves another footprint current, not put back (documented in both
+  docstrings). At the next SCRIPT_VERSION bump: move the park below the
+  validation, and correct the three Library.pas comments (above
+  `LibParkCurrentElsewhere`, and beside the park in both handlers) that
+  still say `park_current` is "sent only after the tool's reload_first
+  ran".
 * `marked_modified` (and the Modified flag after track adds and pad
   edits) still reads false.
 * The IPC batch's COM initialisation, on `bridge-com-thread`.
 * `lib_auto_link_3d_models` gained `layer` (bare footprints otherwise get
   Mechanical 1, the house convention is Mechanical 13), `model_map` and a
-  per-footprint `persisted` check; not yet run live.
+  per-footprint `persisted` check (count, placement and, with a layer,
+  the saved body's layer); not yet run live. Run it on two bare
+  footprints with `layer="Mechanical 13"`, `replace=True`: expect each
+  `persisted.layer_ok: true`, and `lib_read_pcblib_file` showing
+  `Mechanical13` on both bodies. A library that renames that layer gives
+  `layer_ok: null` (the file names layers canonically), by design.
 
 ---
 

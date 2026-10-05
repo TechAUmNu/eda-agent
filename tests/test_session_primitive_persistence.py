@@ -25,11 +25,11 @@ footprint" too), then delete, then save again and read the FILE
 * the focused .PcbLib is used when library_path is empty, and a skip is
   said at the TOP of the reply;
 * park_current is asked for by default, with or without reload_first
-  (measured 2026-10-05: being CURRENT brings a removed primitive back),
-  never with remove_from_board;
+  (measured 2026-10-05: being CURRENT is enough to bring a removed
+  primitive back), never with remove_from_board;
 * the same rule on lib_delete_footprint_primitives and on
   lib_link_3d_model / lib_auto_link_3d_models with replace (which replace
-  through the delete, parked);
+  through the delete, parked, with or without reload_first);
 * the handler-side diagnostics one live call needs (target_was_current,
   parked_elsewhere, target_current_during_removal, board_still_listed,
   marked_modified), read-only.

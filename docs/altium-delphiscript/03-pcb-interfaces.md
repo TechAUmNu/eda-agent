@@ -639,18 +639,24 @@ a footprint's primitives, and read its `FileName`.
 **`LibraryIterator_Create` / `LibraryIterator_Destroy`**
 Enumerate the library's footprints.
 
-**The CURRENT footprint is written back from the library board on save
-(measured 2026-10-05, AD26 26.10.1.5).** The library board holds the
-primitives of the current footprint, and a save rebuilds that footprint
-from the board's copy. So a primitive removed from the footprint only
-(`Fp.RemovePCBObject`) while the footprint is CURRENT comes back with the
-next save, even when it was loaded from disk: a disk-loaded pad removed
-from a footprint made current with `SetState_CurrentComponent` was still
-in the saved file (`docs/RELEASE_VERIFICATION.md` step 31, item 3b). The
-same removal on a footprint that is NOT current persisted. The library
-tools therefore make another footprint current first
-(`LibParkCurrentElsewhere` in Library.pas) before a footprint-only
-removal. A removal also leaves `Modified` false on this build (and so do
+**A removal from the CURRENT footprint does not survive the save
+(measured 2026-10-05, AD26 26.10.1.5, on PADS).** A primitive removed
+from the footprint only (`Fp.RemovePCBObject`) while the footprint is
+CURRENT comes back with the next save, even when it was loaded from
+disk: a disk-loaded pad removed from a footprint made current with
+`SetState_CurrentComponent` was still in the saved file
+(`docs/RELEASE_VERIFICATION.md` step 31, item 3b). The removal that
+persisted ran on a footprint that was NOT current, after a save and
+reopen. Being current is therefore SUFFICIENT; whether a primitive added
+this session also comes back from a footprint that is not current,
+without a reopen, is unmeasured. The likely mechanism (the library board
+holds the current footprint's primitives and the save writes that copy)
+is inferred, not measured. The library tools now ask for another
+footprint to be made current first (`LibParkCurrentElsewhere` in
+Library.pas) before a footprint-only removal, with or without a reopen;
+parking WITHOUT a reopen is not yet measured live, and the link
+handler's own 3D replace (used only when no footprint is named) still
+removes from the current footprint. A removal also leaves `Modified` false on this build (and so do
 track adds and pad edits through the tools): an explicit save of the
 library still writes, a save that relies on the dirty flag may skip it.
 

@@ -247,17 +247,35 @@ _PY_CALLS = {
 }
 
 
+def _removal_params(fake, tool):
+    """The params of the call that REMOVES. A replace link removes through
+    lib_delete_footprint_primitives (parked delete, then a plain link), so
+    for it that is the delete, not the link."""
+    if tool == "lib_link_3d_model":
+        deletes = [p for c, p in fake.commands
+                   if c == "library.delete_footprint_primitives"]
+        assert deletes, "a replace link must remove through the delete"
+        return deletes[-1]
+    return fake.commands[-1][1]
+
+
 @pytest.mark.parametrize("tool", sorted(_PY_CALLS))
-def test_remove_from_board_is_off_unless_asked_for(fake, tool):
+def test_remove_from_board_is_off_unless_asked_for(fake, tool, tmp_path):
     """Mutation: default remove_from_board to True in any tool."""
     tools = _tools()
-    asyncio.run(tools[tool](**_PY_CALLS[tool]))
-    _command, params = fake.commands[-1]
+    kwargs = dict(_PY_CALLS[tool])
+    if "model_path" in kwargs:
+        step = tmp_path / "m.step"
+        step.write_text("x")
+        kwargs["model_path"] = str(step)
+    asyncio.run(tools[tool](**kwargs))
+    params = _removal_params(fake, tool)
     assert "remove_from_board" not in params, (
         f"{tool} sends remove_from_board without being asked")
 
-    asyncio.run(tools[tool](**_PY_CALLS[tool], remove_from_board=True))
-    _command, params = fake.commands[-1]
+    fake.commands.clear()
+    asyncio.run(tools[tool](**kwargs, remove_from_board=True))
+    params = _removal_params(fake, tool)
     assert params.get("remove_from_board") == "true"
 
 
@@ -278,12 +296,19 @@ def test_auto_link_forwards_remove_from_board(fake, tmp_path):
     tools = _tools()
     asyncio.run(tools["lib_auto_link_3d_models"](
         model_dir=str(tmp_path), replace=True, remove_from_board=True))
+    # The replace removes through the delete (the board half needs the
+    # footprint current, so it is not parked), then links without replace.
+    deletes = [p for c, p in fake.commands
+               if c == "library.delete_footprint_primitives"]
+    assert deletes and deletes[0]["remove_from_board"] == "true"
+    assert "park_current" not in deletes[0]
     links = [p for c, p in fake.commands if c == "library.link_3d_model"]
-    assert links and links[0]["remove_from_board"] == "true"
-    assert links[0]["replace"] == "true"
+    assert links and links[0]["replace"] == "false"
 
     fake.commands.clear()
     asyncio.run(tools["lib_auto_link_3d_models"](
         model_dir=str(tmp_path), replace=True))
-    links = [p for c, p in fake.commands if c == "library.link_3d_model"]
-    assert links and "remove_from_board" not in links[0]
+    deletes = [p for c, p in fake.commands
+               if c == "library.delete_footprint_primitives"]
+    assert deletes and "remove_from_board" not in deletes[0]
+    assert deletes[0]["park_current"] == "true"
