@@ -2740,11 +2740,9 @@ def _label_text_box(lab) -> tuple[int, int, int, int]:
     ends at the anchor (2) -- the same box ``_glyph_would_hit_text`` and
     ``text_placement`` use, so all three agree on what overlaps.
     """
-    from eda_agent.design.text_placement import CHAR_W, LINE_H
+    from eda_agent.design.text_placement import label_text_box
 
-    w = CHAR_W * max(1, len(lab.text))
-    x1 = lab.x - w if getattr(lab, "justification", 0) == 2 else lab.x
-    return (x1, lab.y, x1 + w, lab.y + LINE_H)
+    return label_text_box(lab)
 
 
 def _same_net_wire_groups(wires: list[WireSegment]) -> list[int]:
@@ -3940,12 +3938,7 @@ def _glyph_would_hit_text(
     Extents use the text placer's own character metrics rather than a
     second set, so the two agree on what overlaps.
     """
-    from eda_agent.design.text_placement import CHAR_W, LINE_H
-
-    def _text_box(tx: int, ty: int, s: str, just: int = 0):
-        w = CHAR_W * max(1, len(s))
-        x1 = tx - w if just == 2 else tx
-        return (x1, ty, x1 + w, ty + LINE_H)
+    from eda_agent.design.text_placement import label_text_box
 
     mine = _glyph_box(x, y, text)
 
@@ -3958,8 +3951,7 @@ def _glyph_would_hit_text(
     for lab in canvas.labels:
         if lab.sheet != sheet:
             continue
-        if _hits(_text_box(lab.x, lab.y, lab.text,
-                           getattr(lab, "justification", 0))):
+        if _hits(label_text_box(lab)):
             return True
     for i, other in enumerate(canvas.power_ports):
         # Skip by INDEX, not by coordinate. The glyph being moved is

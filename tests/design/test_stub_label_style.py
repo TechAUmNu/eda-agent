@@ -12,6 +12,8 @@ which does not ask for it is drawn exactly as before.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from eda_agent.design.canvas import (
@@ -552,3 +554,40 @@ def test_a_draw_style_hint_is_not_reported_as_an_unknown_key(styled):
     res = build_canvas_from_plan(_plan(style=False), MockExtractor(_syms()),
                                  placement_hints=hinted)
     assert not [n for n in res.notes if "unknown key" in n.text]
+
+
+# ------------------------------------------ vertical labels (review L4)
+
+def test_one_label_box_definition_respects_orientation():
+    from eda_agent.design.pipeline import _label_text_box
+    from eda_agent.design.port_glyphs import _GlyphSheet
+    from eda_agent.design.text_placement import label_text_box
+
+    up = NetLabel(text="GND", x=1000, y=2000, orientation=1, sheet="main")
+    down = NetLabel(text="GND", x=1000, y=2000, orientation=3, sheet="main")
+    flat = NetLabel(text="GND", x=1000, y=2000, orientation=0, sheet="main")
+    assert label_text_box(up) == (890, 2000, 1000, 2165)
+    assert label_text_box(down) == (1000, 1835, 1110, 2000)
+    assert label_text_box(flat) == (1000, 2000, 1165, 2110)
+    assert _label_text_box(up) == label_text_box(up)
+    cv = SchematicCanvas()
+    cv.add_sheet(Sheet(name="main"))
+    cv.add_labels([up])
+    assert _GlyphSheet(cv, type("P", (), {"nets": []})(), "main").labels == [
+        label_text_box(up)]
+
+
+def test_render_draws_a_vertical_label_rotated():
+    from eda_agent.design.render_svg import render_canvas_svg
+
+    cv = SchematicCanvas()
+    cv.add_sheet(Sheet(name="main"))
+    cv.add_labels([NetLabel(text="UP", x=1000, y=2000, orientation=1,
+                            sheet="main"),
+                   NetLabel(text="FLAT", x=3000, y=2000, orientation=0,
+                            sheet="main")])
+    svg = render_canvas_svg(cv)
+    up = re.search(r'<text[^>]*>UP</text>', svg).group(0)
+    assert 'transform="rotate(-90 ' in up and 'text-anchor="start"' in up
+    flat = re.search(r'<text[^>]*>FLAT</text>', svg).group(0)
+    assert "rotate" not in flat

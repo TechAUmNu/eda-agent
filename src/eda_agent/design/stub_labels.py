@@ -196,10 +196,11 @@ def _label(text: str, hx: int, hy: int, ex: int, ey: int, dx: int, dy: int,
 
 
 def _label_box(lb: NetLabel) -> tuple[int, int, int, int]:
-    w = CHAR_W * len(lb.text)
-    if lb.orientation % 2 == 0:
-        return (lb.x, lb.y, lb.x + w, lb.y + LABEL_H)
-    return (lb.x - LABEL_H, lb.y, lb.x, lb.y + w)
+    """The shared label box (text_placement.label_text_box), so the keep-out
+    and every pass that tests text agree on what a vertical label covers."""
+    from eda_agent.design.text_placement import label_text_box
+
+    return label_text_box(lb)
 
 
 def _port_box(p: PowerPort) -> tuple[int, int, int, int]:

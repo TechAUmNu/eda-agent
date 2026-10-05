@@ -48,7 +48,7 @@ from eda_agent.design.quality import (
     _W_PORTS,
     _segment_crosses_bbox_interior,
 )
-from eda_agent.design.text_placement import CHAR_W, LINE_H
+from eda_agent.design.text_placement import CHAR_W, LINE_H, label_text_box
 
 logger = logging.getLogger(__name__)
 
@@ -278,11 +278,7 @@ class _GlyphSheet:
         for lab in canvas.labels:
             if lab.sheet != sheet:
                 continue
-            w = CHAR_W * len(lab.text)
-            self.labels.append(
-                (lab.x - w, lab.y, lab.x, lab.y + LINE_H)
-                if getattr(lab, "justification", 0) == 2
-                else (lab.x, lab.y, lab.x + w, lab.y + LINE_H))
+            self.labels.append(label_text_box(lab))
             self.label_pts.append((lab.text, lab.x, lab.y))
 
     # -------------------------------------------------------------- state

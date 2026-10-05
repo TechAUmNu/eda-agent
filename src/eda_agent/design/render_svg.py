@@ -313,6 +313,21 @@ def _svg_label(
     label: NetLabel, sheet: Sheet, options: RenderOptions
 ) -> str:
     tx, ty = _mils_to_svg(label.x, label.y, sheet, options)
+    o = label.orientation % 4
+    if o in (1, 3):
+        # Vertical label: rotated text, as Altium draws it -- orientation 1
+        # reads upward with the text left of the wire, 3 reads downward with
+        # it right of the wire; justification 2 ends the text at the anchor.
+        # The same extent text_placement.label_text_box reports, so the
+        # preview shows what every collision check assumed.
+        rot = -90 if o == 1 else 90
+        anchor = "end" if getattr(label, "justification", 0) == 2 else "start"
+        return (
+            f'<text x="{tx:.1f}" y="{ty + 4:.1f}" '
+            f'transform="rotate({rot} {tx:.1f} {ty:.1f})" '
+            f'font-size="10" fill="{options.label_color}" '
+            f'text-anchor="{anchor}">{html_escape(label.text)}</text>'
+        )
     # Anchor by orientation so the label reads outward from the pin.
     # 0=right -> label extends right -> text-anchor start
     # 2=left -> label extends left -> text-anchor end
