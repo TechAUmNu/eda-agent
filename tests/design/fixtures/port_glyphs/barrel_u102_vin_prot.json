@@ -1,0 +1,1188 @@
+{
+ "source": "multiviewer carrier PWR_IN_BARREL preview canvas (layout engine at 0266d07, tuned hints), cut to the window around the defect",
+ "sheet": {
+  "name": "PWR_IN_BARREL",
+  "size": "A3"
+ },
+ "window": [
+  6400,
+  3000,
+  11600,
+  8000
+ ],
+ "symbols": {
+  "carrier.SchLib|LM74800QDRRRQ1": {
+   "lib_path": "carrier.SchLib",
+   "lib_ref": "LM74800QDRRRQ1",
+   "pins": [
+    {
+     "designator": "10",
+     "name": "VS",
+     "x": 200,
+     "y": 0,
+     "orientation": 2,
+     "length": 200,
+     "electrical_type": "power",
+     "hidden": false
+    },
+    {
+     "designator": "2",
+     "name": "A",
+     "x": 200,
+     "y": -100,
+     "orientation": 2,
+     "length": 200,
+     "electrical_type": "input",
+     "hidden": false
+    },
+    {
+     "designator": "12",
+     "name": "C",
+     "x": 200,
+     "y": -200,
+     "orientation": 2,
+     "length": 200,
+     "electrical_type": "input",
+     "hidden": false
+    },
+    {
+     "designator": "3",
+     "name": "VSNS",
+     "x": 200,
+     "y": -300,
+     "orientation": 2,
+     "length": 200,
+     "electrical_type": "input",
+     "hidden": false
+    },
+    {
+     "designator": "4",
+     "name": "SW",
+     "x": 200,
+     "y": -400,
+     "orientation": 2,
+     "length": 200,
+     "electrical_type": "input",
+     "hidden": false
+    },
+    {
+     "designator": "5",
+     "name": "OV",
+     "x": 200,
+     "y": -500,
+     "orientation": 2,
+     "length": 200,
+     "electrical_type": "input",
+     "hidden": false
+    },
+    {
+     "designator": "6",
+     "name": "EN/UVLO",
+     "x": 200,
+     "y": -600,
+     "orientation": 2,
+     "length": 200,
+     "electrical_type": "input",
+     "hidden": false
+    },
+    {
+     "designator": "9",
+     "name": "OUT",
+     "x": 200,
+     "y": -700,
+     "orientation": 2,
+     "length": 200,
+     "electrical_type": "input",
+     "hidden": false
+    },
+    {
+     "designator": "7",
+     "name": "GND",
+     "x": 200,
+     "y": -800,
+     "orientation": 2,
+     "length": 200,
+     "electrical_type": "power",
+     "hidden": false
+    },
+    {
+     "designator": "13",
+     "name": "RTN",
+     "x": 200,
+     "y": -900,
+     "orientation": 2,
+     "length": 200,
+     "electrical_type": "passive",
+     "hidden": false
+    },
+    {
+     "designator": "1",
+     "name": "DGATE",
+     "x": 1300,
+     "y": 0,
+     "orientation": 0,
+     "length": 200,
+     "electrical_type": "output",
+     "hidden": false
+    },
+    {
+     "designator": "8",
+     "name": "HGATE",
+     "x": 1300,
+     "y": -100,
+     "orientation": 0,
+     "length": 200,
+     "electrical_type": "output",
+     "hidden": false
+    },
+    {
+     "designator": "11",
+     "name": "CAP",
+     "x": 1300,
+     "y": -200,
+     "orientation": 0,
+     "length": 200,
+     "electrical_type": "output",
+     "hidden": false
+    }
+   ],
+   "body_bbox": {
+    "x_min": 150,
+    "y_min": -950,
+    "x_max": 1350,
+    "y_max": 50
+   },
+   "designator_prefix": "U",
+   "description": "TI LM74800-Q1 ideal-diode / load-switch controller for back-to-back N-FETs, WSON-12 DRR with floating RTN pad (13)"
+  },
+  "carrier.SchLib|C_0805": {
+   "lib_path": "carrier.SchLib",
+   "lib_ref": "C_0805",
+   "pins": [
+    {
+     "designator": "1",
+     "name": "1",
+     "x": 100,
+     "y": 0,
+     "orientation": 2,
+     "length": 100,
+     "electrical_type": "passive",
+     "hidden": false
+    },
+    {
+     "designator": "2",
+     "name": "2",
+     "x": 300,
+     "y": 0,
+     "orientation": 0,
+     "length": 100,
+     "electrical_type": "passive",
+     "hidden": false
+    }
+   ],
+   "body_bbox": {
+    "x_min": 50,
+    "y_min": -50,
+    "x_max": 350,
+    "y_max": 50
+   },
+   "designator_prefix": "U",
+   "description": "Capacitor, 0805 (2012 metric); value/voltage/dielectric set per instance"
+  },
+  "carrier.SchLib|R_0402": {
+   "lib_path": "carrier.SchLib",
+   "lib_ref": "R_0402",
+   "pins": [
+    {
+     "designator": "1",
+     "name": "1",
+     "x": 100,
+     "y": 0,
+     "orientation": 2,
+     "length": 100,
+     "electrical_type": "passive",
+     "hidden": false
+    },
+    {
+     "designator": "2",
+     "name": "2",
+     "x": 300,
+     "y": 0,
+     "orientation": 0,
+     "length": 100,
+     "electrical_type": "passive",
+     "hidden": false
+    }
+   ],
+   "body_bbox": {
+    "x_min": 50,
+    "y_min": -50,
+    "x_max": 350,
+    "y_max": 50
+   },
+   "designator_prefix": "U",
+   "description": "Resistor, 0402 (1005 metric); value set per instance"
+  }
+ },
+ "instances": [
+  {
+   "refdes": "U102",
+   "lib": "carrier.SchLib|LM74800QDRRRQ1",
+   "x": 9400,
+   "y": 6000,
+   "rotation": 0
+  },
+  {
+   "refdes": "C139",
+   "lib": "carrier.SchLib|C_0805",
+   "x": 8800,
+   "y": 7800,
+   "rotation": 270
+  },
+  {
+   "refdes": "R165",
+   "lib": "carrier.SchLib|R_0402",
+   "x": 6900,
+   "y": 5600,
+   "rotation": 180
+  },
+  {
+   "refdes": "R166",
+   "lib": "carrier.SchLib|R_0402",
+   "x": 6400,
+   "y": 5000,
+   "rotation": 270
+  },
+  {
+   "refdes": "R185",
+   "lib": "carrier.SchLib|R_0402",
+   "x": 7900,
+   "y": 3600,
+   "rotation": 270
+  }
+ ],
+ "wires": [
+  {
+   "x1": 8900,
+   "y1": 5900,
+   "x2": 9000,
+   "y2": 5900,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_VIN_FUSED"
+  },
+  {
+   "x1": 9000,
+   "y1": 5900,
+   "x2": 9400,
+   "y2": 5900,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_VIN_FUSED"
+  },
+  {
+   "x1": 8900,
+   "y1": 5700,
+   "x2": 9400,
+   "y2": 5700,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_VIN_FUSED"
+  },
+  {
+   "x1": 7900,
+   "y1": 3600,
+   "x2": 7900,
+   "y2": 3900,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_VIN_FUSED"
+  },
+  {
+   "x1": 7900,
+   "y1": 3900,
+   "x2": 7900,
+   "y2": 4300,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_VIN_FUSED"
+  },
+  {
+   "x1": 8800,
+   "y1": 5300,
+   "x2": 9400,
+   "y2": 5300,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_VIN_PROT"
+  },
+  {
+   "x1": 10900,
+   "y1": 6000,
+   "x2": 11200,
+   "y2": 6000,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_DGATE"
+  },
+  {
+   "x1": 6900,
+   "y1": 5600,
+   "x2": 7200,
+   "y2": 5600,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_SW"
+  },
+  {
+   "x1": 7200,
+   "y1": 5600,
+   "x2": 8700,
+   "y2": 5600,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_SW"
+  },
+  {
+   "x1": 8700,
+   "y1": 5600,
+   "x2": 9400,
+   "y2": 5600,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_SW"
+  },
+  {
+   "x1": 5400,
+   "y1": 5500,
+   "x2": 8600,
+   "y2": 5500,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_OV"
+  },
+  {
+   "x1": 8600,
+   "y1": 5500,
+   "x2": 9400,
+   "y2": 5500,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_OV"
+  },
+  {
+   "x1": 6200,
+   "y1": 5600,
+   "x2": 6500,
+   "y2": 5600,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_OV"
+  },
+  {
+   "x1": 6400,
+   "y1": 5000,
+   "x2": 6400,
+   "y2": 5300,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_OV"
+  },
+  {
+   "x1": 6400,
+   "y1": 5300,
+   "x2": 6400,
+   "y2": 5500,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_OV"
+  },
+  {
+   "x1": 8500,
+   "y1": 5400,
+   "x2": 9400,
+   "y2": 5400,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_EN"
+  },
+  {
+   "x1": 7900,
+   "y1": 3000,
+   "x2": 7900,
+   "y2": 3200,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_EN"
+  },
+  {
+   "x1": 10900,
+   "y1": 5900,
+   "x2": 11300,
+   "y2": 5900,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_HGATE"
+  },
+  {
+   "x1": 8300,
+   "y1": 6000,
+   "x2": 8400,
+   "y2": 6000,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_VS"
+  },
+  {
+   "x1": 8400,
+   "y1": 6000,
+   "x2": 9400,
+   "y2": 6000,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_VS"
+  },
+  {
+   "x1": 8300,
+   "y1": 5800,
+   "x2": 9400,
+   "y2": 5800,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_VS"
+  },
+  {
+   "x1": 8800,
+   "y1": 7800,
+   "x2": 8800,
+   "y2": 8100,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_VS"
+  },
+  {
+   "x1": 10900,
+   "y1": 5800,
+   "x2": 11400,
+   "y2": 5800,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_CAP"
+  },
+  {
+   "x1": 11400,
+   "y1": 5800,
+   "x2": 13500,
+   "y2": 5800,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_CAP"
+  },
+  {
+   "x1": 8900,
+   "y1": 5700,
+   "x2": 8900,
+   "y2": 6300,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_VIN_FUSED"
+  },
+  {
+   "x1": 8800,
+   "y1": 5300,
+   "x2": 8800,
+   "y2": 5900,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_VIN_PROT"
+  },
+  {
+   "x1": 7900,
+   "y1": 3200,
+   "x2": 8500,
+   "y2": 3200,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_EN"
+  },
+  {
+   "x1": 8500,
+   "y1": 3200,
+   "x2": 8500,
+   "y2": 5400,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_EN"
+  },
+  {
+   "x1": 8300,
+   "y1": 5800,
+   "x2": 8300,
+   "y2": 6400,
+   "sheet": "PWR_IN_BARREL",
+   "net": "PWR_BARREL_VS"
+  },
+  {
+   "x1": 9400,
+   "y1": 5200,
+   "x2": 9200,
+   "y2": 5200,
+   "sheet": "PWR_IN_BARREL",
+   "net": "GND"
+  },
+  {
+   "x1": 8800,
+   "y1": 7400,
+   "x2": 8800,
+   "y2": 7200,
+   "sheet": "PWR_IN_BARREL",
+   "net": "GND"
+  },
+  {
+   "x1": 6400,
+   "y1": 4600,
+   "x2": 6400,
+   "y2": 4400,
+   "sheet": "PWR_IN_BARREL",
+   "net": "GND"
+  }
+ ],
+ "labels": [
+  {
+   "text": "PWR_BARREL_DGATE",
+   "x": 11200,
+   "y": 6000,
+   "orientation": 0,
+   "sheet": "PWR_IN_BARREL"
+  },
+  {
+   "text": "PWR_BARREL_HGATE",
+   "x": 11300,
+   "y": 5900,
+   "orientation": 0,
+   "sheet": "PWR_IN_BARREL"
+  }
+ ],
+ "power_ports": [
+  {
+   "text": "PWR_VIN_FUSED",
+   "x": 8900,
+   "y": 6300,
+   "style": "bar",
+   "sheet": "PWR_IN_BARREL"
+  },
+  {
+   "text": "PWR_VIN_FUSED",
+   "x": 7900,
+   "y": 4300,
+   "style": "bar",
+   "sheet": "PWR_IN_BARREL"
+  },
+  {
+   "text": "PWR_VIN_PROT",
+   "x": 8800,
+   "y": 5900,
+   "style": "bar",
+   "sheet": "PWR_IN_BARREL"
+  },
+  {
+   "text": "PWR_BARREL_VS",
+   "x": 8300,
+   "y": 6400,
+   "style": "bar",
+   "sheet": "PWR_IN_BARREL"
+  },
+  {
+   "text": "GND",
+   "x": 9200,
+   "y": 5200,
+   "style": "gnd_power",
+   "sheet": "PWR_IN_BARREL"
+  },
+  {
+   "text": "GND",
+   "x": 8800,
+   "y": 7200,
+   "style": "gnd_power",
+   "sheet": "PWR_IN_BARREL"
+  },
+  {
+   "text": "GND",
+   "x": 6400,
+   "y": 4400,
+   "style": "gnd_power",
+   "sheet": "PWR_IN_BARREL"
+  }
+ ],
+ "junctions": [
+  {
+   "x": 6400,
+   "y": 5500,
+   "sheet": "PWR_IN_BARREL"
+  },
+  {
+   "x": 8300,
+   "y": 6000,
+   "sheet": "PWR_IN_BARREL"
+  },
+  {
+   "x": 8900,
+   "y": 5900,
+   "sheet": "PWR_IN_BARREL"
+  }
+ ],
+ "plan": {
+  "spec": "Carrier block power from hardware/schematic_plan/power.json (round-2 verified plan).",
+  "summary": "ROUND 3c (2026-10-04): FAN2 - the SoM heatsink fan (owner: Puzhi 12 V 0.15 A 2-wire fan on an XH 2.54 plug, red = pin 2 = +12 V, as KFB J24) gets its own always-on regulated channel: U109 LMR54406FDBVR buck from PWR_V12 (11.99 V; 11.62-12.36 V regulated at >= about 12.8 V in, dropout below), enabled by PWR_EFUSE_PG through R146 1 MOhm with R147 4.7 MOhm hold-up, L107 33 uH, J105 JST B2B-XH-A (pin 2 = FAN2_12V). No FPGA, MCU, V3V3 or pin state can stop or slow it in the default build. Monitoring: R148 1.5 Ohm 2 W return shunt (D116 S1M bypass) and U116 TLV1821 synthetic-tach slicer -> FAN2_SENSE (J2.C60 / A9); optional DNP trim (C1109/D114/C1110 pump, D115 blocking diode, R1101-R1104) driven only by a TOGGLING FAN2_TRIM (J2.C57 / F9, 25 kHz-1 MHz). RTL R10 (ROTATING / UNDERSPEED / OVERSPEED / PULSING / NO_COMMUTATION / NO_CURRENT against a per-board learned full-speed reference) and R11 (",
+  "sheets": [
+   {
+    "name": "PWR_IN_BARREL",
+    "title": "POWER - barrel input, ideal diode / OV switch, chassis bond",
+    "size": "A3"
+   },
+   {
+    "name": "STUBS",
+    "title": "TEMPORARY cross-sheet stubs (delete after execute)",
+    "size": "A3"
+   }
+  ],
+  "parts": [
+   {
+    "refdes": "J101",
+    "lib_ref": "PJ-063AH",
+    "lib_path": "carrier.SchLib",
+    "value": "PJ-063AH",
+    "mpn": "PJ-063AH",
+    "manufacturer": "CUI Devices (Same Sky)",
+    "sheet": "PWR_IN_BARREL",
+    "footprint": "DC_JACK_PJ-063AH_THT",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/2d5a84d46878463b63938ddb4e9c2c31.pdf?productCode=C22434582"
+   },
+   {
+    "refdes": "J103",
+    "lib_ref": "691137710002",
+    "lib_path": "carrier.SchLib",
+    "value": "691137710002 DNP",
+    "mpn": "691137710002",
+    "manufacturer": "Wurth Elektronik",
+    "sheet": "PWR_IN_BARREL",
+    "footprint": "TB_WR-TBL-1377_1x02_P5.00_THT",
+    "datasheet_url": "https://www.we-online.com/components/products/datasheet/691137710002.pdf"
+   },
+   {
+    "refdes": "F101",
+    "lib_ref": "F_2410",
+    "lib_path": "carrier.SchLib",
+    "value": "8A",
+    "mpn": "0453008.MR",
+    "manufacturer": "Littelfuse",
+    "sheet": "PWR_IN_BARREL",
+    "footprint": "F_NANO2_2410_6.1x2.7",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/ecd74ee295e2e3d7ddb74e9193c5d222.pdf?productCode=C151126"
+   },
+   {
+    "refdes": "D101",
+    "lib_ref": "D_TVS_Bi_SMB",
+    "lib_path": "carrier.SchLib",
+    "value": "SMBJ26CA-E3/52 (second source: Littelfuse SMBJ26CA, identica",
+    "mpn": "SMBJ26CA-E3/52 (second source: Littelfuse SMBJ26CA, identical table row)",
+    "manufacturer": "Vishay General Semiconductor (alt. Littelfuse)",
+    "sheet": "PWR_IN_BARREL",
+    "footprint": "D_SMB_DO-214AA",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/2fe3cae8abb4f1763293021ba2974830.pdf?productCode=C515606"
+   },
+   {
+    "refdes": "C101",
+    "lib_ref": "C_0603",
+    "lib_path": "carrier.SchLib",
+    "value": "0.22u 100V X7R 10%",
+    "mpn": "Samsung CL21B224KCFSFNE (0.22uF 100V X7R 0805)",
+    "manufacturer": "Samsung Electro-Mechanics",
+    "sheet": "PWR_IN_BARREL",
+    "footprint": "C_0603_1608Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/02336ea48ea44ca18c72517dd3cb7b47.pdf?productCode=C307542"
+   },
+   {
+    "refdes": "U102",
+    "lib_ref": "LM74800QDRRRQ1",
+    "lib_path": "carrier.SchLib",
+    "value": "LM74800QDRRRQ1",
+    "mpn": "LM74800QDRRRQ1",
+    "manufacturer": "Texas Instruments",
+    "sheet": "PWR_IN_BARREL",
+    "footprint": "WSON-12_3x3_P0.5_EP1.3x2.5_DRR",
+    "datasheet_url": "https://www.ti.com/lit/ds/symlink/lm7480-q1.pdf"
+   },
+   {
+    "refdes": "C139",
+    "lib_ref": "C_0805",
+    "lib_path": "carrier.SchLib",
+    "value": "0.22u 100V X7R 10%",
+    "mpn": "CL21B224KCFSFNE",
+    "manufacturer": "Samsung Electro-Mechanics",
+    "sheet": "PWR_IN_BARREL",
+    "footprint": "C_0805_2012Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/02336ea48ea44ca18c72517dd3cb7b47.pdf?productCode=C307542"
+   },
+   {
+    "refdes": "C140",
+    "lib_ref": "C_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "10n 50V X7R",
+    "mpn": "CL05B103KB5NNNC",
+    "manufacturer": "Samsung Electro-Mechanics",
+    "sheet": "PWR_IN_BARREL",
+    "footprint": "C_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/02336ea48ea44ca18c72517dd3cb7b47.pdf?productCode=C15195"
+   },
+   {
+    "refdes": "C199",
+    "lib_ref": "C_0603",
+    "lib_path": "carrier.SchLib",
+    "value": "10n 50V C0G 5%",
+    "mpn": "GRM1885C1H103JA01D",
+    "manufacturer": "Murata Electronics",
+    "sheet": "PWR_IN_BARREL",
+    "footprint": "C_0603_1608Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/a4d1e2744bd5d44ba57842651a3fd598.pdf?productCode=C85973"
+   },
+   {
+    "refdes": "R165",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "169k 0.1 % / 10.0k 0.1 %",
+    "mpn": "YAGEO RT0402BRD07169KL (R165) / RT0402BRD0710KL (R166)",
+    "manufacturer": "YAGEO",
+    "sheet": "PWR_IN_BARREL",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/46d7760c582640714d605308a25a220a.pdf?productCode=C852555"
+   },
+   {
+    "refdes": "R166",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "169k 0.1 % / 10.0k 0.1 %",
+    "mpn": "YAGEO RT0402BRD07169KL (R165) / RT0402BRD0710KL (R166)",
+    "manufacturer": "YAGEO",
+    "sheet": "PWR_IN_BARREL",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/46d7760c582640714d605308a25a220a.pdf?productCode=C852555"
+   },
+   {
+    "refdes": "R167",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "1.00k 1%",
+    "mpn": "UNI-ROYAL 0402WGF1001TCE",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_BARREL",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C11702"
+   },
+   {
+    "refdes": "R185",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "100k 1% / 15.8k 1%",
+    "mpn": "UNI-ROYAL 0402WGF1003TCE (R185) / 0402WGF1582TCE (R186)",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_BARREL",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C26956"
+   },
+   {
+    "refdes": "R186",
+    "lib_ref": "R_0402",
+    "lib_path": "carrier.SchLib",
+    "value": "100k 1% / 15.8k 1%",
+    "mpn": "UNI-ROYAL 0402WGF1003TCE (R185) / 0402WGF1582TCE (R186)",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_BARREL",
+    "footprint": "R_0402_1005Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C26956"
+   },
+   {
+    "refdes": "D110",
+    "lib_ref": "D_Zener_SOT-23",
+    "lib_path": "carrier.SchLib",
+    "value": "BZX84-C13,235",
+    "mpn": "BZX84-C13,235",
+    "manufacturer": "Nexperia",
+    "sheet": "PWR_IN_BARREL",
+    "footprint": "SOT-23-3_P0.95",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/6cd8164ad20709883ab8293a7d9bf7de.pdf?productCode=C550936"
+   },
+   {
+    "refdes": "C102",
+    "lib_ref": "C_0603",
+    "lib_path": "carrier.SchLib",
+    "value": "1u 50V X5R",
+    "mpn": "Samsung CL10A105KB8NNNC",
+    "manufacturer": "Samsung Electro-Mechanics",
+    "sheet": "PWR_IN_BARREL",
+    "footprint": "C_0603_1608Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/02336ea48ea44ca18c72517dd3cb7b47.pdf?productCode=C15849"
+   },
+   {
+    "refdes": "R161",
+    "lib_ref": "R_1206",
+    "lib_path": "carrier.SchLib",
+    "value": "1M 1% 1206",
+    "mpn": "YAGEO RC1206FR-071ML",
+    "manufacturer": "YAGEO",
+    "sheet": "PWR_IN_BARREL",
+    "footprint": "R_1206_3216Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/b426be3ce22c6de3e0c3a2248e49159e.pdf?productCode=C108083"
+   },
+   {
+    "refdes": "C185",
+    "lib_ref": "C_1808",
+    "lib_path": "carrier.SchLib",
+    "value": "4.7n 2 kV X7R 10%",
+    "mpn": "C1808C472KGRACTU",
+    "manufacturer": "KEMET",
+    "sheet": "PWR_IN_BARREL",
+    "footprint": "C_1808_4520Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/bfd40f21103f407c0d14269d9d2076ec.pdf?productCode=C22560830"
+   },
+   {
+    "refdes": "R162",
+    "lib_ref": "R_1206",
+    "lib_path": "carrier.SchLib",
+    "value": "DNP (0R 1206) DNP",
+    "mpn": "UNI-ROYAL 1206W4F0000T5E",
+    "manufacturer": "UNI-ROYAL (Uniroyal Elec)",
+    "sheet": "PWR_IN_BARREL",
+    "footprint": "R_1206_3216Metric",
+    "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C17888"
+   },
+   {
+    "refdes": "TP9501",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9502",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9503",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9019",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9020",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   },
+   {
+    "refdes": "TP9021",
+    "lib_ref": "TP",
+    "lib_path": "carrier.SchLib",
+    "value": "STUB",
+    "footprint": "TP_SMD_D1.0",
+    "mpn": "STUB",
+    "manufacturer": "none",
+    "sheet": "STUBS"
+   }
+  ],
+  "nets": [
+   {
+    "name": "V12_IN",
+    "pins": [
+     {
+      "refdes": "J101",
+      "pin": "1"
+     },
+     {
+      "refdes": "J103",
+      "pin": "1"
+     },
+     {
+      "refdes": "F101",
+      "pin": "1"
+     }
+    ],
+    "is_power": true
+   },
+   {
+    "name": "GND",
+    "pins": [
+     {
+      "refdes": "J101",
+      "pin": "2"
+     },
+     {
+      "refdes": "J101",
+      "pin": "0"
+     },
+     {
+      "refdes": "J103",
+      "pin": "2"
+     },
+     {
+      "refdes": "D101",
+      "pin": "2"
+     },
+     {
+      "refdes": "R161",
+      "pin": "2"
+     },
+     {
+      "refdes": "C185",
+      "pin": "2"
+     },
+     {
+      "refdes": "R162",
+      "pin": "2"
+     },
+     {
+      "refdes": "C101",
+      "pin": "2"
+     },
+     {
+      "refdes": "U102",
+      "pin": "7"
+     },
+     {
+      "refdes": "C139",
+      "pin": "2"
+     },
+     {
+      "refdes": "R166",
+      "pin": "2"
+     },
+     {
+      "refdes": "C140",
+      "pin": "2"
+     },
+     {
+      "refdes": "C199",
+      "pin": "2"
+     },
+     {
+      "refdes": "R186",
+      "pin": "2"
+     },
+     {
+      "refdes": "TP9501",
+      "pin": "1"
+     }
+    ],
+    "is_ground": true
+   },
+   {
+    "name": "PWR_VIN_FUSED",
+    "pins": [
+     {
+      "refdes": "F101",
+      "pin": "2"
+     },
+     {
+      "refdes": "D101",
+      "pin": "1"
+     },
+     {
+      "refdes": "C101",
+      "pin": "1"
+     },
+     {
+      "refdes": "U102",
+      "pin": "2"
+     },
+     {
+      "refdes": "U102",
+      "pin": "3"
+     },
+     {
+      "refdes": "R185",
+      "pin": "1"
+     },
+     {
+      "refdes": "TP9502",
+      "pin": "1"
+     }
+    ],
+    "is_power": true
+   },
+   {
+    "name": "PWR_VIN_PROT",
+    "pins": [
+     {
+      "refdes": "U102",
+      "pin": "9"
+     },
+     {
+      "refdes": "D110",
+      "pin": "1"
+     },
+     {
+      "refdes": "TP9503",
+      "pin": "1"
+     }
+    ],
+    "is_power": true
+   },
+   {
+    "name": "CHASSIS",
+    "pins": [
+     {
+      "refdes": "R161",
+      "pin": "1"
+     },
+     {
+      "refdes": "C185",
+      "pin": "1"
+     },
+     {
+      "refdes": "R162",
+      "pin": "1"
+     },
+     {
+      "refdes": "TP9019",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "PWR_BARREL_DGATE",
+    "pins": [
+     {
+      "refdes": "U102",
+      "pin": "1"
+     },
+     {
+      "refdes": "TP9020",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "PWR_BARREL_SW",
+    "pins": [
+     {
+      "refdes": "U102",
+      "pin": "4"
+     },
+     {
+      "refdes": "R165",
+      "pin": "1"
+     }
+    ]
+   },
+   {
+    "name": "PWR_BARREL_OV",
+    "pins": [
+     {
+      "refdes": "U102",
+      "pin": "5"
+     },
+     {
+      "refdes": "R165",
+      "pin": "2"
+     },
+     {
+      "refdes": "R166",
+      "pin": "1"
+     },
+     {
+      "refdes": "C140",
+      "pin": "1"
+     }
+    ]
+   },
+   {
+    "name": "PWR_BARREL_EN",
+    "pins": [
+     {
+      "refdes": "U102",
+      "pin": "6"
+     },
+     {
+      "refdes": "R185",
+      "pin": "2"
+     },
+     {
+      "refdes": "R186",
+      "pin": "1"
+     }
+    ]
+   },
+   {
+    "name": "PWR_BARREL_HGATE",
+    "pins": [
+     {
+      "refdes": "U102",
+      "pin": "8"
+     },
+     {
+      "refdes": "R167",
+      "pin": "1"
+     },
+     {
+      "refdes": "D110",
+      "pin": "3"
+     },
+     {
+      "refdes": "TP9021",
+      "pin": "1"
+     }
+    ],
+    "force_label": true
+   },
+   {
+    "name": "PWR_BARREL_VS",
+    "pins": [
+     {
+      "refdes": "U102",
+      "pin": "10"
+     },
+     {
+      "refdes": "U102",
+      "pin": "12"
+     },
+     {
+      "refdes": "C102",
+      "pin": "2"
+     },
+     {
+      "refdes": "C139",
+      "pin": "1"
+     }
+    ],
+    "is_power": true
+   },
+   {
+    "name": "PWR_BARREL_CAP",
+    "pins": [
+     {
+      "refdes": "U102",
+      "pin": "11"
+     },
+     {
+      "refdes": "C102",
+      "pin": "1"
+     }
+    ]
+   },
+   {
+    "name": "PWR_BARREL_DVDT",
+    "pins": [
+     {
+      "refdes": "R167",
+      "pin": "2"
+     },
+     {
+      "refdes": "C199",
+      "pin": "1"
+     }
+    ]
+   }
+  ]
+ }
+}

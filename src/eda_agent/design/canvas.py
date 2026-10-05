@@ -62,6 +62,53 @@ def _rotate_point(x: int, y: int, rotation: int) -> tuple[int, int]:
     return (x * cos_r - y * sin_r, x * sin_r + y * cos_r)
 
 
+def altium_orientation(rotation: int, flipped: bool) -> int:
+    """Degrees to write as Altium Orientation for a canvas (rotation, flipped).
+
+    The canvas mirrors in the SYMBOL frame and then rotates:
+    world = Rot(r) . Mx (canvas.SymbolInstance._pin_to_world).
+    ``generic.mirror_component`` (Gen_MirrorSchComponent) reflects the
+    placed primitives about the component's Location.X in the WORLD frame
+    and leaves Orientation alone: world = Mx . Rot(p) = Rot(-p) . Mx.
+    So a mirrored instance is placed at p = -r. Identity at 0 and 180;
+    90 and 270 swap. Its own inverse, so the read-back direction
+    (hints_from_sheet) uses the same function.
+    """
+    r = rotation % 360
+    return (360 - r) % 360 if flipped else r
+
+
+def mirror_readback_unmeasured(live: dict, snapshot_inst: Optional[dict]) -> bool:
+    """True when a live part's canvas rotation rests on the UNMEASURED half
+    of :func:`altium_orientation`.
+
+    ``altium_orientation`` assumes Altium mirrors in the WORLD frame. That
+    was measured at Orientation 0 only, where both frames agree; at 90/270
+    they disagree by 180 degrees. A part the engine itself mirrored reads
+    back self-consistently (it wrote Orientation -r and reads -r back), so
+    only a part mirrored or turned BY HAND at 90/270 is in doubt. ``live``
+    is a ``learner._query_post_edit_positions`` row; ``snapshot_inst`` the
+    canvas snapshot's instance dict (or None).
+    """
+    if not live.get("mirror"):
+        return False
+    stored = int(live.get("altium_orientation", 0)) % 360
+    if stored % 180 == 0:
+        return False
+    if snapshot_inst and snapshot_inst.get("flipped"):
+        wrote = altium_orientation(int(snapshot_inst.get("rotation", 0)), True)
+        if wrote == stored:
+            return False
+    return True
+
+
+MIRROR_90_NOTE = (
+    "is mirrored at Orientation 90/270 by hand; the engine reads such a "
+    "part assuming Altium mirrors in the world frame, which has only been "
+    "measured at Orientation 0, so its rotation may be read 180 degrees off "
+    "-- check it on the sheet before relying on it")
+
+
 @dataclass
 class PinEndpoint:
     """One pin's world-frame endpoint + outward direction.
@@ -100,6 +147,13 @@ class SymbolInstance:
     # their default offsets.
     designator_pos: Optional[tuple[int, int]] = None
     value_pos: Optional[tuple[int, int]] = None
+    # draw_style="stub_labels" parts only (see stub_labels.py): the world
+    # rectangle the part occupies ON THE SHEET -- body, 1100-mil stubs,
+    # labels, rail glyphs and No-ERC marks -- and the macro geometry the
+    # wiring stage drew for it. None on every other part, so nothing that
+    # reads them changes for a sheet without a stub-label part.
+    keepout: Optional[tuple[int, int, int, int]] = None
+    stub_macro: Optional[Any] = None
 
     def pin_world(self, pin_id: str) -> Optional[PinEndpoint]:
         """World-frame endpoint for the named pin (by designator or name).
@@ -171,6 +225,16 @@ class SymbolInstance:
             x_min=min(xs), y_min=min(ys), x_max=max(xs), y_max=max(ys)
         )
 
+    def keepout_bbox(self) -> SymbolBBox:
+        """What the part occupies on the sheet: ``world_bbox`` for every
+        ordinary part, the whole stub/label footprint for a stub-label part.
+        Placement, routing obstacles and the overlap count read this; the
+        body rectangle the renderer draws stays ``world_bbox``."""
+        if self.keepout is None:
+            return self.world_bbox()
+        x0, y0, x1, y1 = self.keepout
+        return SymbolBBox(x_min=x0, y_min=y0, x_max=x1, y_max=y1)
+
 
 @dataclass(frozen=True)
 class WireSegment:
@@ -217,11 +281,27 @@ class PowerPort:
     y: int
     style: str  # "circle", "arrow", "bar", "wave", "gnd_power", "gnd_signal", "gnd_earth"
     sheet: str = "main"
+    #: Altium ISch_PowerObject.Orientation: 0 right, 1 up, 2 left, 3 down.
+    #: None = the style's natural direction (ground down, everything else
+    #: up), which is what every glyph meant before this field existed. Only
+    #: the post-selection glyph pass (port_glyphs) sets it, and only when the
+    #: chosen direction is NOT the natural one, so untouched glyphs keep
+    #: serialising and emitting exactly as before.
+    orientation: Optional[int] = None
 
 
 @dataclass(frozen=True)
 class Junction:
     """A solder-dot at a 3+ wire join."""
+
+    x: int
+    y: int
+    sheet: str = "main"
+
+
+@dataclass(frozen=True)
+class NoErc:
+    """A No-ERC marker on a pin end that no plan net uses."""
 
     x: int
     y: int
@@ -344,6 +424,7 @@ class SchematicCanvas:
     junctions: list[Junction] = field(default_factory=list)
     buses: list[BusSegment] = field(default_factory=list)
     bus_entries: list[BusEntry] = field(default_factory=list)
+    no_ercs: list[NoErc] = field(default_factory=list)
 
     def add_sheet(self, sheet: Sheet) -> None:
         if any(s.name == sheet.name for s in self.sheets):
@@ -372,6 +453,9 @@ class SchematicCanvas:
 
     def add_bus_entries(self, entries: Iterable[BusEntry]) -> None:
         self.bus_entries.extend(entries)
+
+    def add_no_ercs(self, marks: Iterable[NoErc]) -> None:
+        self.no_ercs.extend(marks)
 
     def instance_by_refdes(self, refdes: str) -> Optional[SymbolInstance]:
         for inst in self.instances:
@@ -412,6 +496,9 @@ class SchematicCanvas:
     def bus_entries_on(self, sheet: str) -> list[BusEntry]:
         return [e for e in self.bus_entries if e.sheet == sheet]
 
+    def no_ercs_on(self, sheet: str) -> list[NoErc]:
+        return [m for m in self.no_ercs if m.sheet == sheet]
+
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable snapshot.
 
@@ -420,7 +507,7 @@ class SchematicCanvas:
         regression fixture without dragging in 100 pin definitions per
         IC. The deserializer needs a SymbolCache to re-hydrate.
         """
-        return {
+        out = {
             "sheets": [
                 {
                     "name": s.name,
@@ -440,6 +527,9 @@ class SchematicCanvas:
                     "y": i.y,
                     "rotation": i.rotation,
                     "sheet": i.sheet,
+                    # Absent means not mirrored, which keeps every snapshot
+                    # written before mirror support byte-identical.
+                    **({"flipped": True} if i.flipped else {}),
                 }
                 for i in self.instances
             ],
@@ -455,7 +545,11 @@ class SchematicCanvas:
             ],
             "power_ports": [
                 {"text": p.text, "x": p.x, "y": p.y,
-                 "style": p.style, "sheet": p.sheet}
+                 "style": p.style, "sheet": p.sheet,
+                 # Only a re-aimed glyph carries the key, so snapshots of
+                 # every untouched sheet stay byte-identical.
+                 **({"orientation": p.orientation}
+                    if p.orientation is not None else {})}
                 for p in self.power_ports
             ],
             "junctions": [
@@ -473,6 +567,12 @@ class SchematicCanvas:
                 for e in self.bus_entries
             ],
         }
+        # Only when present, so a canvas without a stub-label part
+        # serialises byte-for-byte as before.
+        if self.no_ercs:
+            out["no_ercs"] = [{"x": m.x, "y": m.y, "sheet": m.sheet}
+                              for m in self.no_ercs]
+        return out
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent)

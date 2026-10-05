@@ -148,6 +148,24 @@ def learn_from_layout(
                 f"layout (deleted?); skipping"
             )
             continue
+        # A MIRROR CHANGE IS NOT A PLACEMENT EDIT the priors can model (a
+        # row records an offset and a rotation, nothing else), and folding
+        # it into the rotation records a bogus 180-degree rot_delta. Skipped
+        # and said so. So is a part mirrored by hand at 90/270, whose
+        # rotation rests on the unmeasured half of altium_orientation.
+        from eda_agent.design.canvas import (
+            MIRROR_90_NOTE, mirror_readback_unmeasured)
+        if bool(pre.get("flipped", False)) != bool(post.get("mirror", False)):
+            out["notes"].append(
+                f"{refdes}: mirrored or un-mirrored by hand; not recorded "
+                f"(a placement prior holds an offset and a rotation, not a "
+                f"mirror)")
+            out["rows_skipped_mirror"] = out.get("rows_skipped_mirror", 0) + 1
+            continue
+        if mirror_readback_unmeasured(post, pre):
+            out["notes"].append(f"{refdes} {MIRROR_90_NOTE}; not recorded")
+            out["rows_skipped_mirror"] = out.get("rows_skipped_mirror", 0) + 1
+            continue
         dx = post["x"] - pre["x"]
         dy = post["y"] - pre["y"]
         rot_delta = (post["rotation"] - pre["rotation"]) % 360
@@ -241,7 +259,7 @@ def _query_post_edit_positions(
             "generic.query_objects",
             {
                 "object_type": "eSchComponent",
-                "properties": "Designator.Text,Location.X,Location.Y,Orientation",
+                "properties": "Designator.Text,Location.X,Location.Y,Orientation,IsMirrored",
                 "scope": "project",
             },
         )
@@ -261,7 +279,18 @@ def _query_post_edit_positions(
             orient = int(row.get("Orientation", 0)) % 4
         except (TypeError, ValueError):
             continue
-        by_refdes[refdes] = {"x": x, "y": y, "rotation": orient * 90}
+        # Canvas frame for both callers (learn_from_layout diffs against
+        # snapshot rotations, hints_from_sheet feeds placement_hints): a
+        # mirrored 90/270 part is stored at the opposite Orientation.
+        from eda_agent.design.canvas import altium_orientation
+        mirror = str(row.get("IsMirrored", "")).strip().lower() in ("true", "1")
+        by_refdes[refdes] = {"x": x, "y": y,
+                             "rotation": altium_orientation(orient * 90, mirror),
+                             # The raw stored value, so a caller can tell an
+                             # engine-written mirror from a hand-made one.
+                             "altium_orientation": orient * 90}
+        if mirror:
+            by_refdes[refdes]["mirror"] = True
     return by_refdes
 
 

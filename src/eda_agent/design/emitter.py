@@ -30,7 +30,8 @@ from typing import Any, Optional
 
 from eda_agent.design._wiring import _sheet_path
 from eda_agent.bridge.payload import payload_safe
-from eda_agent.design.canvas import SchematicCanvas, SymbolInstance
+from eda_agent.design.canvas import (
+    SchematicCanvas, SymbolInstance, altium_orientation)
 
 logger = logging.getLogger("eda_agent.design.emitter")
 
@@ -303,7 +304,8 @@ def emit_canvas_delta(
         now[r] for r in sorted(both)
         if (int(was[r].get("x", 0)) != now[r].x
             or int(was[r].get("y", 0)) != now[r].y
-            or int(was[r].get("rotation", 0)) % 360 != now[r].rotation % 360)
+            or int(was[r].get("rotation", 0)) % 360 != now[r].rotation % 360
+            or bool(was[r].get("flipped", False)) != now[r].flipped)
     ]
 
     for refdes in removed:
@@ -327,16 +329,46 @@ def emit_canvas_delta(
         # first pass and applies everything else after it, which is the
         # unsafe order. Both ops here filter on the designator, which
         # does not change, so neither has to chase a moved coordinate.
+        # A MIRRORED PART IS UN-MIRRORED BEFORE ITS ORIENTATION IS WRITTEN.
+        # What SetState_Orientation does to an already-reflected component
+        # is unmeasured; on a plain one it is the proven path. So: mirror
+        # off, orient, move, mirror on -- each step one whose effect is known.
+        old_rot = int(was[inst.refdes].get("rotation", 0)) % 360
+        old_flip = bool(was[inst.refdes].get("flipped", False))
+        reorient = old_rot != inst.rotation % 360 or old_flip != inst.flipped
         try:
-            if int(was[inst.refdes].get("rotation", 0)) % 360 != inst.rotation % 360:
+            if reorient and old_flip:
+                resp = bridge.send_command("generic.mirror_component", {
+                    "designator": inst.refdes, "mirrored": "false"})
+                if not _mirror_confirmed(resp, False):
+                    # Turning a part that is still mirrored is the
+                    # unmeasured path the ordering above exists to avoid.
+                    result.ok = False
+                    result.failures.append(EmitFailure(
+                        refdes=inst.refdes, code="MIRROR_FAILED",
+                        reason=f"un-mirror did not confirm: {resp!r}"))
+                    continue
+            old_o = altium_orientation(old_rot, old_flip)
+            new_o = altium_orientation(inst.rotation, inst.flipped)
+            if old_o != new_o:
                 bridge.send_command("generic.modify_objects", {
                     "scope": "active_doc", "object_type": "eSchComponent",
                     "filter": f"Designator={inst.refdes}",
-                    "set": f"Orientation={(inst.rotation % 360) // 90}"})
+                    "set": f"Orientation={new_o // 90}"})
             bridge.send_command("generic.modify_objects", {
                 "scope": "active_doc", "object_type": "eSchComponent",
                 "filter": f"Designator={inst.refdes}",
                 "set": f"Location.X={inst.x}|Location.Y={inst.y}"})
+            if reorient and inst.flipped:
+                resp = bridge.send_command("generic.mirror_component", {
+                    "designator": inst.refdes, "mirrored": "true"})
+                # Same check as the full emit: the canvas wired the MIRRORED
+                # pin positions, so an unconfirmed mirror is a wrong netlist.
+                if not _mirror_confirmed(resp, True):
+                    result.ok = False
+                    result.failures.append(EmitFailure(
+                        refdes=inst.refdes, code="MIRROR_FAILED",
+                        reason=f"mirror_component did not confirm: {resp!r}"))
         except Exception as exc:                # noqa: BLE001
             result.ok = False
             result.failures.append(EmitFailure(
@@ -382,6 +414,22 @@ def emit_canvas_delta(
                 bridge, result, sheet_name)
     _emit_bus_entries([e for e in canvas.bus_entries if e.sheet == sheet_name],
                       bridge, result, sheet_name)
+    # No-ERCs are NOT in _COPPER_TYPES: clearing every eNoERC would delete
+    # markers a person placed by hand. Only the ones the previous emit put
+    # down (recorded in the snapshot) are removed, then the current set.
+    for m in (snapshot or {}).get("no_ercs", []):
+        if m.get("sheet", sheet_name) != sheet_name:
+            continue
+        try:
+            bridge.send_command("generic.delete_objects", {
+                "scope": "active_doc", "object_type": "eNoERC",
+                "filter": f"Location.X={m['x']}|Location.Y={m['y']}"})
+        except Exception as exc:                # noqa: BLE001
+            result.notes.append(f"clearing No-ERC at ({m['x']},{m['y']}) "
+                                f"raised: {exc}")
+    marks = canvas.no_ercs_on(sheet_name)
+    if marks:
+        _emit_no_ercs(marks, bridge, result, sheet_name)
 
     result.delta = {
         "added": [i.refdes for i in added],
@@ -482,6 +530,76 @@ def _emit_sheet(
     ports = canvas.power_ports_on(sheet_name)
     if ports:
         _emit_power_ports(ports, bridge, result, sheet_name)
+    # 7. No-ERC marks (stub-label parts' unused pins).
+    marks = canvas.no_ercs_on(sheet_name)
+    if marks:
+        _emit_no_ercs(marks, bridge, result, sheet_name)
+
+
+def _emit_no_ercs(
+    marks: list, bridge: Any, result: EmitResult, sheet_name: str
+) -> None:
+    """One No-ERC per unused pin end. The bridge has a single-object
+    command only; a stub-label part carries a handful, so a loop is fine.
+    Stops on the first failure so a broken bridge does not spam notes."""
+    for m in marks:
+        try:
+            bridge.send_command("generic.place_no_erc",
+                                {"x": str(m.x), "y": str(m.y)},
+                                timeout=_BULK_TIMEOUT_S)
+        except Exception as exc:                # noqa: BLE001
+            result.notes.append(f"place_no_erc for {sheet_name} failed: {exc}")
+            break
+
+
+def _mirror_confirmed(resp: Any, want: bool) -> bool:
+    """True when a ``generic.mirror_component`` reply reports ``want``.
+
+    The ONE test both emit paths use: the handler answers
+    ``{"mirrored": <state>}``; anything else (an error dict, None, a
+    missing key) is not a confirmation."""
+    return isinstance(resp, dict) and resp.get("mirrored") is want
+
+
+def _emit_mirrors(instances, bridge: Any, result: EmitResult) -> None:
+    """Mirror each flipped, successfully placed instance on the ACTIVE sheet.
+
+    A failure is an EmitFailure, not a note: the canvas routed every wire
+    to the MIRRORED pin positions, so an unmirrored part is a wrong netlist.
+    """
+    for inst in instances:
+        if not inst.flipped or inst.refdes not in result.placed_refdes:
+            continue
+        try:
+            resp = bridge.send_command(
+                "generic.mirror_component",
+                {"designator": inst.refdes, "mirrored": "true"})
+        except Exception as exc:                # noqa: BLE001
+            result.failures.append(EmitFailure(
+                refdes=inst.refdes, code="MIRROR_FAILED",
+                reason=f"mirror_component raised: {exc}"))
+            continue
+        if not _mirror_confirmed(resp, True):
+            result.failures.append(EmitFailure(
+                refdes=inst.refdes, code="MIRROR_FAILED",
+                reason=f"mirror_component did not confirm: {resp!r}"))
+            continue
+        skipped = int(resp.get("primitives_skipped", 0) or 0)
+        if skipped:
+            result.notes.append(
+                f"{inst.refdes}: mirrored, but {skipped} graphic primitive(s) "
+                f"(ObjectId {resp.get('skipped_kinds', '?')}) could not be "
+                f"reflected; pins are exact, the body art is not")
+        if inst.rotation % 180 == 90:
+            # The pins land exactly where the canvas wired them at every
+            # rotation. What is NOT yet measured is which (Orientation,
+            # IsMirrored) pair Altium stores for a mirrored 90/270 part,
+            # which Update From Libraries and a later hand toggle re-read.
+            result.notes.append(
+                f"{inst.refdes}: mirrored at {inst.rotation % 360} degrees; "
+                f"the pins are exact, but how Altium stores a mirror at "
+                f"90/270 is unmeasured, so re-check the pins after an Update "
+                f"From Libraries")
 
 
 def _emit_placements(
@@ -494,7 +612,7 @@ def _emit_placements(
             f"lib_reference={inst.symbol.lib_ref};"
             f"x={inst.x};y={inst.y};"
             f"designator={inst.refdes};"
-            f"rotation={inst.rotation};"
+            f"rotation={altium_orientation(inst.rotation, inst.flipped)};"
             f"footprint="
         )
     try:
@@ -537,6 +655,7 @@ def _emit_placements(
             ))
         else:
             result.placed_refdes.append(inst.refdes)
+    _emit_mirrors(instances, bridge, result)
 
 
 def _emit_parameter_stamps(
@@ -730,12 +849,24 @@ def _emit_labels(
         result.notes.append(f"place_net_labels for {sheet_name} failed: {exc}")
 
 
+def _power_port_altium_orientation(p: Any) -> int:
+    """Altium PowerObject.Orientation (0 right, 1 up, 2 left, 3 down).
+
+    A glyph the post-selection pass re-aimed carries its own orientation;
+    every other glyph keeps the natural rule, VCC up (1) and GND down (3),
+    so the payload of an untouched sheet is unchanged.
+    """
+    if getattr(p, "orientation", None) is not None:
+        return p.orientation % 4
+    return 3 if "gnd" in p.style.lower() else 1
+
+
 def _emit_power_ports(
     ports: list, bridge: Any, result: EmitResult, sheet_name: str
 ) -> None:
-    # Power-port orientation: VCC up (1), GND down (3), determined per-glyph.
     payload = "~~".join(
-        f"text={p.text};x={p.x};y={p.y};style={p.style};orientation={3 if 'gnd' in p.style.lower() else 1}"
+        f"text={p.text};x={p.x};y={p.y};style={p.style};"
+        f"orientation={_power_port_altium_orientation(p)}"
         for p in ports
     )
     try:

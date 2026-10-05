@@ -564,7 +564,8 @@ def correct_two_pin_rotation(plan, placements, symbol_by_refdes):
             continue
         out.append(PlacedPart(refdes=placement.refdes, sheet=placement.sheet,
                               x_mils=placement.x_mils, y_mils=placement.y_mils,
-                              rotation=wanted))
+                              rotation=wanted,
+                              flipped=getattr(placement, "flipped", False)))
     return out
 
 

@@ -54,6 +54,34 @@ _SIDE_BONUS = {"E": 0.0, "N": 8.0, "S": 16.0, "W": 24.0}
 _SIDE_BONUS_IC = {"N": 0.0, "S": 8.0, "E": 16.0, "W": 24.0}
 
 
+def label_text_box(lab) -> tuple[int, int, int, int]:
+    """A net label's text extent, canvas mils (y-up): THE one definition.
+
+    The text placer, the cross-net label pass, the glyph collision pass and
+    the stub-label keep-out all read this, so they agree on what a label
+    covers. Altium anchors a label at the bottom-left of its text
+    (justification 0) or the bottom-right (2) and rotates the whole box
+    with the orientation:
+
+    * 0 / 2: horizontal, the text above the wire, growing right (0) or
+      ending at the anchor (2) -- the long-standing box, unchanged;
+    * 1 (90 degrees): reads upward, the text LEFT of a vertical wire;
+    * 3 (270 degrees): reads downward, the text RIGHT of the wire.
+    """
+    w = CHAR_W * max(1, len(lab.text))
+    end_at_anchor = getattr(lab, "justification", 0) == 2
+    o = getattr(lab, "orientation", 0) % 4
+    x, y = lab.x, lab.y
+    if o == 1:
+        return ((x - LINE_H, y - w, x, y) if end_at_anchor
+                else (x - LINE_H, y, x, y + w))
+    if o == 3:
+        return ((x, y, x + LINE_H, y + w) if end_at_anchor
+                else (x, y - w, x + LINE_H, y))
+    x1 = x - w if end_at_anchor else x
+    return (x1, y, x1 + w, y + LINE_H)
+
+
 def _overlap(a: tuple, b: tuple) -> float:
     ax1, ay1, ax2, ay2 = a
     bx1, by1, bx2, by2 = b
@@ -107,17 +135,21 @@ def _place_sheet(canvas: SchematicCanvas, sheet_name: str) -> int:
         # than the glyph itself -- measured on the buck output corner,
         # where VOUT/GND port names overlapped J2's and R2's values
         # because only the glyph rectangle was an obstacle.
+        if getattr(p, "orientation", None) is not None:
+            # A re-aimed glyph (post-selection pass): its drawn extent.
+            # The symmetric box below covers up and down glyphs but not a
+            # sideways name, which runs 120 + its width to one side.
+            from eda_agent.design.port_glyphs import glyph_extent
+            gx1, gy1, gx2, gy2 = glyph_extent(p)
+            ports.append((gx1 - 25, gy1 - 25, gx2 + 25, gy2 + 25))
+            continue
         half_w = max(150, (CHAR_W * len(p.text)) // 2 + 25)
         ports.append((p.x - half_w, p.y - 350, p.x + half_w, p.y + 350))
     texts = []
     for l in canvas.labels:
         if l.sheet != sheet_name:
             continue
-        w = CHAR_W * len(l.text)
-        if getattr(l, "justification", 0) == 2:
-            texts.append((l.x - w, l.y, l.x, l.y + LINE_H))
-        else:
-            texts.append((l.x, l.y, l.x + w, l.y + LINE_H))
+        texts.append(label_text_box(l))
 
     moved = 0
     for inst in sorted(instances, key=lambda i: i.refdes):
@@ -173,4 +205,4 @@ def _place_sheet(canvas: SchematicCanvas, sheet_name: str) -> int:
     return moved
 
 
-__all__ = ["place_instance_text", "CHAR_W", "LINE_H"]
+__all__ = ["place_instance_text", "label_text_box", "CHAR_W", "LINE_H"]

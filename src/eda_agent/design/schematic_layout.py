@@ -355,16 +355,27 @@ def compute_schematic_layout(
         for refdes, hint in placement_hints.items():
             if refdes not in refdes_on_sheet:
                 continue
+            if not isinstance(hint, dict):
+                continue
             hx = hint.get("x")
             hy = hint.get("y")
             if hx is not None and hy is not None:
-                flowed[refdes] = _Pt(float(hx), float(hy))
+                # A non-numeric hint is skipped here; the pipeline, which
+                # owns the notes, reports it.
+                try:
+                    flowed[refdes] = _Pt(float(hx), float(hy))
+                except (TypeError, ValueError):
+                    pass
 
     rotations = assign_rotations(plan, flowed, geometry)
     if placement_hints:
         for refdes, hint in placement_hints.items():
-            if refdes in refdes_on_sheet and "rotation" in hint:
-                rotations[refdes] = int(hint["rotation"]) % 360
+            if (refdes in refdes_on_sheet and isinstance(hint, dict)
+                    and "rotation" in hint):
+                try:
+                    rotations[refdes] = int(hint["rotation"]) % 360
+                except (TypeError, ValueError):
+                    pass
 
     placed = snap_and_legalize(
         plan, flowed, rotations, grid_mils=grid_mils, geometry=geometry,

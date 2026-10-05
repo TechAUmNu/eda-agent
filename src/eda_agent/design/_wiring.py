@@ -129,6 +129,53 @@ def _detect_junctions(
     return sorted(junctions)
 
 
+def _point_on_segment(
+    px: int, py: int, x1: int, y1: int, x2: int, y2: int,
+) -> bool:
+    """True iff (px, py) lies on the axis-aligned segment (x1,y1)-(x2,y2).
+
+    Only axis-aligned segments are emitted by the router, so we only
+    handle horizontal / vertical. Endpoints count as 'on' the segment
+    (the wire physically terminates there); coincident endpoint is the
+    most common shorting mode.
+    """
+    if x1 == x2:
+        if px != x1:
+            return False
+        lo, hi = (y1, y2) if y1 <= y2 else (y2, y1)
+        return lo <= py <= hi
+    if y1 == y2:
+        if py != y1:
+            return False
+        lo, hi = (x1, x2) if x1 <= x2 else (x2, x1)
+        return lo <= px <= hi
+    return False  # diagonal segments not used by the router
+
+def _wire_arms_at(
+    wires: "list[tuple[int, int, int, int, str]]",
+    px: int, py: int, net: str,
+) -> int:
+    """How many arms of ``net``'s wire meet at (px, py).
+
+    A wire ENDING at the point is one arm, a wire passing THROUGH it is
+    two. Three or more arms is a real T or cross and gets a junction dot;
+    two is a corner or a straight join and needs none. ``wires`` is a list
+    of ``(x1, y1, x2, y2, net)``. One rule for every pass that places
+    dots: _wire_sheet's junction filter and the post-selection glyph pass.
+    """
+    arms = 0
+    for (x1, y1, x2, y2, wnet) in wires:
+        if wnet != net:
+            continue
+        if (px, py) in ((x1, y1), (x2, y2)):
+            arms += 1
+        elif x1 == x2 and px == x1 and min(y1, y2) < py < max(y1, y2):
+            arms += 2
+        elif y1 == y2 and py == y1 and min(x1, x2) < px < max(x1, x2):
+            arms += 2
+    return arms
+
+
 def _cross_net_meeting_counts(
     wires: list[tuple[int, int, int, int, str]],
 ) -> dict[str, int]:
@@ -265,6 +312,7 @@ def _apply_no_stranded_parts_rule(
     nets: "list[Net]",
     reps: dict[str, str],
     sheet_refdes: "set[str]",
+    left_labelled: "Optional[list[str]]" = None,
 ) -> list[str]:
     """HARD RULE: no part may have every pin on net-labels only.
 
@@ -279,12 +327,40 @@ def _apply_no_stranded_parts_rule(
     Mutates ``reps`` in place; returns the promoted net names (for
     caller notes). Deterministic: parts and candidate nets are visited
     in sorted order, so repeated runs promote the same nets.
+
+    THE RULE MAY NEVER TAKE A NET'S LAST NAME OFF A PIN. ``sheet_refdes``
+    is the set of parts on THIS sheet, so a pin whose refdes is not in it
+    lives on another sheet. Two guards follow from that:
+
+    * A net with fewer than two pins here has nothing to route to.
+      Promoting it drew a bare stub, ``_trim_dangling_wires`` cut the stub
+      as ending in empty space, and the pin emitted with no wire and no
+      label. Found on the multiviewer carrier's PWR_EFUSE sheet: R105.2
+      (PWR_IMON) and R146.2 (FAN2_EN), each the only on-sheet pin of a
+      net whose other pin is on another sheet. Such a part keeps its
+      labels -- a labelled stub is electrically complete -- and its
+      refdes is appended to ``left_labelled`` when the caller passes one.
+      The choice is NOT re-ranked to another net: that would wire a net
+      this rule never wired before (measured: one extra crossing and
+      4000 mils of wire on PWR_3V3), which is a rule-quality decision,
+      not this repair.
+    * A promoted net that LEAVES the sheet, or that the planner marked
+      ``force_label``, becomes ``"wire_named"``: routed as a wire AND
+      given one net label on that copper. Plain "wire" erased the name,
+      and for a net that leaves the sheet the name IS the cross-sheet
+      connection (PWR_3V3 FPGA_RST, PWR_MECH CHASSIS).
+
+    On a single-sheet plan every net has all its pins here, so neither
+    guard can fire unless the promoted net is force_label.
     """
     nets_of_part: dict[str, list[Net]] = {}
     for net in nets:
         for pr in net.pins:
             if pr.refdes in sheet_refdes:
                 nets_of_part.setdefault(pr.refdes, []).append(net)
+
+    def _pins_here(net: Net) -> int:
+        return sum(1 for pr in net.pins if pr.refdes in sheet_refdes)
 
     promoted: list[str] = []
     for refdes in sorted(nets_of_part):
@@ -294,8 +370,14 @@ def _apply_no_stranded_parts_rule(
         if any(reps.get(n.name) != "label_per_pin" for n in incident):
             continue
         best = min(incident, key=lambda n: (len(n.pins), n.name))
+        if _pins_here(best) < 2:
+            if left_labelled is not None:
+                left_labelled.append(refdes)
+            continue
         if reps.get(best.name) == "label_per_pin":
-            reps[best.name] = "wire"
+            leaves = _pins_here(best) < len(best.pins)
+            reps[best.name] = (
+                "wire_named" if (leaves or best.force_label) else "wire")
             promoted.append(best.name)
     return promoted
 

@@ -1791,8 +1791,13 @@ def test_offgrid_symbol_pins_snap_to_wiring_grid():
 # FD-sweep shrink they install for speed, and the next build silently
 # runs the full 100-value production sweep. mock.patch is used below so
 # only the one symbol is affected.
+#
+# The stub-upgrade on/off comparisons build BOTH sides with the later glyph
+# collision pass switched off (glyph_pass=False), so the only variable is
+# the upgrade. The glyph pass has its own on/off tests in
+# test_port_glyphs.py.
 
-def _build_board(name: str, *, upgrade: bool = True):
+def _build_board(name: str, *, upgrade: bool = True, glyph_pass: bool = True):
     """Build a benchmark board, optionally with the stub pass disabled.
 
     CACHED. This file asks for a board 23 times and there are six
@@ -1813,11 +1818,11 @@ def _build_board(name: str, *, upgrade: bool = True):
     not an acceptable price for a faster suite, and the copy costs
     nothing next to the layout it avoids.
     """
-    return copy.deepcopy(_build_board_uncached(name, upgrade))
+    return copy.deepcopy(_build_board_uncached(name, upgrade, glyph_pass))
 
 
 @functools.lru_cache(maxsize=None)
-def _build_board_uncached(name: str, upgrade: bool):
+def _build_board_uncached(name: str, upgrade: bool, glyph_pass: bool = True):
     import json
     from pathlib import Path
     from unittest import mock
@@ -1832,13 +1837,18 @@ def _build_board_uncached(name: str, upgrade: bool):
         json.loads((plans / f"{name}.json").read_text()))
     extractor = SyntheticSymbolExtractor(plan)
 
-    if upgrade:
-        canvas = build_best_canvas_from_plan(plan, extractor).canvas
-    else:
-        with mock.patch(
+    import contextlib
+
+    with contextlib.ExitStack() as stack:
+        if not upgrade:
+            stack.enter_context(mock.patch(
                 "eda_agent.design.pipeline.upgrade_repair_ports_to_stubs",
-                return_value=0):
-            canvas = build_best_canvas_from_plan(plan, extractor).canvas
+                return_value=0))
+        if not glyph_pass:
+            stack.enter_context(mock.patch(
+                "eda_agent.design.pipeline.resolve_port_glyph_collisions",
+                return_value=0))
+        canvas = build_best_canvas_from_plan(plan, extractor).canvas
     return canvas, plan, neatness_report(canvas, plan)
 
 
@@ -1850,8 +1860,8 @@ def test_stub_upgrade_does_not_move_a_single_part():
     layout, and a part landed on the wrong side of its IC. Placement must
     come out identical with the pass on and off.
     """
-    on_canvas, _, on = _build_board("mcu")
-    off_canvas, _, off = _build_board("mcu", upgrade=False)
+    on_canvas, _, on = _build_board("mcu", glyph_pass=False)
+    off_canvas, _, off = _build_board("mcu", upgrade=False, glyph_pass=False)
 
     def placement(canvas):
         return {i.refdes: (i.x, i.y, i.rotation, i.flipped)
@@ -1913,8 +1923,8 @@ def test_stub_upgrade_gives_crowded_glyphs_room():
     anything -- but it can sit tight against a NEIGHBOURING part with its
     bar and text in the gap. The stub pushes it clear.
     """
-    on_canvas, _, _ = _build_board("mcu")
-    off_canvas, _, _ = _build_board("mcu", upgrade=False)
+    on_canvas, _, _ = _build_board("mcu", glyph_pass=False)
+    off_canvas, _, _ = _build_board("mcu", upgrade=False, glyph_pass=False)
     moved = _moved_glyphs(off_canvas, on_canvas)
     assert moved, "the pass moved nothing on this board"
 
@@ -1945,8 +1955,8 @@ def test_stub_upgrade_never_crowds_a_glyph_it_moves():
     that did not exist. _moved_glyphs pairs through the stub wire.
     """
     for board in ("mcu", "blinker555", "buck"):
-        on_canvas, _, _ = _build_board(board)
-        off_canvas, _, _ = _build_board(board, upgrade=False)
+        on_canvas, _, _ = _build_board(board, glyph_pass=False)
+        off_canvas, _, _ = _build_board(board, upgrade=False, glyph_pass=False)
         for before, after in _moved_glyphs(off_canvas, on_canvas):
             was = _glyph_clearance(off_canvas, *before)
             now = _glyph_clearance(on_canvas, *after)
@@ -2007,8 +2017,8 @@ def test_stub_upgrade_never_bonds_two_nets():
     nothing about this pass.
     """
     for board in ("mcu", "blinker555", "buck"):
-        on_canvas, plan, _ = _build_board(board)
-        off_canvas, _, _ = _build_board(board, upgrade=False)
+        on_canvas, plan, _ = _build_board(board, glyph_pass=False)
+        off_canvas, _, _ = _build_board(board, upgrade=False, glyph_pass=False)
         added = _cross_net_contacts(on_canvas, plan) - \
             _cross_net_contacts(off_canvas, plan)
         assert not added, (
@@ -2259,8 +2269,8 @@ def test_stub_upgrade_drops_no_glyph_onto_a_net_label():
         return n
 
     for board in ("mcu", "blinker555", "buck"):
-        on_canvas, _, _ = _build_board(board)
-        off_canvas, _, _ = _build_board(board, upgrade=False)
+        on_canvas, _, _ = _build_board(board, glyph_pass=False)
+        off_canvas, _, _ = _build_board(board, upgrade=False, glyph_pass=False)
         assert overlaps(on_canvas) <= overlaps(off_canvas), (
             f"{board}: the stub upgrade parked glyphs on net labels "
             f"({overlaps(off_canvas)} -> {overlaps(on_canvas)})")
@@ -2967,6 +2977,31 @@ def test_the_stub_upgrade_is_reached_when_the_polish_is_accepted(monkeypatch):
         "the repair-port stub upgrade was never called, so the polish branch "
         "returned instead of adopting its result")
 
+
+
+def test_the_glyph_pass_is_reached_when_the_polish_is_accepted(monkeypatch):
+    """Twin of the stub-upgrade reachability test for the glyph pass, which
+    sits on the same polish-accepted path right after the upgrade."""
+    import json
+    from pathlib import Path
+
+    from eda_agent.design import pipeline as pipe
+    from eda_agent.design.benchmark import SyntheticSymbolExtractor
+
+    calls: list[int] = []
+    real = pipe.resolve_port_glyph_collisions
+    monkeypatch.setattr(
+        pipe, "resolve_port_glyph_collisions",
+        lambda canvas, plan, **kw: (calls.append(1), real(canvas, plan, **kw))[1])
+
+    plans = Path(__file__).resolve().parents[1] / "benchmarks" / "plans"
+    plan = DesignPlan.model_validate(
+        json.loads((plans / f"{_POLISHED_BOARD}.json").read_text()))
+    pipe.build_best_canvas_from_plan(plan, SyntheticSymbolExtractor(plan))
+
+    assert calls, (
+        "the glyph collision pass was never called on the polish-accepted "
+        "path")
 
 def test_the_polish_is_not_reported_as_both_applied_and_rejected():
     """Adopting instead of returning made the reject note fall through.

@@ -413,6 +413,12 @@ def apply_bus_drawing(
     in place.
     """
     buses = detect_buses(plan, min_width=min_width)
+    # A stub-label part draws its own pins; a bus comb on them would strip
+    # the macro's labels (they share the bus nets' names).
+    from eda_agent.design.stub_labels import stub_label_refdes
+    _stub = stub_label_refdes(plan)
+    if _stub:
+        buses = [b for b in buses if not (b.parts & _stub)]
     if not buses:
         return []
 

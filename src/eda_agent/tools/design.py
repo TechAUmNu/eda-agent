@@ -1739,8 +1739,9 @@ def register_design_tools(mcp) -> None:
         sheet: str = "main",
         grid_mils: int = 100,
         fr_iterations: int = 80,
-        placement_hints: Optional[dict[str, dict[str, int]]] = None,
+        placement_hints: Optional[dict[str, dict[str, Any]]] = None,
         render_png: Optional[str] = None,
+        allow_supply_flip: Union[str, bool] = "down",
     ) -> dict[str, Any]:
         """Compute the schematic layout for a DesignPlan, as pure data.
 
@@ -1775,9 +1776,17 @@ def register_design_tools(mcp) -> None:
                 snaps to its own 100-mil grid.
             fr_iterations: Accepted for compatibility; the pipeline sweeps
                 its own force-directed budget and scores the results.
-            placement_hints: Optional ``{refdes: {"x", "y", "rotation"}}``
-                pinned positions, same as ``design_execute_plan``.
+            placement_hints: Optional ``{refdes: {"x", "y", "rotation",
+                "mirror"}}`` pinned positions, same as
+                ``design_execute_plan``.
             render_png: Optional path for a preview image of the layout.
+            allow_supply_flip: How far the post-layout glyph pass may
+                re-aim a supply bar whose bar, name or drop would sit on
+                other copper or a label. ``"down"`` (default): it may point
+                down as a last resort, and the notes list every bar it
+                pointed down; ``"any"``: sideways too; ``"off"``: every
+                bar points up (then such a glyph is left colliding and the
+                notes say so). Ground symbols always point down.
 
         Returns:
             Dict with ``ok`` / ``sheet`` / ``engine`` ("canvas") /
@@ -1788,7 +1797,7 @@ def register_design_tools(mcp) -> None:
         """
         result = layout_plan_from_json(
             plan_json, sheet=sheet, placement_hints=placement_hints,
-            render_png=render_png,
+            render_png=render_png, allow_supply_flip=allow_supply_flip,
         )
         if result.get("ok") and "placements" in result:
             result["summary"] = _schematic_summary(
@@ -1890,8 +1899,9 @@ def register_design_tools(mcp) -> None:
         plan_json: Union[str, dict],
         project_path: str,
         use_canvas: bool = True,
-        placement_hints: Optional[dict[str, dict[str, int]]] = None,
+        placement_hints: Optional[dict[str, dict[str, Any]]] = None,
         mode: str = "auto",
+        allow_supply_flip: Union[str, bool] = "down",
     ) -> dict[str, Any]:
         """Instantiate a DesignPlan in Altium.
 
@@ -1922,9 +1932,12 @@ def register_design_tools(mcp) -> None:
                 the new canvas pipeline; pass ``False`` to fall back to
                 the legacy executor.
             placement_hints: Optional ``{refdes: {"x": int, "y": int,
-                "rotation": int}}`` partial anchors. Hinted refdes pin
-                to the supplied position; others run through the
-                algorithmic placement (Sugiyama + multi-try scoring).
+                "rotation": int, "mirror": bool}}`` partial anchors.
+                Hinted refdes pin to the supplied position; others run
+                through the algorithmic placement (Sugiyama + multi-try
+                scoring). ``mirror`` is a horizontal mirror in the
+                symbol's own frame, applied before the rotation; an
+                unknown key is reported in the notes, not ignored.
                 Used by the agent-in-loop refinement workflow:
                   1. Run ``design_preview_plan`` -> see SVG + score.
                   2. If layout is bad, identify specific refdes that
@@ -1948,6 +1961,13 @@ def register_design_tools(mcp) -> None:
                 part where a person dragged it, read the sheet back with
                 ``design_hints_from_sheet`` and pass the result as
                 ``placement_hints``.
+            allow_supply_flip: How far the post-layout glyph pass may
+                re-aim a supply bar whose bar, name or drop would sit on
+                other copper or a label. ``"down"`` (default): it may point
+                down as a last resort, and the notes list every bar it
+                pointed down; ``"any"``: sideways too; ``"off"``: every
+                bar points up (then such a glyph is left colliding and the
+                notes say so). Ground symbols always point down.
 
         Returns:
             Result dict with ok / project_path / sheets_touched / placed
@@ -1962,7 +1982,7 @@ def register_design_tools(mcp) -> None:
             return execute_plan_via_canvas_from_json(
                 plan_json, project_path,
                 placement_hints=placement_hints,
-                mode=mode,
+                mode=mode, allow_supply_flip=allow_supply_flip,
             )
         if mode != "auto":
             return {"ok": False, "reason":
@@ -2092,7 +2112,8 @@ def register_design_tools(mcp) -> None:
             project_path: Absolute path to the .PrjPcb whose sheet to read.
 
         Returns:
-            ``ok`` / ``hints`` ({refdes: {x, y, rotation}}) / ``unmatched``
+            ``ok`` / ``hints`` ({refdes: {x, y, rotation}}, plus
+            ``mirror: true`` for a part mirrored on the sheet) / ``unmatched``
             (refdes present in the snapshot but not readable now) /
             ``notes``.
         """
@@ -2102,7 +2123,8 @@ def register_design_tools(mcp) -> None:
     async def design_preview_plan(
         plan_json: Union[str, dict],
         output_svg_path: Optional[str] = None,
-        placement_hints: Optional[dict[str, dict[str, int]]] = None,
+        placement_hints: Optional[dict[str, dict[str, Any]]] = None,
+        allow_supply_flip: Union[str, bool] = "down",
     ) -> dict[str, Any]:
         """Render a DesignPlan to SVG without emitting to Altium.
 
@@ -2116,11 +2138,19 @@ def register_design_tools(mcp) -> None:
             plan_json: DesignPlan as JSON string or dict.
             output_svg_path: Where to write the SVG. Default:
                 ``<repo>/.symbol_cache/preview.svg``.
-            placement_hints: Optional ``{refdes: {"x", "y", "rotation"}}``
-                partial anchors, same as ``design_execute_plan``: hinted
+            placement_hints: Optional ``{refdes: {"x", "y", "rotation",
+                "mirror"}}`` partial anchors, same as
+                ``design_execute_plan``: hinted
                 refdes pin to the supplied position, the rest run through
                 algorithmic placement. Iterate preview→hints→preview to
                 refine a layout before a full emit.
+            allow_supply_flip: How far the post-layout glyph pass may
+                re-aim a supply bar whose bar, name or drop would sit on
+                other copper or a label. ``"down"`` (default): it may point
+                down as a last resort, and the notes list every bar it
+                pointed down; ``"any"``: sideways too; ``"off"``: every
+                bar points up (then such a glyph is left colliding and the
+                notes say so). Ground symbols always point down.
 
         Returns:
             Dict with ok / preview_svg_path / canvas (snapshot) /
@@ -2129,6 +2159,7 @@ def register_design_tools(mcp) -> None:
         """
         result = preview_plan_from_json(
             plan_json, output_svg_path, placement_hints=placement_hints,
+            allow_supply_flip=allow_supply_flip,
         )
         # Cache the most recent plan input for the dashboard's Plan tab.
         try:
