@@ -13,7 +13,8 @@ self-contained instead:
   ``RAIL_INSET_MILS`` out from the pins, and only the run's first pin carries
   the full stub and the single label;
 * a run of adjacent ground pins does the same with ONE ground glyph at the end
-  of the first pin's stub, pointing outward;
+  of the first pin's stub, pointing outward -- except on an UP-facing side,
+  where a ground symbol would point up, so that run carries a label instead;
 * a pin no plan net uses gets a No-ERC mark.
 
 The part's nets then reach the rest of the sheet by name. This module only
@@ -132,6 +133,50 @@ def pin_nets(plan: Any, refdes: str, symbol: Any) -> dict[str, tuple[str, bool, 
     return out
 
 
+def no_erc_exempt(plan: Any, refdes: str, symbol: Any) -> tuple[set[str], list[str]]:
+    """``(exempt, problems)``: pins that must NOT get a No-ERC mark, and why.
+
+    A No-ERC mark tells ERC "this pin is deliberately unused". Placing one
+    on a pin the plan meant to connect hides exactly the warning that would
+    have caught a plan/symbol mismatch, so:
+
+    * every pin a plan PinRef of this part names, by designator OR by name,
+      is exempt -- a name shared by several pins resolves to the first one
+      only (``SymbolModel.pin_by_id``), and the others must stay visible to
+      ERC as unconnected rather than be marked as intentionally so;
+    * if any PinRef of this part names no pin at all, the intended pin is
+      unknown, so EVERY pin is exempt (the pipeline reports the mismatch as
+      a failure).
+
+    ``problems`` lists one human-readable line per ambiguous name; the
+    unresolved PinRefs are reported by the pipeline itself.
+    """
+    exempt: set[str] = set()
+    problems: list[str] = []
+    unresolved = False
+    for net in plan.nets:
+        for pr in net.pins:
+            if pr.refdes != refdes:
+                continue
+            hit = [p for p in symbol.pins
+                   if p.designator == pr.pin or p.name == pr.pin]
+            if not hit:
+                unresolved = True
+                continue
+            exempt |= {p.designator for p in hit}
+            by_name = [p for p in hit if p.designator != pr.pin]
+            if len(by_name) > 1 and not any(p.designator == pr.pin for p in hit):
+                chosen = symbol.pin_by_id(pr.pin)
+                problems.append(
+                    f"{refdes}: pin name {pr.pin!r} (net {net.name!r}) matches "
+                    f"{len(by_name)} pins ({', '.join(p.designator for p in by_name)}); "
+                    f"only pin {chosen.designator} is connected -- name the "
+                    f"others by designator")
+    if unresolved:
+        exempt = {p.designator for p in symbol.pins}
+    return exempt, problems
+
+
 def _label(text: str, hx: int, hy: int, ex: int, ey: int, dx: int, dy: int,
            sheet: str) -> NetLabel:
     """A label lying ON the stub from (hx,hy) to (ex,ey), reading +x / +y.
@@ -175,12 +220,15 @@ def _union(boxes: Iterable[tuple[int, int, int, int]]) -> tuple[int, int, int, i
 def build_stub_label_macro(
     inst: SymbolInstance,
     nets_by_pin: dict[str, tuple[str, bool, bool]],
+    no_erc_exempt: Optional[set[str]] = None,
 ) -> StubLabelMacro:
     """The stub-label drawing of one placed instance.
 
-    ``nets_by_pin`` comes from :func:`pin_nets`. Pure geometry over the
-    instance's world pin ends; deterministic (pins visited in symbol order,
-    runs in side order).
+    ``nets_by_pin`` comes from :func:`pin_nets`. A pin with no net gets a
+    No-ERC mark unless it is in ``no_erc_exempt`` (see
+    :func:`no_erc_exempt`): such a pin is left bare so ERC reports it.
+    Pure geometry over the instance's world pin ends; deterministic (pins
+    visited in symbol order, runs in side order).
     """
     from eda_agent.design._wiring import _ground_style
 
@@ -199,7 +247,8 @@ def build_stub_label_macro(
     for ep in eps:
         info = nets_by_pin.get(ep.pin_id)
         if info is None:
-            m.no_ercs.append(NoErc(x=ep.x, y=ep.y, sheet=sheet))
+            if not no_erc_exempt or ep.pin_id not in no_erc_exempt:
+                m.no_ercs.append(NoErc(x=ep.x, y=ep.y, sheet=sheet))
             continue
         net, is_rail, _ = info
         if is_rail:
@@ -234,10 +283,15 @@ def build_stub_label_macro(
             top = run[0]
             ex, ey = top.x + dx * L, top.y + dy * L
             m.wires.append((top.x, top.y, ex, ey, net))
-            if is_ground:
+            # A ground symbol never points UP (the convention the glyph pass
+            # and audit_power_port_orientation enforce). An up-facing ground
+            # run is named by a label like any supply run instead; the
+            # orientation field stays None for the natural (down) direction,
+            # which is the PowerPort contract.
+            if is_ground and orient != 1:
                 m.ports.append(PowerPort(text=net, x=ex, y=ey,
                                          style=_ground_style(net), sheet=sheet,
-                                         orientation=orient))
+                                         orientation=None if orient == 3 else orient))
             else:
                 m.labels.append(_label(net, top.x, top.y, ex, ey, dx, dy, sheet))
                 m.anchors.add((ex, ey))
@@ -275,6 +329,6 @@ def stub_label_half_extents(symbol: Any, nets_by_pin: dict) -> tuple[int, int]:
 
 __all__ = [
     "STYLE", "STUB_LEN_MILS", "RAIL_INSET_MILS", "StubLabelMacro",
-    "apply_draw_style_hints", "build_stub_label_macro", "pin_nets",
+    "apply_draw_style_hints", "build_stub_label_macro", "no_erc_exempt", "pin_nets",
     "stub_label_half_extents", "stub_label_refdes",
 ]

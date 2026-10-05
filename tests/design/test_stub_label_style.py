@@ -186,7 +186,126 @@ def test_down_facing_ground_pins_run_along_x():
     segs = {(w[0], w[1], w[2], w[3]) for w in m.wires}
     assert (0, -400, 0, -400 - L) in segs
     assert (0, -400 - R, 200, -400 - R) in segs
-    assert m.ports[0].orientation == 3 and (m.ports[0].x, m.ports[0].y) == (0, -400 - L)
+    # Down is the natural ground direction, so the field stays None (the
+    # PowerPort contract: only a non-natural direction is stored).
+    from eda_agent.design.port_glyphs import port_orientation
+    assert m.ports[0].orientation is None
+    assert port_orientation(m.ports[0]) == 3
+    assert (m.ports[0].x, m.ports[0].y) == (0, -400 - L)
+
+
+def test_up_facing_ground_pins_get_a_label_not_an_upward_glyph():
+    """Review L2: a ground symbol never points up. An up-facing ground run
+    is named by a label, like a supply run."""
+    pins = tuple(SymbolPin(designator=str(i + 1), name="GND", x=100 * i, y=0,
+                           orientation=1, length=100, electrical_type="power")
+                 for i in range(3))
+    sym = SymbolModel(lib_path=_LIB, lib_ref="T", pins=pins,
+                      body_bbox=SymbolBBox(x_min=-50, y_min=-300, x_max=250,
+                                           y_max=0))
+    inst = SymbolInstance(refdes="U9", symbol=sym, x=0, y=0, rotation=0)
+    m = build_stub_label_macro(inst, {str(i + 1): ("GND", True, True)
+                                      for i in range(3)})
+    assert m.ports == []
+    assert [lb.text for lb in m.labels] == ["GND"]
+    lb = m.labels[0]
+    assert lb.orientation == 1 and (lb.x, lb.y) == (0, 100 + 100)
+    # The keep-out covers the rotated label (text left of the wire).
+    assert m.keepout[0] <= lb.x - 110 and m.keepout[3] >= lb.y + 55 * 3
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+@pytest.mark.parametrize("flipped", [False, True])
+def test_macro_grounds_never_point_up_at_any_rotation(rotation, flipped):
+    """The reviewer's gap: the macro at 90/270 (and mirrored). Wherever the
+    eFuse's ground run ends up, its symbol points down or sideways (the
+    outward hand style), never up -- and an up-facing run is a label."""
+    from eda_agent.design.port_glyphs import port_orientation
+
+    plan = _plan()
+    sym = _efuse()
+    inst = SymbolInstance(refdes="U1", symbol=sym, x=5000, y=5000,
+                          rotation=rotation, flipped=flipped)
+    m = build_stub_label_macro(inst, pin_nets(plan, "U1", sym))
+    assert all(port_orientation(p) != 1 for p in m.ports), m.ports
+    assert all(p.orientation != 3 for p in m.ports)   # natural = None
+    gnd_names = [p for p in m.ports if p.text == "GND"] + [
+        lb for lb in m.labels if lb.text == "GND"]
+    assert len(gnd_names) == 1
+
+
+# ------------------------------------------ plan/symbol mismatch (review H1)
+
+def _mismatch_plan(pin: str) -> DesignPlan:
+    raw = _plan().model_dump()
+    for n in raw["nets"]:
+        if n["name"] == "UVLO":
+            for pr in n["pins"]:
+                if pr["refdes"] == "U1":
+                    pr["pin"] = pin
+    return DesignPlan.model_validate(raw)
+
+
+def test_a_pin_the_symbol_lacks_fails_the_build_on_a_styled_part():
+    """H1: the macro branch skipped the pin check, so a PinRef naming no
+    pin vanished, the real pin got a No-ERC, and the run said ok."""
+    plan = _mismatch_plan("99")
+    res = build_canvas_from_plan(plan, MockExtractor(_syms()),
+                                 placement_hints=_HINTS)
+    assert not res.ok
+    assert any("pin '99' not found on U1 (symbol mismatch)" in f.text
+               for f in res.failures)
+    # Reported once, not again by the canvas validator.
+    assert sum("pin '99' not found" in f.text for f in res.failures) == 1
+    # The intended pin is unknown, so no pin of U1 is marked as unused.
+    assert res.canvas.no_ercs == []
+
+
+def test_the_plain_part_reports_the_same_mismatch():
+    """Control: the same plan without the style always failed."""
+    raw = _mismatch_plan("99").model_dump()
+    for p in raw["parts"]:
+        p.pop("draw_style", None)
+    res = build_canvas_from_plan(DesignPlan.model_validate(raw),
+                                 MockExtractor(_syms()), placement_hints=_HINTS)
+    assert not res.ok
+    assert any("pin '99' not found on U1" in f.text for f in res.failures)
+
+
+def test_a_pin_name_shared_by_several_pins_never_gets_no_erc():
+    """'GND' names pins 4, 5 and 14. pin_by_id resolves the name to pin 4
+    only, so 5 and 14 are unconnected -- and must stay visible to ERC
+    rather than be marked deliberately unused."""
+    raw = _plan().model_dump()
+    for n in raw["nets"]:
+        if n["name"] == "GND":
+            n["pins"] = [pr for pr in n["pins"]
+                         if not (pr["refdes"] == "U1"
+                                 and pr["pin"] in ("4", "5", "14"))]
+            n["pins"].append({"refdes": "U1", "pin": "GND"})
+    plan = DesignPlan.model_validate(raw)
+    res = build_canvas_from_plan(plan, MockExtractor(_syms()),
+                                 placement_hints=_HINTS)
+    u1 = res.canvas.instance_by_refdes("U1")
+    marked = {(m.x, m.y) for m in res.canvas.no_ercs}
+    for pid in ("4", "5", "14"):
+        ep = u1.pin_world(pid)
+        assert (ep.x, ep.y) not in marked, pid
+    # The genuinely unused NC pin still gets its mark.
+    nc = u1.pin_world("9")
+    assert (nc.x, nc.y) in marked
+    assert any("pin name 'GND'" in n.text and "matches 3 pins" in n.text
+               for n in res.notes)
+
+
+def test_no_erc_exempt_lists_name_and_designator_targets():
+    from eda_agent.design.stub_labels import no_erc_exempt
+    sym = _efuse()
+    exempt, problems = no_erc_exempt(_plan(), "U1", sym)
+    assert {"1", "2", "3", "17", "18", "4", "5", "14", "12", "6", "13"} <= exempt
+    assert "9" not in exempt and problems == []
+    exempt, _ = no_erc_exempt(_mismatch_plan("99"), "U1", sym)
+    assert exempt == {p.designator for p in sym.pins}
 
 
 # ------------------------------------------------------------------- pipeline

@@ -87,6 +87,7 @@ from eda_agent.design.symbols import SymbolExtractor, SymbolModel
 from eda_agent.design.stub_labels import (
     apply_draw_style_hints,
     build_stub_label_macro,
+    no_erc_exempt as _stub_no_erc_exempt,
     pin_nets as _stub_pin_nets,
     stub_label_half_extents,
     stub_label_refdes,
@@ -563,10 +564,16 @@ def build_canvas_from_plan(
     if stub_parts:
         for inst in canvas.instances:
             if inst.refdes in stub_parts:
+                exempt, ambiguous = _stub_no_erc_exempt(
+                    plan, inst.refdes, inst.symbol)
                 macro = build_stub_label_macro(
-                    inst, _stub_pin_nets(plan, inst.refdes, inst.symbol))
+                    inst, _stub_pin_nets(plan, inst.refdes, inst.symbol),
+                    no_erc_exempt=exempt)
                 inst.stub_macro = macro
                 inst.keepout = macro.keepout
+                for text in dict.fromkeys(ambiguous):
+                    result.notes.append(PipelineNote(
+                        severity="warning", text=text))
 
     # 3b. Parameter stamps. Bind Value / Manufacturer / MPN / Footprint
     # (and Datasheet when the part carries datasheet_url) so the emitter
@@ -2611,6 +2618,20 @@ def _validate_canvas_against_plan(
     represented = wire_nets | label_texts | port_texts
 
     placed = {i.refdes: i for i in canvas.instances}
+    # The pin-level check this docstring promises. Deduplicated against the
+    # wiring loop's identical failure, so a mismatch is reported once.
+    reported = {f.text for f in result.failures}
+    for net in plan.nets:
+        for pin_ref in net.pins:
+            inst = placed.get(pin_ref.refdes)
+            if inst is None or inst.pin_world(pin_ref.pin) is not None:
+                continue
+            text = (f"pin {pin_ref.pin!r} not found on "
+                    f"{pin_ref.refdes} (symbol mismatch)")
+            if text not in reported:
+                reported.add(text)
+                result.failures.append(PipelineNote(
+                    severity="error", text=text))
     for net in plan.nets:
         if net.name in represented:
             continue
@@ -2990,9 +3011,11 @@ def _wire_sheet(
                 continue
             if refdes_to_sheet.get(pin_ref.refdes) != sheet_name:
                 continue  # cross-sheet, handled on its home sheet
-            if pin_ref.refdes in macros:
-                macro_nets.add(net.name)
-                continue  # drawn by its part's stub-label macro
+            # BEFORE the stub-label branch: a macro part draws its pins from
+            # its own net map, which simply has no entry for a PinRef that
+            # names no pin, so a mismatch there used to vanish -- the real
+            # pin then counted as unused and got a No-ERC mark, and the run
+            # reported ok on a wrong netlist.
             endpoint = canvas.pin_world(pin_ref.refdes, pin_ref.pin)
             if endpoint is None:
                 result.failures.append(PipelineNote(
@@ -3003,6 +3026,9 @@ def _wire_sheet(
                     ),
                 ))
                 continue
+            if pin_ref.refdes in macros:
+                macro_nets.add(net.name)
+                continue  # drawn by its part's stub-label macro
             dx_dir, dy_dir = _pin_direction_vector(endpoint.orientation)
             stagger_key = (pin_ref.refdes, dx_dir, dy_dir)
             extra = stagger_counter.get(stagger_key, 0) * 100
