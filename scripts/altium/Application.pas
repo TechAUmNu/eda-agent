@@ -671,6 +671,8 @@ Var
     StillDirty, Seen, Written, P : Integer;
     Paths, AgesBefore, AgesAfter : String;
     Remaining, OnePath, SkippedJson, Policy : String;
+    LibSkippedJson, Ext : String;
+    LibSkipped : Integer;
     IncludeLibs, OnlyModified : Boolean;
 Begin
     IncludeLibs := LowerCase(ExtractJsonValue(Params, 'include_libraries')) = 'true';
@@ -705,6 +707,8 @@ Begin
         StillDirty := CountDirtyDocuments(0);
 
         SkippedJson := '';
+        LibSkippedJson := '';
+        LibSkipped := 0;
         Remaining := SaveSkippedPaths;
         While Remaining <> '' Do
         Begin
@@ -721,11 +725,33 @@ Begin
             End;
             If SkippedJson <> '' Then SkippedJson := SkippedJson + ',';
             SkippedJson := SkippedJson + '"' + EscapeJsonString(OnePath) + '"';
+            Ext := '';
+            Try Ext := UpperCase(ExtractFileExt(OnePath)); Except Ext := ''; End;
+            If (Ext = '.SCHLIB') Or (Ext = '.PCBLIB') Then
+            Begin
+                LibSkipped := LibSkipped + 1;
+                If LibSkippedJson <> '' Then LibSkippedJson := LibSkippedJson + ',';
+                LibSkippedJson := LibSkippedJson + '"' + EscapeJsonString(OnePath) + '"';
+            End;
         End;
+        { A SKIPPED LIBRARY IS FLAGGED, NOT JUST LISTED. In the usual default  }
+        { case the sheets are written, the reply is saved:true still_dirty:0,  }
+        { and a clean-reading library is left alone. If that library holds an }
+        { edit whose flag never propagated (lib_add_footprint_tracks and       }
+        { lib_modify_footprint_pads have read modified:false), the edit is not }
+        { on disk, and a path mixed in among skipped sheets is easy to miss.   }
+        { So the libraries get their own key, and a warning rides on EVERY     }
+        { branch below whenever one was skipped.                               }
         Policy := ',"include_libraries":' + BoolToJsonStr(IncludeLibs)
             + ',"only_modified":' + BoolToJsonStr(OnlyModified)
             + ',"documents_skipped":' + IntToStr(SaveSkipped)
-            + ',"skipped_unmodified":[' + SkippedJson + ']';
+            + ',"skipped_unmodified":[' + SkippedJson + ']'
+            + ',"libraries_skipped":[' + LibSkippedJson + ']';
+        If LibSkipped > 0 Then
+            Policy := Policy + ',"warning":"' + IntToStr(LibSkipped)
+                + ' library file(s) read unmodified and were NOT written '
+                + '(see libraries_skipped). If you edited one, save it with '
+                + 'lib_save_library, or pass include_libraries=true."';
 
         If Seen = 0 Then
             Result := BuildSuccessResponse(RequestId,
@@ -778,7 +804,6 @@ Begin
         SaveSkipCleanSheets := False;
         Result := BuildErrorResponse(RequestId, 'SAVE_FAILED', 'SaveAllDirty raised an exception');
     End;
-End;
 End;
 
 {..............................................................................}

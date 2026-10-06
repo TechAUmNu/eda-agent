@@ -956,6 +956,8 @@ def lint_file(path: str) -> list[Finding]:
     findings.extend(_scan_undeclared_local(rel, raw_lines))
     # Comment-brace check uses raw text (it tracks comment depth itself).
     findings.extend(_scan_comment_brace(rel, text))
+    # Begin/End balance also reads raw text, for the same reason.
+    findings.extend(_scan_block_balance(rel, text))
 
     return findings
 
@@ -1343,6 +1345,104 @@ def _scan_undeclared_local(path: str, lines: list[str]) -> list[Finding]:
                     memory="altium_wrong_api_identifier_family.md",
                 ))
                 break
+    return findings
+
+
+#: Words that open a block closed by ``End``. ``Record`` covers record type
+#: declarations, ``Case`` both the statement and a record's variant part.
+_BLOCK_OPENERS = {"begin", "try", "case", "record"}
+
+
+def _scan_block_balance(path: str, text: str) -> list[Finding]:
+    """Every block opener in a unit is closed by exactly one ``End``.
+
+    A STRAY ``End;`` SHIPPED PAST EVERY OTHER CHECK. On 2026-10-06 a save-all
+    change left one extra ``End;`` after App_SaveAll's own. It closed
+    nothing, so Application.pas could not compile, and because DelphiScript
+    compiles the whole script project the bridge would not have loaded at
+    all. This linter, build.py and the full offline suite were all green
+    with it in place: no rule counted Begin against End, and no FPC was run.
+
+    Depth is counted over the whole unit with ``{ }``, ``(* *)``, ``//``
+    comments and string literals skipped, line breaks kept so a finding
+    points at the right line. Two findings: the first line where depth goes
+    below zero (an End that closes nothing), and a non-zero depth at the end
+    of the file (an opener that is never closed).
+    """
+    findings: list[Finding] = []
+    lines = text.split(chr(10))
+    depth = 0
+    in_brace = False
+    in_paren_star = False
+    reported_negative = False
+    for lineno, line in enumerate(lines, 1):
+        clean = []
+        i = 0
+        n = len(line)
+        while i < n:
+            ch = line[i]
+            nxt = line[i + 1] if i + 1 < n else ""
+            if in_brace:
+                if ch == "}":
+                    in_brace = False
+                clean.append(" ")
+                i += 1
+                continue
+            if in_paren_star:
+                if ch == "*" and nxt == ")":
+                    in_paren_star = False
+                    clean.append("  ")
+                    i += 2
+                    continue
+                clean.append(" ")
+                i += 1
+                continue
+            if ch == "/" and nxt == "/":
+                break
+            if ch == "{":
+                in_brace = True
+                clean.append(" ")
+                i += 1
+                continue
+            if ch == "(" and nxt == "*":
+                in_paren_star = True
+                clean.append("  ")
+                i += 2
+                continue
+            if ch == "'":
+                # A string never spans a line in Pascal; '' is an escaped
+                # quote and simply reopens the next string.
+                j = line.find("'", i + 1)
+                if j < 0:
+                    j = n - 1
+                clean.append(" " * (j - i + 1))
+                i = j + 1
+                continue
+            clean.append(ch)
+            i += 1
+        for word in re.findall(r"[A-Za-z_]\w*", "".join(clean)):
+            low = word.lower()
+            if low in _BLOCK_OPENERS:
+                depth += 1
+            elif low == "end":
+                depth -= 1
+                if depth < 0 and not reported_negative:
+                    reported_negative = True
+                    findings.append(Finding(
+                        file=path, line=lineno, col=1,
+                        rule="block-end-closes-nothing",
+                        severity="error",
+                        snippet=line,
+                        memory="delphiscript_block_balance.md",
+                    ))
+    if depth != 0 and not reported_negative:
+        findings.append(Finding(
+            file=path, line=len(lines), col=1,
+            rule="block-unclosed-at-eof",
+            severity="error",
+            snippet=f"{depth} block(s) opened by Begin/Try/Case/Record never closed",
+            memory="delphiscript_block_balance.md",
+        ))
     return findings
 
 

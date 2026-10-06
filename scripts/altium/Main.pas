@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.10.06.01';
+    SCRIPT_VERSION = '2026.10.06.02';
 
     // How far a linked 3D body's box may sit from its footprint's pads (or
     // origin, with no pads) before lib_link_3d_model reports placement_ok
@@ -691,11 +691,18 @@ Begin
                 If IsLib Then Skip := SaveSkipCleanLibs
                 Else Skip := SaveSkipCleanSheets;
             End;
+            { ONE ENTRY PER FILE. A library open in two projects, or in a     }
+            { project and as a free document, is reached once per walk, and   }
+            { was listed and counted twice. The pipe-wrapped compare cannot   }
+            { match part of a longer path.                                    }
             If Skip Then
             Begin
-                SaveSkipped := SaveSkipped + 1;
-                If SaveSkippedPaths <> '' Then SaveSkippedPaths := SaveSkippedPaths + '|';
-                SaveSkippedPaths := SaveSkippedPaths + Doc.DM_FullPath;
+                If Pos('|' + UpperCase(Doc.DM_FullPath) + '|', '|' + UpperCase(SaveSkippedPaths) + '|') = 0 Then
+                Begin
+                    SaveSkipped := SaveSkipped + 1;
+                    If SaveSkippedPaths <> '' Then SaveSkippedPaths := SaveSkippedPaths + '|';
+                    SaveSkippedPaths := SaveSkippedPaths + Doc.DM_FullPath;
+                End;
             End
             Else
             Begin

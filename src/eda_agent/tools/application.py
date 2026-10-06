@@ -391,8 +391,9 @@ def register_application_tools(mcp):
         as the very last step.
 
         TO SAVE ONE LIBRARY, USE ``lib_save_library``. This writes every
-        open document, and each save rewrites open SchDocs and PcbDocs
-        with fresh parameter UniqueIDs (measured 2026-10-02), so a
+        open sheet and board (and, by default, only those libraries that
+        read modified; see below), and each save rewrites open SchDocs and
+        PcbDocs with fresh parameter UniqueIDs (measured 2026-10-02), so a
         one-footprint edit saved this way churns every open sheet in
         version control.
 
@@ -419,7 +420,11 @@ def register_application_tools(mcp):
         with ``lib_save_library``, which writes that one file and checks
         it reached disk, or pass ``include_libraries=True`` for the old
         write-everything behaviour. Every document left alone is listed in
-        ``skipped_unmodified``, so a skip never reads as a write.
+        ``skipped_unmodified``, so a skip never reads as a write, and the
+        libraries among them are ALSO listed in ``libraries_skipped`` with
+        a ``warning`` on the reply, whatever ``saved`` says: a skipped
+        library sits behind ``saved:true`` and ``still_dirty:0`` in the
+        usual case, which is exactly where an unflagged edit would hide.
 
         Args:
             include_libraries: also write .SchLib / .PcbLib documents that
@@ -434,7 +439,9 @@ def register_application_tools(mcp):
             Dict with ``saved``, ``documents_seen``, ``documents_attempted``,
             ``documents_written`` (measured by file timestamp),
             ``still_dirty``, ``include_libraries``, ``only_modified``,
-            ``documents_skipped`` and ``skipped_unmodified`` (paths), and a
+            ``documents_skipped``, ``skipped_unmodified`` (paths, one entry
+            per file), ``libraries_skipped`` (the library paths among them)
+            with a ``warning`` whenever that is non-empty, and a
             ``reason`` / ``note`` when documents remain unsaved or nothing
             was written.
         """
@@ -475,8 +482,10 @@ def register_application_tools(mcp):
         It saves nothing by itself. Save again afterwards: a LIBRARY with
         ``lib_save_library`` (it writes that one file and checks
         ``written_to_disk``), and ``app_save_all`` only when every open
-        document should be written (it rewrites open SchDocs and PcbDocs
-        with fresh UniqueIDs; check its ``still_dirty``).
+        sheet and board should be written (it rewrites open SchDocs and
+        PcbDocs with fresh UniqueIDs, and by default leaves alone a library
+        that reads unmodified; check its ``still_dirty`` and
+        ``libraries_skipped``).
 
         Returns:
             Dict reporting whether each server accepted the unwind, plus

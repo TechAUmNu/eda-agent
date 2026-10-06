@@ -1,7 +1,9 @@
-# Release verification: 2026.10.06.01
+# Release verification: 2026.10.06.02
 
 Unless a section records live verification explicitly, the Pascal below has
-been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
+been checked by the linter (and by FPC where a section says so) but **not
+executed by Altium's DelphiScript engine**. FPC is not available on every
+build machine: the 2026.10.06.x build in step 32 was NOT checked by FPC. The two are not the
 same: each accepts identifiers the other rejects, and an undeclared one
 faults at runtime where `Try/Except` cannot catch it, halting the
 polling loop.
@@ -266,7 +268,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.06.01`, `version_match` =
+Expect `altium_script_version` = `2026.10.06.02`, `version_match` =
 `true`, and `mcp_server_version` = `0.6.1`.
 
 Those are two different versions and they fail differently.
@@ -1979,8 +1981,14 @@ Still open after this run:
 ## 32. A sheet delete that removes the sheet, and a save-all that leaves libraries alone (not yet run live)
 
 Two fixes from the live session of 2026-10-06 (Altium 26.10.1.5, the previous bridge build
-(the 2026-10-04 SCRIPT_VERSION), the multiviewer carrier project). Pascal risk is low:
-every Altium call is already shipped and has run live elsewhere.
+(the 2026-10-04 SCRIPT_VERSION), the multiviewer carrier project). **FPC was NOT
+run on this build**, so nothing here has been through a Pascal compiler. The
+first cut (the previous build of this same date, never deployed) carried a stray `End;` after
+`App_SaveAll` that would have stopped the whole script project compiling,
+with the linter, build.py and the offline suite all green; the linter now
+counts Begin/Try/Case/Record against End (`block-end-closes-nothing`,
+`tests/test_pas_block_balance.py`). Step 1 is the compile check. Every
+Altium call below is already shipped and has run live elsewhere.
 `Gen_DeleteSheet` now uses `Project.DM_RemoveSourceDocument` and the
 membership re-read (`Proj_RemoveDocument`'s), `Client.GetDocumentByPath` +
 `Client.CloseDocument` + a second lookup (`App_CloseDocument`'s, step 21),
@@ -2019,18 +2027,19 @@ sheets, `A`, `B` and `STUBS`, all saved and loaded, plus one open
 library `<lib>` (a scratch copy) that has not been edited. Confirm
 `app_ping` answers after each call.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.06.01`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.06.02`.
 
 2. **The default save-all leaves an unedited library alone.** Note
    `<lib>`'s mtime. `app_save_all` with no arguments. Expect
    `include_libraries: false`, `only_modified: false`, `<lib>` listed in
-   `skipped_unmodified`, `documents_skipped` at least 1, and `<lib>`'s
-   mtime UNCHANGED on disk. The sheets are still written (that is the old
+   `skipped_unmodified` AND in `libraries_skipped` (once each, even if it
+   is open in two projects), a `warning` naming the skipped library count,
+   `documents_skipped` at least 1, and `<lib>`'s mtime UNCHANGED on disk. The sheets are still written (that is the old
    behaviour for sheets, and `documents_written` counts them).
 
 3. **include_libraries restores the old pass.** `app_save_all
-   include_libraries=true`. Expect `skipped_unmodified: []` for
-   libraries, `documents_skipped: 0`, and `<lib>`'s mtime NEWER.
+   include_libraries=true`. Expect `libraries_skipped: []`, no `warning`,
+   `documents_skipped: 0`, and `<lib>`'s mtime NEWER.
 
 4. **A library that reads modified is still written by default.** Make
    an edit that is known to raise the flag (`lib_set_component_description`
@@ -2052,12 +2061,18 @@ library `<lib>` (a scratch copy) that has not been edited. Confirm
    `success: true`, `removed: true`, `still_member: false`,
    `was_loaded: true`, `closed: true`, `previously_focused` = `A`'s path,
    `previously_focused_still_open: true`, `project_saved: true`,
-   `project_file_lists_sheet: false`, `file_deleted: false`,
+   `project_file_checked: true`, `project_file_lists_sheet: false`,
+   `file_deleted: false`,
    `file_still_on_disk: true`. Then confirm independently:
    `app_set_active_document` on `A` SUCCEEDS (the old handler closed it);
    `proj_list_documents` no longer lists STUBS; `app_list_documents` does
    not show STUBS loaded; the .PrjPcb on disk has no `DocumentPath=` line
    naming STUBS.
+   `project_saved` compares `FileAge` before and after, and `FileAge` is
+   only 2-second accurate: if the project was saved moments before this
+   call it can read `false` for a save that did happen. Judge the save by
+   `project_file_lists_sheet: false` and the file itself; `success` does not
+   depend on `project_saved`.
 
 7. **The removal survives a save-all.** Note STUBS.SchDoc's mtime.
    `app_save_all`. STUBS.SchDoc's mtime is UNCHANGED (the old run wrote
@@ -2073,14 +2088,24 @@ library `<lib>` (a scratch copy) that has not been edited. Confirm
 9. **delete_file only after the project lets go.** Re-add a throwaway
    sheet `ZZ.SchDoc` (`proj_add_sheet name=ZZ`), then
    `proj_delete_sheet file_path=<ZZ> delete_file=true`. Expect
-   `project_file_lists_sheet: false`, `file_deleted: true`,
+   `project_file_checked: true`, `project_file_lists_sheet: false`,
+   `file_deleted: true`,
    `file_still_on_disk: false`, and the file gone from the folder.
 
 10. **save_project=false leaves the file alone.** Add another throwaway
     sheet and delete it with `save_project=false`: expect
     `project_saved: false` and `success: true` (membership removed in
     memory, sheet closed); `proj_list_documents` does not list it, but
-    the .PrjPcb on disk still names it until `proj_save`.
+    the .PrjPcb on disk still names it until `proj_save`. Adding
+    `delete_file=true` to such a call must answer `file_deleted: false`
+    and `success: false`: the file on disk still names the sheet.
+
+11. **An unreadable project file is not a confirmation.** Open a sheet as
+    a free document (not in any project) if your build lets
+    `proj_delete_sheet` reach one, or otherwise skip this step: any reply
+    with `project_file_checked: false` must carry
+    `project_file_lists_sheet: null`, `success: false` (with
+    `save_project` on) and, with `delete_file`, `file_deleted: false`.
 
 If step 6 answers `project_saved: false` with
 `project_file_lists_sheet: true`, the project document's `DoFileSave`
@@ -2090,7 +2115,12 @@ the project-save route, not the removal (the reply already says
 
 Not changed, and worth knowing: `application.stop_server` (which
 `app_detach` sends) and `proj_save`, `proj_close` still write every open
-member whether modified or not, as before. `app_checkpoint` passes
+member whether modified or not, as before. So `app_detach` still writes
+an unedited open library and moves its mtime (the symbol-cache key) at
+every session end. Left that way on purpose for now: detach is the last
+safety net for library edits whose modified flag never propagated, and
+skipping there would lose them silently with no later call to report it.
+Changing it is a separate decision. `app_checkpoint` passes
 `include_libraries=true`, so a checkpoint still captures library edits
 whose flag never propagated.
 

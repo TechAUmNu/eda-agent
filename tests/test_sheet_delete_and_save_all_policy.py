@@ -150,24 +150,67 @@ def test_delete_sheet_refuses_before_it_changes_anything():
 def test_delete_sheet_reads_the_project_file_back_off_disk():
     body = _generic()["Gen_DeleteSheet"]
     assert ".DoFileSave(''" in body
-    assert "Gen_ProjectFileNames(ProjFile, MemberPath)" in body
+    assert "Gen_ProjectFileState(ProjFile, MemberPath)" in body
+    assert '"project_file_checked":' in body
     assert '"project_file_lists_sheet":' in body
     assert '"file_still_on_disk":' in body
     assert "FileExists(MemberPath)" in body
 
-    helper = _generic()["Gen_ProjectFileNames"]
+    helper = _generic()["Gen_ProjectFileState"]
     assert "ReadFileContent(" in helper and "ExtractFileName(" in helper
+
+
+def test_an_unread_project_file_is_unknown_not_unlisted():
+    """REVIEW 2026-10-06. A Boolean helper answered "not listed" whenever
+    it could not look (no project path, no file, an empty read), so success
+    was reported for a file never read and delete_file ran behind a check
+    that never happened. Every can't-tell exit must return the UNKNOWN
+    answer, and only a real read may set "not listed"."""
+    helper = _generic()["Gen_ProjectFileState"]
+    assert ") : Integer;" in helper.split(chr(10), 1)[0]
+    unknown = _at(helper, "Result := 2;")
+    not_listed = _at(helper, "Result := 0;")
+    for exit_on in ("If ProjectPath = '' Then Exit;",
+                    "If Not FileExists(ProjectPath) Then Exit;",
+                    "If Content = '' Then Exit;",
+                    "If Pos('DOCUMENTPATH=', Content) = 0 Then Exit;"):
+        at = _at(helper, exit_on)
+        assert unknown < at < not_listed, (
+            f"{exit_on} must exit while the answer is still UNKNOWN (2)")
+
+    body = _generic()["Gen_DeleteSheet"]
+    assert "FileChecked := FileState <> 2;" in body
+    assert "ListedOnDisk := FileState = 1;" in body
+    assert "Else ListedJson := 'null';" in body, (
+        "an unread file must report project_file_lists_sheet null, not "
+        "false: false claims a check that did not happen")
+
+
+def test_only_documentpath_keys_count_as_membership():
+    """REVIEW 2026-10-06. Any line ending in =NAME or a backslash + NAME
+    used to match, so an output-path key naming the sheet read as
+    membership."""
+    helper = _generic()["Gen_ProjectFileState"]
+    assert "Copy(Line, 1, 13) = 'DOCUMENTPATH='" in helper
+    assert "Value := Copy(Line, 14, Length(Line) - 13);" in helper
+    assert "If Value = Name Then Result := 1;" in helper
+    backslash = chr(92)
+    assert ("(Tail = '" + backslash + "' + Name) Or (Tail = '/' + Name)") in helper
+    assert "Pos('=' + Name" not in helper, (
+        "the whole-file '=NAME' search matches any key, not just "
+        "DocumentPath=")
 
 
 def test_delete_sheet_deletes_the_file_only_after_close_and_unlisting():
     body = _generic()["Gen_DeleteSheet"]
     delete = _at(body, "DeleteFile(MemberPath)")
-    gate = body.rfind("If Closed And (Not ListedOnDisk) Then", 0, delete)
+    gate = body.rfind("If Closed And FileChecked And (Not ListedOnDisk) Then",
+                      0, delete)
     assert gate != -1, (
-        "DeleteFile must sit behind the confirmed close AND the project "
-        "file no longer naming the sheet, or a failed removal leaves the "
-        "project pointing at a missing file")
-    assert _at(body, "Gen_ProjectFileNames(ProjFile, MemberPath)") < gate
+        "DeleteFile must sit behind the confirmed close AND a project file "
+        "that was READ and no longer names the sheet, or a failed removal "
+        "(or an unread file) leaves the project pointing at a missing file")
+    assert _at(body, "Gen_ProjectFileState(ProjFile, MemberPath)") < gate
     assert "LowerCase(ExtractJsonValue(Params, 'delete_file')) = 'true'" in body, (
         "deleting the file must be opt-in")
 
@@ -179,7 +222,10 @@ def test_delete_sheet_success_is_computed_not_written():
     assert "BoolToJsonStr(Success)" in body
     tail = body[_at(body, "Success := "):]
     assert "Closed" in tail.split(";", 1)[0]
-    assert "If SaveProject And ListedOnDisk Then Success := False;" in body
+    assert ("If SaveProject And ((Not FileChecked) Or ListedOnDisk) Then "
+            "Success := False;") in body, (
+        "with save_project, success needs a project file that was actually "
+        "read and does not name the sheet")
     assert "If DeleteIt And Not Deleted Then Success := False;" in body
 
 
@@ -280,6 +326,12 @@ def test_the_save_pass_can_skip_an_unmodified_library():
         "NOT-skipped branch; otherwise a skipped library is still written "
         "and its mtime still moves")
     assert "SaveSkippedPaths" in body, "a skip must be recorded, not silent"
+    # One entry per file: a library open in two projects is reached twice.
+    dedup = _at(body, "If Pos('|' + UpperCase(Doc.DM_FullPath) + '|', "
+                      "'|' + UpperCase(SaveSkippedPaths) + '|') = 0 Then")
+    assert dedup < _at(body, "SaveSkipped := SaveSkipped + 1;"), (
+        "the skip count must sit behind the already-listed check, or a "
+        "library open twice is counted and listed twice")
     # Doubt writes: an unreadable flag counts as modified.
     assert "Except WasModified := True;" in body
 
@@ -304,6 +356,28 @@ def test_save_all_reads_its_policy_and_restores_the_default():
     # The existing refusal / still-dirty detection stays.
     assert '"saved":false' in body and "CountChangedAges" in body
     assert "CountDirtyDocuments(0)" in body
+
+
+def test_a_skipped_library_is_flagged_on_every_branch():
+    """REVIEW 2026-10-06. In the usual default case the reply is
+    saved:true still_dirty:0 with the library mixed into
+    skipped_unmodified, and the only warning was on the attempted-nothing
+    branch. A library edit whose flag never propagated would be dropped
+    under saved:true. It now has its own key and a warning, both carried
+    by Policy, which every reply branch appends."""
+    body = _application()["App_SaveAll"]
+    assert '"libraries_skipped":[' in body
+    guard = _at(body, "If LibSkipped > 0 Then")
+    warning = _at(body, ',"warning":"')
+    assert guard < warning
+    assert "Policy := Policy + " in body[guard:warning + 20]
+    assert "'.SCHLIB'" in body and "'.PCBLIB'" in body
+    branches = body.split("Result := BuildSuccessResponse(")[1:]
+    assert len(branches) == 5
+    for b in branches:
+        assert "+ Policy" in b.split(");", 1)[0], (
+            "a reply branch does not carry Policy, so a skipped library "
+            "goes unflagged there")
 
 
 def test_save_all_is_dispatched_with_its_params():
@@ -355,9 +429,22 @@ def test_save_all_docstring_states_the_trade_off():
     src = Path(app_mod.__file__).read_text(encoding="utf-8")
     body = src.split("async def app_save_all", 1)[1].split("    @mcp.tool()", 1)[0]
     assert "include_libraries" in body and "lib_save_library" in body
+    assert "libraries_skipped" in body and "warning" in body
+    flat = " ".join(body.split())
+    assert "This writes every open document" not in flat, (
+        "stale: by default it no longer writes clean libraries")
     assert "lib_add_footprint_tracks" in body, (
         "the docstring must name the edit paths whose flag does not "
         "propagate, because those are what the default leaves unwritten")
+
+
+def test_exit_active_command_docstring_is_not_stale():
+    src = Path(app_mod.__file__).read_text(encoding="utf-8")
+    body = src.split("async def app_exit_active_command", 1)[1].split(
+        "    @mcp.tool()", 1)[0]
+    flat = " ".join(body.split())
+    assert "only when every open document should be written" not in flat
+    assert "libraries_skipped" in flat
 
 
 def test_checkpoint_still_flushes_libraries(app_tool, monkeypatch):

@@ -3097,24 +3097,67 @@ Begin
     End;
 End;
 
-{ Does the project FILE ON DISK still name this document. A .PrjPcb lists      }
-{ members as DocumentPath=<path relative to the project>, so the file name is  }
-{ looked for right after a '=' or a '\' and right before the line break.       }
-{ Same-named files in two folders of one project would both match; that reads  }
-{ as "still listed", the safe direction, because it blocks delete_file.        }
-Function Gen_ProjectFileNames(ProjectPath : String; MemberPath : String) : Boolean;
+{ Does the project FILE ON DISK still name this document. THREE ANSWERS, not  }
+{ two: 0 = read and does not name it, 1 = names it, 2 = could not tell.       }
+{                                                                              }
+{ A Boolean here once answered "not listed" whenever it could not look: no    }
+{ project path (DM_ProjectFullPath raised or came back blank, as it does for   }
+{ Free Documents), no file, or an empty read. The caller then reported        }
+{ success for a project file it never read, and delete_file deleted the sheet }
+{ behind a check that never ran. Unknown is now its own answer and the caller }
+{ treats it as "still listed", the safe direction.                            }
+{                                                                              }
+{ Only DocumentPath= keys count. A .PrjPcb lists members as                   }
+{ DocumentPath=<path relative to the project>, one per [Document<n>] section; }
+{ other keys (an output path, say) may also end in a file name and must not   }
+{ read as membership. The value matches when it IS the file name or ends in   }
+{ a folder separator followed by it. Same-named files in two folders of one   }
+{ project would both match; that reads as "still listed", also the safe       }
+{ direction, because it blocks delete_file. A file that has no DocumentPath=  }
+{ key at all is not one this reads correctly, so that is unknown too: the     }
+{ caller refuses to remove a project's last sheet, so a member always remains. }
+Function Gen_ProjectFileState(ProjectPath : String; MemberPath : String) : Integer;
 Var
-    Content, Name : String;
+    Content, Name, Rest, Line, Value, Tail : String;
+    P, L : Integer;
 Begin
-    Result := False;
-    If (ProjectPath = '') Or (Not FileExists(ProjectPath)) Then Exit;
-    Content := UpperCase(ReadFileContent(ProjectPath));
+    Result := 2;
+    If ProjectPath = '' Then Exit;
+    If Not FileExists(ProjectPath) Then Exit;
     Name := UpperCase(ExtractFileName(MemberPath));
     If Name = '' Then Exit;
-    If Pos('=' + Name + #13, Content) > 0 Then Result := True;
-    If Pos('\' + Name + #13, Content) > 0 Then Result := True;
-    If Pos('=' + Name + #10, Content) > 0 Then Result := True;
-    If Pos('\' + Name + #10, Content) > 0 Then Result := True;
+    Content := UpperCase(ReadFileContent(ProjectPath));
+    If Content = '' Then Exit;
+    If Pos('DOCUMENTPATH=', Content) = 0 Then Exit;
+    Result := 0;
+    Rest := Content;
+    While Rest <> '' Do
+    Begin
+        P := Pos(#10, Rest);
+        If P > 0 Then
+        Begin
+            Line := Copy(Rest, 1, P - 1);
+            Rest := Copy(Rest, P + 1, Length(Rest) - P);
+        End
+        Else
+        Begin
+            Line := Rest;
+            Rest := '';
+        End;
+        L := Length(Line);
+        If (L > 0) And (Pos(#13, Line) = L) Then
+            Line := Copy(Line, 1, L - 1);
+        If Copy(Line, 1, 13) = 'DOCUMENTPATH=' Then
+        Begin
+            Value := Copy(Line, 14, Length(Line) - 13);
+            If Value = Name Then Result := 1;
+            If Length(Value) > Length(Name) Then
+            Begin
+                Tail := Copy(Value, Length(Value) - Length(Name), Length(Name) + 1);
+                If (Tail = '\' + Name) Or (Tail = '/' + Name) Then Result := 1;
+            End;
+        End;
+    End;
 End;
 
 Function Gen_DeleteSheet(Params : String; RequestId : String) : String;
@@ -3129,7 +3172,9 @@ Var
     Found, FoundOther, Discard, SaveProject, DeleteIt : Boolean;
     WasLoaded, WasModified, StillMember, Closed, NameMatches : Boolean;
     FocusedStillOpen, ProjectSaved, ListedOnDisk, FileStillOnDisk, Deleted : Boolean;
-    Success : Boolean;
+    Success, FileChecked : Boolean;
+    FileState : Integer;
+    ListedJson : String;
 Begin
     FilePath := ExtractJsonValue(Params, 'file_path');
     ProjectPath := ExtractJsonValue(Params, 'project_path');
@@ -3302,25 +3347,34 @@ Begin
         Try AgeAfter := FileAge(ProjFile); Except AgeAfter := -1; End;
         ProjectSaved := AgeAfter <> AgeBefore;
     End;
-    ListedOnDisk := Gen_ProjectFileNames(ProjFile, MemberPath);
+    { Unknown counts as listed for every decision below: success when the    }
+    { project was to be saved, and the file delete always.                   }
+    FileState := Gen_ProjectFileState(ProjFile, MemberPath);
+    FileChecked := FileState <> 2;
+    ListedOnDisk := FileState = 1;
 
     Deleted := False;
     If DeleteIt Then
     Begin
-        If Closed And (Not ListedOnDisk) Then
+        If Closed And FileChecked And (Not ListedOnDisk) Then
         Begin
             Try DeleteFile(MemberPath); Except End;
             Deleted := Not FileExists(MemberPath);
         End
         Else If Why = '' Then
             Why := 'delete_file was not done: the file is deleted only once the '
-                + 'sheet is closed and the project file on disk no longer names it';
+                + 'sheet is closed and the project file, read back off disk, no '
+                + 'longer names it';
     End;
     FileStillOnDisk := FileExists(MemberPath);
 
     Success := Closed And FocusedStillOpen;
-    If SaveProject And ListedOnDisk Then Success := False;
+    If SaveProject And ((Not FileChecked) Or ListedOnDisk) Then Success := False;
     If DeleteIt And Not Deleted Then Success := False;
+    If (Why = '') And SaveProject And (Not FileChecked) Then
+        Why := 'the project file could not be read back (no project path, no '
+            + 'file, or an empty read), so the removal is not confirmed on disk: '
+            + ProjFile;
     If (Why = '') And SaveProject And ListedOnDisk Then
         Why := 'the project file on disk still names the sheet after the save; '
             + 'it is removed in memory only until the project is saved';
@@ -3328,6 +3382,10 @@ Begin
         Why := 'the document that had the focus before this call is no longer '
             + 'loaded: ' + FocusedBefore;
 
+    { null, not false, when the file was not read: false would say "checked }
+    { and gone", which is the claim an unread file cannot support.          }
+    If FileChecked Then ListedJson := BoolToJsonStr(ListedOnDisk)
+    Else ListedJson := 'null';
     Data := '{"success":' + BoolToJsonStr(Success)
         + ',"removed":true,"still_member":false'
         + ',"file_path":"' + EscapeJsonString(MemberPath) + '"'
@@ -3338,7 +3396,8 @@ Begin
         + ',"previously_focused_still_open":' + BoolToJsonStr(FocusedStillOpen)
         + ',"project_path":"' + EscapeJsonString(ProjFile) + '"'
         + ',"project_saved":' + BoolToJsonStr(ProjectSaved)
-        + ',"project_file_lists_sheet":' + BoolToJsonStr(ListedOnDisk)
+        + ',"project_file_checked":' + BoolToJsonStr(FileChecked)
+        + ',"project_file_lists_sheet":' + ListedJson
         + ',"file_deleted":' + BoolToJsonStr(Deleted)
         + ',"file_still_on_disk":' + BoolToJsonStr(FileStillOnDisk);
     If Why <> '' Then

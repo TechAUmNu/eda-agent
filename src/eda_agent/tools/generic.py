@@ -1373,9 +1373,11 @@ def register_generic_tools(mcp):
                 survives a reload (default True). With False the sheet is
                 removed in memory only; ``proj_save`` makes it stick.
             delete_file: Also delete the .SchDoc from disk. Done ONLY after
-                the sheet is confirmed closed and the project file on disk no
-                longer names it, so the project is never left pointing at a
-                missing file. Default False: the file stays on disk.
+                the sheet is confirmed closed and the project file, actually
+                read back off disk, no longer names it; a project file that
+                could not be read blocks the delete. So the project is never
+                left pointing at a missing file. Default False: the file
+                stays on disk.
 
         Returns:
             ``success`` plus one read-back per step: ``removed`` /
@@ -1383,10 +1385,18 @@ def register_generic_tools(mcp):
             ``closed`` (looked up again after the close),
             ``previously_focused`` / ``previously_focused_still_open`` (the
             document that had the focus, which must still be loaded),
-            ``project_saved`` / ``project_file_lists_sheet`` (the project
-            file read off disk), ``file_deleted`` / ``file_still_on_disk``,
-            and a ``reason`` when any step fell short. ``success`` is False
-            when any of those did.
+            ``project_saved`` / ``project_file_checked`` /
+            ``project_file_lists_sheet`` (the project file read off disk:
+            only its ``DocumentPath=`` keys count; ``project_file_checked``
+            false and ``project_file_lists_sheet`` null when it could not be
+            read, e.g. no project path, no file, or an empty read),
+            ``file_deleted`` / ``file_still_on_disk``, and a ``reason`` when
+            any step fell short. ``success`` is False when any of those did,
+            and with ``save_project`` it also needs a project file that was
+            actually read. ``project_saved`` comes from the file timestamp,
+            which is only 2-second accurate, so it can read false for a save
+            that did happen moments after an earlier one; ``success`` does
+            not depend on it.
         """
         params: dict[str, Any] = {"file_path": file_path}
         if project_path:
