@@ -346,10 +346,18 @@ class SymbolCache:
                 )
                 return
             disk_mtime = source_mtime
-        data = self._load_lib(model.lib_path) or {
-            "lib_mtime": disk_mtime,
-            "components": {},
-        }
+        data = self._load_lib(model.lib_path)
+        # A file stamped for an OLDER library version must not survive the
+        # re-stamp below: keeping its other entries would certify every one
+        # of them as current for the new mtime, although only this model was
+        # re-read. MEASURED 2026-10-06: a warm-up preview re-read one sheet's
+        # symbols after a SchLib save, the stamp moved to the new mtime, and
+        # TPS25730ADREFR kept its pre-rework pin map (16 pins one slot off) -
+        # an executed sheet came out with six nets on the wrong pins while
+        # the offline checks, reading the same stale cache, passed.
+        if data is None or data.get("lib_mtime") is None or abs(
+                data["lib_mtime"] - disk_mtime) >= 0.001:
+            data = {"lib_mtime": disk_mtime, "components": {}}
         data["lib_mtime"] = disk_mtime
         data["components"][model.lib_ref] = model.to_dict()
         self._memory[model.lib_path] = data
