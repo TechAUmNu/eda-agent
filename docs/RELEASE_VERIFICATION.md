@@ -1937,14 +1937,21 @@ Still open after this run:
     `parked_elsewhere: true`, `target_current_during_removal: false`,
     and the pad ABSENT from the saved file. Settles "parking is enough
     for a disk-loaded primitive".
-  * (b) add a pad with `lib_add_footprint_pads` (session-created), then
-    `lib_delete_footprint_pads(reload_first=false)` with the default
-    park, `lib_save_library`, `lib_read_pcblib_file`. Settles whether
-    parking alone is enough for a SESSION-CREATED primitive, which is
-    the case the no-reload default (and the no-reload 3D replace) now
-    relies on. If the pad comes back, being added this session is a
-    second sufficient cause and no-reload removals must be refused or
-    warned.
+  * (b) MEASURED 2026-10-06 (Altium 26.10.1.5, bridge 2026.10.04.11,
+    carrier-local b36ebd4), PASS: fresh footprint ZZ_PARK_TEST created
+    (so it was current), three pads added this session, then
+    `lib_delete_footprint_pads(pads=[3], reload_first=false)` with the
+    default park -> `target_was_current: true`, `parked_elsewhere: true`,
+    `target_current_during_removal: false`, `board_still_listed: null`,
+    `marked_modified: true` (the dirty flag IS set on this path);
+    `lib_save_library` then `lib_read_pcblib_file`: pad 3 ABSENT, pads
+    1 and 2 present. So parking alone is enough for a SESSION-CREATED
+    primitive on a footprint that was current: being added this session
+    is NOT a second cause, and the 2026-10-04 resurrection was the
+    current-footprint mechanism all along. Consequence: `reload_first`
+    (and its save-every-pending-edit side effect) is no longer needed
+    for correctness on the parked paths; it can become opt-in. (a) is
+    implied by (b) but still unrun as a separate case.
 * The handlers park BEFORE they validate: `Lib_DeleteFootprintPrimitives`
   before the `layer` check (INVALID_LAYER), `Lib_DeleteFootprintPads`
   before resolving the pad selectors. A delete they then refuse still
