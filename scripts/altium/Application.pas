@@ -648,11 +648,33 @@ End;
 { Command Handler - must be at end so all functions are declared               }
 {..............................................................................}
 
-Function App_SaveAll(RequestId : String) : String;
+{ WHICH DOCUMENTS A SAVE-ALL WRITES, and why the default changed.             }
+{                                                                              }
+{ This used to write every open document, modified or not, because the flag   }
+{ is not trusted (SaveOneDocByDocRef). MEASURED 2026-10-06 on AD 26.10.1.5:   }
+{ with nothing edited it reported documents_seen 45, attempted 29, written 29. }
+{ The write of carrier.SchLib moved that file's mtime, the key of the offline  }
+{ symbol cache, and broke a parallel tuning run that was reading it; every     }
+{ SchDoc came back with fresh parameter UniqueIDs, which is pure git churn.    }
+{                                                                              }
+{ Default now: a LIBRARY (.SchLib / .PcbLib) that reads unmodified is left     }
+{ alone. include_libraries=true restores the old write-everything pass.        }
+{ Libraries have lib_save_library for a deliberate save of one file, and that  }
+{ is the route for the edit paths whose modified flag does not propagate.      }
+{ only_modified=true leaves an unmodified SHEET alone too; it is opt-in        }
+{ because a sheet edit that did not raise the flag would be lost by it.        }
+{ Everything skipped is listed in skipped_unmodified, so a skip never reads    }
+{ as a write. The flags go back to False on every exit, because SaveAllDirty   }
+{ is shared with callers that must keep writing everything.                    }
+Function App_SaveAll(Params : String; RequestId : String) : String;
 Var
-    StillDirty, Seen, Written : Integer;
+    StillDirty, Seen, Written, P : Integer;
     Paths, AgesBefore, AgesAfter : String;
+    Remaining, OnePath, SkippedJson, Policy : String;
+    IncludeLibs, OnlyModified : Boolean;
 Begin
+    IncludeLibs := LowerCase(ExtractJsonValue(Params, 'include_libraries')) = 'true';
+    OnlyModified := LowerCase(ExtractJsonValue(Params, 'only_modified')) = 'true';
     Try
         // Iterate every IServerDocument the editor has open and DoFileSave
         // each modified one. This bypasses WorkspaceManager:SaveAll, which
@@ -670,27 +692,66 @@ Begin
         AgesBefore := AgesForPaths(Paths);
 
         SaveAttempts := 0;
+        SaveSkipped := 0;
+        SaveSkippedPaths := '';
+        SaveSkipCleanLibs := Not IncludeLibs;
+        SaveSkipCleanSheets := OnlyModified;
         SaveAllDirty(0);
+        SaveSkipCleanLibs := False;
+        SaveSkipCleanSheets := False;
 
         AgesAfter := AgesForPaths(Paths);
         Written := CountChangedAges(AgesBefore, AgesAfter);
         StillDirty := CountDirtyDocuments(0);
 
+        SkippedJson := '';
+        Remaining := SaveSkippedPaths;
+        While Remaining <> '' Do
+        Begin
+            P := Pos('|', Remaining);
+            If P > 0 Then
+            Begin
+                OnePath := Copy(Remaining, 1, P - 1);
+                Remaining := Copy(Remaining, P + 1, Length(Remaining) - P);
+            End
+            Else
+            Begin
+                OnePath := Remaining;
+                Remaining := '';
+            End;
+            If SkippedJson <> '' Then SkippedJson := SkippedJson + ',';
+            SkippedJson := SkippedJson + '"' + EscapeJsonString(OnePath) + '"';
+        End;
+        Policy := ',"include_libraries":' + BoolToJsonStr(IncludeLibs)
+            + ',"only_modified":' + BoolToJsonStr(OnlyModified)
+            + ',"documents_skipped":' + IntToStr(SaveSkipped)
+            + ',"skipped_unmodified":[' + SkippedJson + ']';
+
         If Seen = 0 Then
             Result := BuildSuccessResponse(RequestId,
                 '{"saved":false,"documents_seen":0,"documents_written":0'
-                + ',"still_dirty":' + IntToStr(StillDirty)
+                + ',"still_dirty":' + IntToStr(StillDirty) + Policy
                 + ',"reason":"no documents were enumerated, so nothing was '
                 + 'even attempted. This is NOT an empty-and-clean workspace: '
                 + 'the walk that saves and the count that verifies share a '
                 + 'workspace lookup, so when it comes back empty both report '
                 + 'zero. Use proj_save, which resolves the focused project '
                 + 'directly."}')
+        Else If (SaveAttempts = 0) And (SaveSkipped > 0) Then
+            Result := BuildSuccessResponse(RequestId,
+                '{"saved":true,"documents_seen":' + IntToStr(Seen)
+                + ',"documents_attempted":0,"documents_written":0'
+                + ',"still_dirty":' + IntToStr(StillDirty) + Policy
+                + ',"note":"every open document read unmodified and the '
+                + 'policy left it alone (see skipped_unmodified). An edit '
+                + 'whose modified flag did not propagate is NOT on disk: '
+                + 'save a library with lib_save_library, or pass '
+                + 'include_libraries / drop only_modified to write them."}')
         Else If SaveAttempts = 0 Then
             Result := BuildSuccessResponse(RequestId,
                 '{"saved":true,"documents_seen":' + IntToStr(Seen)
                 + ',"documents_attempted":0,"documents_written":0'
-                + ',"still_dirty":' + IntToStr(StillDirty)
+                + ',"still_dirty":' + IntToStr(StillDirty) + Policy
                 + ',"note":"nothing was open to save. Only a document open '
                 + 'in the editor has an IServerDocument; the rest are project '
                 + 'members that cannot be holding unsaved edits. Writing '
@@ -700,7 +761,7 @@ Begin
                 '{"saved":false,"documents_seen":' + IntToStr(Seen)
                 + ',"documents_attempted":' + IntToStr(SaveAttempts)
                 + ',"documents_written":0'
-                + ',"still_dirty":' + IntToStr(StillDirty)
+                + ',"still_dirty":' + IntToStr(StillDirty) + Policy
                 + ',"reason":"every open document was written to and not one '
                 + 'got newer on disk. Altium declines a save while a command '
                 + 'is active in the editor, and an abandoned transaction '
@@ -711,10 +772,13 @@ Begin
                 '{"saved":true,"documents_seen":' + IntToStr(Seen)
                 + ',"documents_attempted":' + IntToStr(SaveAttempts)
                 + ',"documents_written":' + IntToStr(Written)
-                + ',"still_dirty":' + IntToStr(StillDirty) + '}');
+                + ',"still_dirty":' + IntToStr(StillDirty) + Policy + '}');
     Except
+        SaveSkipCleanLibs := False;
+        SaveSkipCleanSheets := False;
         Result := BuildErrorResponse(RequestId, 'SAVE_FAILED', 'SaveAllDirty raised an exception');
     End;
+End;
 End;
 
 {..............................................................................}
@@ -853,7 +917,7 @@ Begin
         'execute_menu':        Result := App_ExecuteMenu(Params, RequestId);
         'get_clipboard_text':  Result := App_GetClipboardText(RequestId);
         'create_document':     Result := App_CreateDocument(Params, RequestId);
-        'save_all':            Result := App_SaveAll(RequestId);
+        'save_all':            Result := App_SaveAll(Params, RequestId);
         'diag_workspace':      Result := App_DiagWorkspace(Params, RequestId);
         'stop_server':         Begin SaveAllDirty(0); Running := False; Result := BuildSuccessResponse(RequestId, '{"stopped":true}'); End;
     Else

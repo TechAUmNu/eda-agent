@@ -194,7 +194,13 @@ def test_every_step_that_writes_a_property_is_ranked():
 #
 # Step 29 (reload a sheet) saves, closes and reopens with method calls
 # only, like step 21; it writes no property.
-_STEPS_WITHOUT_A_PROPERTY = {"0", "1", "8", "9", "10", "19", "21", "29"}
+#
+# Step 32 (sheet delete, save-all policy) is method calls and one flag READ
+# only: DM_RemoveSourceDocument, Client.CloseDocument, SetModified +
+# DoFileSave on the project document (all shipped), and ServerDoc.Modified
+# read inside the save pass. Like 21 and 29 it writes no property; its risk
+# is the order of those calls, which the step's read-backs check.
+_STEPS_WITHOUT_A_PROPERTY = {"0", "1", "8", "9", "10", "19", "21", "29", "32"}
 
 
 def _step_headings() -> list[tuple[str, str]]:

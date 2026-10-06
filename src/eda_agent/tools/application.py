@@ -375,7 +375,10 @@ def register_application_tools(mcp):
             }
 
     @mcp.tool()
-    async def app_save_all() -> dict[str, Any]:
+    async def app_save_all(
+        include_libraries: bool = False,
+        only_modified: bool = False,
+    ) -> dict[str, Any]:
         """Flush every dirty Altium document to disk.
 
         Mutation tools (pcb_place_tracks, move_component, modify_objects, ...)
@@ -401,13 +404,48 @@ def register_application_tools(mcp):
         and ``saved`` is false when anything is. If that happens, run
         ``app_exit_active_command`` and retry.
 
+        LIBRARIES ARE LEFT ALONE UNLESS THEY READ MODIFIED (the default).
+        The modified flag is not trusted, so this used to write EVERY open
+        document whether edited or not. MEASURED 2026-10-06 with nothing
+        edited: 45 seen, 29 attempted, 29 written. Writing a .SchLib moves
+        its mtime, which is the key of the offline symbol cache, so a
+        no-op save invalidated a parallel tuning run; every SchDoc also
+        came back with fresh parameter UniqueIDs.
+
+        THE TRADE-OFF: some library edit paths do not raise the modified
+        flag (``lib_add_footprint_tracks`` and ``lib_modify_footprint_pads``
+        have read modified:false after real edits). With the default, such
+        an edit is NOT written by this call. Save a library deliberately
+        with ``lib_save_library``, which writes that one file and checks
+        it reached disk, or pass ``include_libraries=True`` for the old
+        write-everything behaviour. Every document left alone is listed in
+        ``skipped_unmodified``, so a skip never reads as a write.
+
+        Args:
+            include_libraries: also write .SchLib / .PcbLib documents that
+                read unmodified (the pre-2026-10-06 behaviour). Default
+                False.
+            only_modified: also leave alone SHEETS and boards that read
+                unmodified. Opt-in, because an edit whose flag did not
+                propagate would not be written; it stops the UniqueID churn
+                on sheets nobody touched.
+
         Returns:
-            Dict with ``saved``, ``still_dirty``, and a ``reason`` when
-            documents remain unsaved.
+            Dict with ``saved``, ``documents_seen``, ``documents_attempted``,
+            ``documents_written`` (measured by file timestamp),
+            ``still_dirty``, ``include_libraries``, ``only_modified``,
+            ``documents_skipped`` and ``skipped_unmodified`` (paths), and a
+            ``reason`` / ``note`` when documents remain unsaved or nothing
+            was written.
         """
+        params: dict[str, Any] = {}
+        if include_libraries:
+            params["include_libraries"] = "true"
+        if only_modified:
+            params["only_modified"] = "true"
         bridge = get_bridge()
         result = await bridge.send_command_async(
-            "application.save_all", timeout=60.0
+            "application.save_all", params, timeout=60.0
         )
         return result
 
@@ -530,8 +568,14 @@ def register_application_tools(mcp):
         save_error = ""
         if save_first:
             try:
+                # include_libraries: a checkpoint is a safety net, and a
+                # library edit whose modified flag never propagated would
+                # otherwise be left out of the snapshot. app_save_all's
+                # default skips unmodified libraries; this keeps the old
+                # write-everything flush for the one caller that needs it.
                 await get_bridge().send_command_async(
-                    "application.save_all", timeout=60.0
+                    "application.save_all", {"include_libraries": "true"},
+                    timeout=60.0
                 )
                 saved = True
             except Exception as exc:  # noqa: BLE001 - reported, not raised

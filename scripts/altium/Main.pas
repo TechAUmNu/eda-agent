@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.10.04.11';
+    SCRIPT_VERSION = '2026.10.06.01';
 
     // How far a linked 3D body's box may sit from its footprint's pads (or
     // origin, with no pads) before lib_link_3d_model reports placement_ok
@@ -85,6 +85,19 @@ Var
     { Documents the last save pass actually reached. See
       SaveOneDocByDocRef. Reset by App_SaveAll before each pass. }
     SaveAttempts : Integer;
+    { What a save pass may LEAVE ALONE. Both False means every open document
+      is written whether it reads modified or not, which is what every caller
+      except App_SaveAll gets. App_SaveAll sets them for its own pass from
+      include_libraries / only_modified and puts them back to False before it
+      returns. SaveSkipped / SaveSkippedPaths record what the pass left alone,
+      so a skip is reported rather than looking like a write. The paths are
+      pipe-separated: EscapeJsonString is in Utils.pas, which builds AFTER
+      this file, so App_SaveAll makes the JSON. See SaveOneDocByDocRef for
+      the measurement that made skipping necessary. }
+    SaveSkipCleanLibs : Boolean;
+    SaveSkipCleanSheets : Boolean;
+    SaveSkipped : Integer;
+    SaveSkippedPaths : String;
     LastCompiledProject : IProject;
 
     { Silent cast-failure counter, incremented every time a defensive       }
@@ -635,6 +648,8 @@ End;
 Procedure SaveOneDocByDocRef(Doc : IDocument);
 Var
     ServerDoc : IServerDocument;
+    WasModified, IsLib, Skip : Boolean;
+    Ext : String;
 Begin
     If Doc = Nil Then Exit;
     Try
@@ -646,13 +661,48 @@ Begin
         ServerDoc := Client.GetDocumentByPath(Doc.DM_FullPath);
         { Unconditional flush, Modified flag does not always propagate from   }
         { ProcessControl.PostProcess to the IServerDocument layer in newer    }
-        { Altium builds, so checking it can leave docs unsaved. DoFileSave    }
-        { on a clean doc is a fast no-op.                                     }
+        { Altium builds, so checking it can leave docs unsaved.               }
+        {                                                                     }
+        { THE FLUSH IS NOT A NO-OP ON A CLEAN DOCUMENT. SetModified(True)     }
+        { makes it a real write. MEASURED 2026-10-06 (AD 26.10.1.5): with     }
+        { nothing edited, app_save_all saw 45 documents, attempted 29 and     }
+        { wrote 29. Writing carrier.SchLib moved its mtime, which is the key  }
+        { of the offline symbol cache, and invalidated a parallel tuning run; }
+        { every SchDoc came back with fresh parameter UniqueIDs.              }
+        {                                                                     }
+        { So a pass may now skip a document that reads unmodified, but ONLY   }
+        { when its caller asked (SaveSkipCleanLibs / SaveSkipCleanSheets).    }
+        { A modified read is trusted; an unreadable flag counts as modified,  }
+        { so doubt always writes. The cost is the edit paths whose flag does  }
+        { not propagate (lib_add_footprint_tracks, lib_modify_footprint_pads  }
+        { have read modified:false): a skipped library loses those edits      }
+        { unless lib_save_library writes it. That is the trade, and it is     }
+        { the caller's to make.                                               }
         If ServerDoc <> Nil Then
         Begin
-            SaveAttempts := SaveAttempts + 1;
-            Try ServerDoc.SetModified(True); Except End;
-            Try ServerDoc.DoFileSave(''); Except End;
+            WasModified := False;
+            Try WasModified := ServerDoc.Modified; Except WasModified := True; End;
+            Ext := '';
+            Try Ext := UpperCase(ExtractFileExt(Doc.DM_FullPath)); Except Ext := ''; End;
+            IsLib := (Ext = '.SCHLIB') Or (Ext = '.PCBLIB');
+            Skip := False;
+            If Not WasModified Then
+            Begin
+                If IsLib Then Skip := SaveSkipCleanLibs
+                Else Skip := SaveSkipCleanSheets;
+            End;
+            If Skip Then
+            Begin
+                SaveSkipped := SaveSkipped + 1;
+                If SaveSkippedPaths <> '' Then SaveSkippedPaths := SaveSkippedPaths + '|';
+                SaveSkippedPaths := SaveSkippedPaths + Doc.DM_FullPath;
+            End
+            Else
+            Begin
+                SaveAttempts := SaveAttempts + 1;
+                Try ServerDoc.SetModified(True); Except End;
+                Try ServerDoc.DoFileSave(''); Except End;
+            End;
         End;
     Except End;
 End;

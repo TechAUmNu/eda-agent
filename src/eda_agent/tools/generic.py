@@ -1340,22 +1340,67 @@ def register_generic_tools(mcp):
     @mcp.tool()
     async def proj_delete_sheet(
         file_path: str,
+        project_path: str = "",
+        discard: bool = False,
+        save_project: bool = True,
+        delete_file: bool = False,
     ) -> dict[str, Any]:
-        """Remove a schematic sheet from the focused project.
+        """Remove a schematic sheet from a project, close it, and save the project.
 
-        Safety check: refuses to remove the last remaining schematic sheet.
-        The file is closed and removed from the project but not deleted from disk.
+        Safety check: refuses to remove the last remaining schematic sheet,
+        and refuses a sheet that reads modified (unless ``discard``) BEFORE
+        changing anything.
+
+        THIS USED TO CLOSE THE WRONG DOCUMENT AND REMOVE NOTHING. Measured
+        2026-10-06: asked to delete STUBS.SchDoc while another sheet had the
+        focus, it replied success, CLOSED THE FOCUSED SHEET instead, and left
+        STUBS a loaded project member, so the next ``app_save_all`` wrote it
+        back to disk. It went through workspace-manager processes that act on
+        the focused document whatever path they are given, and never looked
+        again. It now removes membership through the project API and
+        re-reads it, closes the named document by its own handle (checking
+        its FileName is the member's path, so no other document can go), and
+        writes the project file and reads the file BACK to confirm the sheet
+        is no longer listed.
 
         Args:
-            file_path: Full path to the .SchDoc file to remove
+            file_path: Full path to the .SchDoc file to remove.
+            project_path: The project to remove it from. Default: the
+                focused project.
+            discard: Remove and close even when the sheet reads modified,
+                LOSING its unsaved edits. Never for work.
+            save_project: Write the project file afterwards so the removal
+                survives a reload (default True). With False the sheet is
+                removed in memory only; ``proj_save`` makes it stick.
+            delete_file: Also delete the .SchDoc from disk. Done ONLY after
+                the sheet is confirmed closed and the project file on disk no
+                longer names it, so the project is never left pointing at a
+                missing file. Default False: the file stays on disk.
 
         Returns:
-            Dictionary confirming removal
+            ``success`` plus one read-back per step: ``removed`` /
+            ``still_member`` (membership re-read), ``was_loaded`` /
+            ``closed`` (looked up again after the close),
+            ``previously_focused`` / ``previously_focused_still_open`` (the
+            document that had the focus, which must still be loaded),
+            ``project_saved`` / ``project_file_lists_sheet`` (the project
+            file read off disk), ``file_deleted`` / ``file_still_on_disk``,
+            and a ``reason`` when any step fell short. ``success`` is False
+            when any of those did.
         """
+        params: dict[str, Any] = {"file_path": file_path}
+        if project_path:
+            params["project_path"] = project_path
+        if discard:
+            params["discard"] = "true"
+        if not save_project:
+            params["save_project"] = "false"
+        if delete_file:
+            params["delete_file"] = "true"
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "generic.delete_sheet",
-            {"file_path": file_path},
+            params,
         )
         return result
 

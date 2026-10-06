@@ -1,4 +1,4 @@
-# Release verification: 2026.10.04.11
+# Release verification: 2026.10.06.01
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -266,7 +266,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.04.11`, `version_match` =
+Expect `altium_script_version` = `2026.10.06.01`, `version_match` =
 `true`, and `mcp_server_version` = `0.6.1`.
 
 Those are two different versions and they fail differently.
@@ -1721,7 +1721,8 @@ Run in this order on a scratch footprint (`<lib>` = the carrier library
 or a scratch copy, `<fp>` = a new throwaway footprint). Confirm `app_ping`
 answers after each call.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.04.11`.
+1. **Version.** `app_ping`: `altium_script_version` = the version in
+   step 0 (this step ran live against the previous build).
 
 2. **The reader on its own.** `lib_read_pcblib_file(<lib>, <fp>)` before
    anything else (after creating `<fp>` and one `lib_save_library`):
@@ -1867,7 +1868,7 @@ FOLLOW-UPS RECORDED HERE, not fixed by this change:
 
 ### Results 2026-10-05
 
-Run on Altium 26.10.1.5, bridge `2026.10.04.11`, library
+Run on Altium 26.10.1.5, the previous bridge build (the 2026-10-04 SCRIPT_VERSION), library
 `carrier.PcbLib`, footprint `ZZ_BRIDGE_TEST`. Item numbers are the ones
 that run used; the list above in brackets where it differs.
 
@@ -1937,7 +1938,7 @@ Still open after this run:
     `parked_elsewhere: true`, `target_current_during_removal: false`,
     and the pad ABSENT from the saved file. Settles "parking is enough
     for a disk-loaded primitive".
-  * (b) MEASURED 2026-10-06 (Altium 26.10.1.5, bridge 2026.10.04.11,
+  * (b) MEASURED 2026-10-06 (Altium 26.10.1.5, the previous bridge build,
     carrier-local b36ebd4), PASS: fresh footprint ZZ_PARK_TEST created
     (so it was current), three pads added this session, then
     `lib_delete_footprint_pads(pads=[3], reload_first=false)` with the
@@ -1972,6 +1973,126 @@ Still open after this run:
   `persisted.layer_ok: true`, and `lib_read_pcblib_file` showing
   `Mechanical13` on both bodies. A library that renames that layer gives
   `layer_ok: null` (the file names layers canonically), by design.
+
+---
+
+## 32. A sheet delete that removes the sheet, and a save-all that leaves libraries alone (not yet run live)
+
+Two fixes from the live session of 2026-10-06 (Altium 26.10.1.5, the previous bridge build
+(the 2026-10-04 SCRIPT_VERSION), the multiviewer carrier project). Pascal risk is low:
+every Altium call is already shipped and has run live elsewhere.
+`Gen_DeleteSheet` now uses `Project.DM_RemoveSourceDocument` and the
+membership re-read (`Proj_RemoveDocument`'s), `Client.GetDocumentByPath` +
+`Client.CloseDocument` + a second lookup (`App_CloseDocument`'s, step 21),
+`ServerDoc.FileName` (`App_SetActiveDocument`'s), and `SetModified` +
+`DoFileSave` on the project's own server document (`SaveProjectMembers`'s).
+The save-all policy adds one read of `ServerDoc.Modified` inside
+`SaveOneDocByDocRef`, already read by `DocIsModified`. `FileAge`,
+`ReadFileContent`, `FileExists` and `DeleteFile` are all shipped.
+
+What was measured, so the read-backs below can be judged:
+
+* **proj_delete_sheet.** `file_path=...STUBS.SchDoc` with
+  PWR_IN_BARREL.SchDoc FOCUSED replied `{success: true, removed: STUBS}`,
+  but it CLOSED PWR_IN_BARREL (the next `app_set_active_document` on it
+  said `Document not loaded`), STUBS stayed a project member after
+  `WorkspaceManager:SaveObject ObjectKind=FocusedProject` and stayed
+  loaded, and the next `app_save_all` wrote STUBS back to disk. With STUBS
+  focused first: success again, still a member. The old handler ran
+  `WorkspaceManager:CloseObject` and `RemoveObjectFromProject` with
+  `ObjectKind=Document|FileName=<path>` and never looked again;
+  `CloseObject` acted on the focused document. What worked every time:
+  `proj_remove_document`, then `app_close_document`, then a project save.
+  That is the route the handler takes now.
+* **app_save_all.** With nothing edited it answered `documents_seen 45,
+  documents_attempted 29, documents_written 29, still_dirty 0`. The write
+  of carrier.SchLib moved its mtime, which keys the offline symbol cache,
+  and broke a parallel tuning run; every SchDoc got fresh parameter
+  UniqueIDs (git churn). It forces the write (`SetModified(True)` then
+  `DoFileSave`) because the modified flag is unreliable on some edit paths
+  (`lib_add_footprint_tracks`, `lib_modify_footprint_pads` read
+  `modified: false` after real edits). Default now: a library that reads
+  unmodified is skipped; `include_libraries=true` restores the old pass.
+
+Work on a COPY of a project (or a scratch project) with at least three
+sheets, `A`, `B` and `STUBS`, all saved and loaded, plus one open
+library `<lib>` (a scratch copy) that has not been edited. Confirm
+`app_ping` answers after each call.
+
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.06.01`.
+
+2. **The default save-all leaves an unedited library alone.** Note
+   `<lib>`'s mtime. `app_save_all` with no arguments. Expect
+   `include_libraries: false`, `only_modified: false`, `<lib>` listed in
+   `skipped_unmodified`, `documents_skipped` at least 1, and `<lib>`'s
+   mtime UNCHANGED on disk. The sheets are still written (that is the old
+   behaviour for sheets, and `documents_written` counts them).
+
+3. **include_libraries restores the old pass.** `app_save_all
+   include_libraries=true`. Expect `skipped_unmodified: []` for
+   libraries, `documents_skipped: 0`, and `<lib>`'s mtime NEWER.
+
+4. **A library that reads modified is still written by default.** Make
+   an edit that is known to raise the flag (`lib_set_component_description`
+   on a throwaway symbol in `<lib>`, then `app_list_documents` shows
+   `<lib>` `modified: true`). `app_save_all`: `<lib>` is NOT in
+   `skipped_unmodified` and its mtime moves. If the flag read false
+   instead, record which edit path that was: it is the trade-off this
+   default makes, and `lib_save_library` is the route for it.
+
+5. **only_modified leaves clean sheets alone.** With nothing edited,
+   `app_save_all only_modified=true`. Expect `saved: true`,
+   `documents_attempted: 0`, every open document in `skipped_unmodified`,
+   the `note` saying the policy left them alone, and no SchDoc mtime
+   changed (`git status` on a versioned copy shows no churn).
+
+6. **The delete removes the NAMED sheet while another is focused.**
+   Focus sheet `A` (`app_set_active_document`). Then
+   `proj_delete_sheet file_path=<STUBS full path>`. Expect
+   `success: true`, `removed: true`, `still_member: false`,
+   `was_loaded: true`, `closed: true`, `previously_focused` = `A`'s path,
+   `previously_focused_still_open: true`, `project_saved: true`,
+   `project_file_lists_sheet: false`, `file_deleted: false`,
+   `file_still_on_disk: true`. Then confirm independently:
+   `app_set_active_document` on `A` SUCCEEDS (the old handler closed it);
+   `proj_list_documents` no longer lists STUBS; `app_list_documents` does
+   not show STUBS loaded; the .PrjPcb on disk has no `DocumentPath=` line
+   naming STUBS.
+
+7. **The removal survives a save-all.** Note STUBS.SchDoc's mtime.
+   `app_save_all`. STUBS.SchDoc's mtime is UNCHANGED (the old run wrote
+   it back because it was still loaded and a member).
+
+8. **Refusals change nothing.** Make an edit on `B` so it reads modified,
+   then `proj_delete_sheet file_path=<B>`: expect error `MODIFIED`, and
+   `B` still a member and still loaded. `proj_delete_sheet` on a path
+   that is not a member: `NOT_FOUND`. On a project member that is not a
+   sheet (the .PcbDoc, if any): `NOT_A_SHEET`. Reduce a scratch project
+   to one sheet and delete it: `SAFETY_CHECK`.
+
+9. **delete_file only after the project lets go.** Re-add a throwaway
+   sheet `ZZ.SchDoc` (`proj_add_sheet name=ZZ`), then
+   `proj_delete_sheet file_path=<ZZ> delete_file=true`. Expect
+   `project_file_lists_sheet: false`, `file_deleted: true`,
+   `file_still_on_disk: false`, and the file gone from the folder.
+
+10. **save_project=false leaves the file alone.** Add another throwaway
+    sheet and delete it with `save_project=false`: expect
+    `project_saved: false` and `success: true` (membership removed in
+    memory, sheet closed); `proj_list_documents` does not list it, but
+    the .PrjPcb on disk still names it until `proj_save`.
+
+If step 6 answers `project_saved: false` with
+`project_file_lists_sheet: true`, the project document's `DoFileSave`
+did not write the .PrjPcb on this build: record it, and the next fix is
+the project-save route, not the removal (the reply already says
+`removed: true` from the membership re-read).
+
+Not changed, and worth knowing: `application.stop_server` (which
+`app_detach` sends) and `proj_save`, `proj_close` still write every open
+member whether modified or not, as before. `app_checkpoint` passes
+`include_libraries=true`, so a checkpoint still captures library edits
+whose flag never propagated.
 
 ---
 

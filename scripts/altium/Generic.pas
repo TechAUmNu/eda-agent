@@ -3049,26 +3049,98 @@ Begin
 End;
 
 {..............................................................................}
-{ Delete (remove) a schematic sheet from the focused project                 }
+{ Delete (remove) a schematic sheet from a project.                           }
 { Safety check: will not remove the last remaining sheet.                    }
+{                                                                              }
+{ THIS USED TO CLOSE THE WRONG DOCUMENT AND REMOVE NOTHING, AND SAY SUCCESS.   }
+{ It ran WorkspaceManager:CloseObject then RemoveObjectFromProject, both with  }
+{ ObjectKind=Document|FileName=<path>, and never looked again. MEASURED        }
+{ 2026-10-06 (AD 26.10.1.5, bridge 2026.10.04.11): asked to delete STUBS while }
+{ PWR_IN_BARREL was focused, it replied success and removed:STUBS, but it had  }
+{ CLOSED PWR_IN_BARREL (a later set_active said "Document not loaded"), STUBS  }
+{ was still a member after a project save and still loaded, and the next       }
+{ save-all wrote STUBS back to disk. Focusing STUBS first: success again,      }
+{ still a member. CloseObject acts on the FOCUSED document whatever FileName   }
+{ says, the same pattern RELEASE_VERIFICATION records for a project close.     }
+{                                                                              }
+{ What worked every time that day is what this does now: membership through    }
+{ DM_RemoveSourceDocument with a re-read (Proj_RemoveDocument's route), then   }
+{ the NAMED document closed through its own IServerDocument with a lookup      }
+{ afterwards (App_CloseDocument's route), then the project file written and    }
+{ READ BACK. Every one of those is reported, so a step that did not happen     }
+{ cannot hide behind a success from the step before it.                        }
+{                                                                              }
+{ Order matters. A modified sheet is refused BEFORE anything changes, so a     }
+{ refusal leaves the project as it was found. The close happens only after     }
+{ the removal is confirmed, and only on a document whose FileName is the       }
+{ member's path, so no other document can be the one that goes. The file is   }
+{ deleted (opt-in, delete_file) only once the project file on disk no longer   }
+{ names it, so the project is never left pointing at a missing file.           }
 {..............................................................................}
+
+Function Gen_SheetIsMember(Project : IProject; MemberPath : String) : Boolean;
+Var
+    I : Integer;
+    Doc : IDocument;
+    P : String;
+Begin
+    Result := False;
+    If Project = Nil Then Exit;
+    For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    Begin
+        Doc := Project.DM_LogicalDocuments(I);
+        If Doc = Nil Then Continue;
+        P := '';
+        Try P := DocFullPath(Doc); Except P := ''; End;
+        If UpperCase(P) = UpperCase(MemberPath) Then
+            Result := True;
+    End;
+End;
+
+{ Does the project FILE ON DISK still name this document. A .PrjPcb lists      }
+{ members as DocumentPath=<path relative to the project>, so the file name is  }
+{ looked for right after a '=' or a '\' and right before the line break.       }
+{ Same-named files in two folders of one project would both match; that reads  }
+{ as "still listed", the safe direction, because it blocks delete_file.        }
+Function Gen_ProjectFileNames(ProjectPath : String; MemberPath : String) : Boolean;
+Var
+    Content, Name : String;
+Begin
+    Result := False;
+    If (ProjectPath = '') Or (Not FileExists(ProjectPath)) Then Exit;
+    Content := UpperCase(ReadFileContent(ProjectPath));
+    Name := UpperCase(ExtractFileName(MemberPath));
+    If Name = '' Then Exit;
+    If Pos('=' + Name + #13, Content) > 0 Then Result := True;
+    If Pos('\' + Name + #13, Content) > 0 Then Result := True;
+    If Pos('=' + Name + #10, Content) > 0 Then Result := True;
+    If Pos('\' + Name + #10, Content) > 0 Then Result := True;
+End;
 
 Function Gen_DeleteSheet(Params : String; RequestId : String) : String;
 Var
-    FilePath : String;
+    FilePath, ProjectPath, MemberPath, DocPath, FocusedBefore, ProjFile : String;
+    Why, Data : String;
     Workspace : IWorkspace;
     Project : IProject;
-    Doc : IDocument;
-    I, SchCount : Integer;
-    Found : Boolean;
+    Doc, FocusedDoc : IDocument;
+    ServerDoc, Again, ProjDoc : IServerDocument;
+    I, SchCount, AgeBefore, AgeAfter : Integer;
+    Found, FoundOther, Discard, SaveProject, DeleteIt : Boolean;
+    WasLoaded, WasModified, StillMember, Closed, NameMatches : Boolean;
+    FocusedStillOpen, ProjectSaved, ListedOnDisk, FileStillOnDisk, Deleted : Boolean;
+    Success : Boolean;
 Begin
     FilePath := ExtractJsonValue(Params, 'file_path');
+    ProjectPath := ExtractJsonValue(Params, 'project_path');
+    Discard := LowerCase(ExtractJsonValue(Params, 'discard')) = 'true';
+    SaveProject := LowerCase(ExtractJsonValue(Params, 'save_project')) <> 'false';
+    DeleteIt := LowerCase(ExtractJsonValue(Params, 'delete_file')) = 'true';
     If FilePath = '' Then
     Begin
         Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'file_path parameter is required');
         Exit;
     End;
-
 
     Workspace := GetWorkspace;
     If Workspace = Nil Then
@@ -3077,26 +3149,56 @@ Begin
         Exit;
     End;
 
-    Project := Workspace.DM_FocusedProject;
+    If ProjectPath <> '' Then
+        Project := FindProjectByPath(Workspace, ProjectPath)
+    Else
+        Project := Workspace.DM_FocusedProject;
     If Project = Nil Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No focused project');
+        Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No focused project, or project_path is not open');
         Exit;
     End;
+    ProjFile := '';
+    Try ProjFile := Project.DM_ProjectFullPath; Except ProjFile := ''; End;
 
-    // Count schematic documents and verify the target exists
+    { What has the focus now, so the reply can say it is still open. That is  }
+    { the document the old CloseObject took instead of the one named.         }
+    FocusedBefore := '';
+    FocusedDoc := Nil;
+    Try FocusedDoc := Workspace.DM_FocusedDocument; Except FocusedDoc := Nil; End;
+    If FocusedDoc <> Nil Then
+        Try FocusedBefore := DocFullPath(FocusedDoc); Except FocusedBefore := ''; End;
+
+    // Count schematic documents and find the target by its full path
     SchCount := 0;
     Found := False;
+    FoundOther := False;
+    MemberPath := '';
     For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
     Begin
         Doc := Project.DM_LogicalDocuments(I);
         If Doc = Nil Then Continue;
+        DocPath := '';
+        Try DocPath := DocFullPath(Doc); Except DocPath := ''; End;
         If Doc.DM_DocumentKind = 'SCH' Then
         Begin
             Inc(SchCount);
-            If SameText(Doc.DM_FullPath, FilePath) Then
+            If UpperCase(DocPath) = UpperCase(FilePath) Then
+            Begin
                 Found := True;
-        End;
+                MemberPath := DocPath;
+            End;
+        End
+        Else If UpperCase(DocPath) = UpperCase(FilePath) Then
+            FoundOther := True;
+    End;
+
+    If FoundOther Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_A_SHEET',
+            'That project member is not a schematic sheet: ' + FilePath
+            + '. proj_remove_document removes any kind of member.');
+        Exit;
     End;
 
     If Not Found Then
@@ -3113,20 +3215,135 @@ Begin
         Exit;
     End;
 
-    // Close the document first
-    ResetParameters;
-    AddStringParameter('ObjectKind', 'Document');
-    AddStringParameter('FileName', FilePath);
-    RunProcess('WorkspaceManager:CloseObject');
+    { Refuse a modified sheet BEFORE changing anything. Modified is a floor  }
+    { (App_CloseDocument): a True is trusted, a False may still hide edits.  }
+    ServerDoc := Nil;
+    Try ServerDoc := Client.GetDocumentByPath(MemberPath); Except ServerDoc := Nil; End;
+    WasLoaded := ServerDoc <> Nil;
+    WasModified := False;
+    If WasLoaded Then
+        Try WasModified := ServerDoc.Modified; Except WasModified := False; End;
+    If WasModified And Not Discard Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MODIFIED',
+            'The sheet has unsaved changes, so nothing was removed or closed: '
+            + MemberPath + '. Save it first, or pass discard to lose the edits.');
+        Exit;
+    End;
 
-    // Remove from project
-    ResetParameters;
-    AddStringParameter('ObjectKind', 'Document');
-    AddStringParameter('FileName', FilePath);
-    RunProcess('WorkspaceManager:RemoveObjectFromProject');
+    // Membership first, confirmed by reading it again
+    Try Project.DM_RemoveSourceDocument(MemberPath); Except End;
+    StillMember := Gen_SheetIsMember(Project, MemberPath);
+    If StillMember Then
+    Begin
+        Result := BuildSuccessResponse(RequestId,
+            '{"success":false,"removed":false,"still_member":true,"closed":false'
+            + ',"file_path":"' + EscapeJsonString(MemberPath) + '"'
+            + ',"reason":"the sheet is still a member of the project after '
+            + 'DM_RemoveSourceDocument, so nothing was closed or saved"}');
+        Exit;
+    End;
 
-    Result := BuildSuccessResponse(RequestId,
-        '{"success":true,"removed":"' + EscapeJsonString(FilePath) + '"}');
+    { Close THE NAMED DOCUMENT through its own IServerDocument, never a      }
+    { process that acts on whatever is focused. The FileName check is the    }
+    { guarantee that the document closed is the one asked for.               }
+    Closed := True;
+    Why := '';
+    ServerDoc := Nil;
+    Try ServerDoc := Client.GetDocumentByPath(MemberPath); Except ServerDoc := Nil; End;
+    If ServerDoc <> Nil Then
+    Begin
+        NameMatches := False;
+        Try NameMatches := UpperCase(ServerDoc.FileName) = UpperCase(MemberPath); Except NameMatches := False; End;
+        If Not NameMatches Then
+        Begin
+            Closed := False;
+            Why := 'the open document found for this path reports a different '
+                + 'FileName, so it was left open rather than risk closing '
+                + 'another document';
+        End
+        Else
+        Begin
+            If Discard Then
+                Try ServerDoc.SetModified(False); Except End;
+            Try Client.CloseDocument(ServerDoc); Except End;
+            Again := Nil;
+            Try Again := Client.GetDocumentByPath(MemberPath); Except Again := Nil; End;
+            Closed := Again = Nil;
+            If Not Closed Then
+                Why := 'the sheet is still loaded after Client.CloseDocument';
+        End;
+    End;
+
+    FocusedStillOpen := True;
+    If (FocusedBefore <> '') And (UpperCase(FocusedBefore) <> UpperCase(MemberPath)) Then
+    Begin
+        Again := Nil;
+        Try Again := Client.GetDocumentByPath(FocusedBefore); Except Again := Nil; End;
+        FocusedStillOpen := Again <> Nil;
+    End;
+
+    { The project FILE, so the removal survives a reload, and read back off  }
+    { disk rather than taken from the save call, which does not raise when   }
+    { the editor declines.                                                   }
+    ProjectSaved := False;
+    If SaveProject And (ProjFile <> '') Then
+    Begin
+        AgeBefore := -1;
+        Try AgeBefore := FileAge(ProjFile); Except AgeBefore := -1; End;
+        ProjDoc := Nil;
+        Try ProjDoc := Client.GetDocumentByPath(ProjFile); Except ProjDoc := Nil; End;
+        If ProjDoc <> Nil Then
+        Begin
+            Try ProjDoc.SetModified(True); Except End;
+            Try ProjDoc.DoFileSave(''); Except End;
+        End;
+        AgeAfter := -1;
+        Try AgeAfter := FileAge(ProjFile); Except AgeAfter := -1; End;
+        ProjectSaved := AgeAfter <> AgeBefore;
+    End;
+    ListedOnDisk := Gen_ProjectFileNames(ProjFile, MemberPath);
+
+    Deleted := False;
+    If DeleteIt Then
+    Begin
+        If Closed And (Not ListedOnDisk) Then
+        Begin
+            Try DeleteFile(MemberPath); Except End;
+            Deleted := Not FileExists(MemberPath);
+        End
+        Else If Why = '' Then
+            Why := 'delete_file was not done: the file is deleted only once the '
+                + 'sheet is closed and the project file on disk no longer names it';
+    End;
+    FileStillOnDisk := FileExists(MemberPath);
+
+    Success := Closed And FocusedStillOpen;
+    If SaveProject And ListedOnDisk Then Success := False;
+    If DeleteIt And Not Deleted Then Success := False;
+    If (Why = '') And SaveProject And ListedOnDisk Then
+        Why := 'the project file on disk still names the sheet after the save; '
+            + 'it is removed in memory only until the project is saved';
+    If (Why = '') And Not FocusedStillOpen Then
+        Why := 'the document that had the focus before this call is no longer '
+            + 'loaded: ' + FocusedBefore;
+
+    Data := '{"success":' + BoolToJsonStr(Success)
+        + ',"removed":true,"still_member":false'
+        + ',"file_path":"' + EscapeJsonString(MemberPath) + '"'
+        + ',"was_loaded":' + BoolToJsonStr(WasLoaded)
+        + ',"closed":' + BoolToJsonStr(Closed)
+        + ',"discarded":' + BoolToJsonStr(Discard And WasModified)
+        + ',"previously_focused":"' + EscapeJsonString(FocusedBefore) + '"'
+        + ',"previously_focused_still_open":' + BoolToJsonStr(FocusedStillOpen)
+        + ',"project_path":"' + EscapeJsonString(ProjFile) + '"'
+        + ',"project_saved":' + BoolToJsonStr(ProjectSaved)
+        + ',"project_file_lists_sheet":' + BoolToJsonStr(ListedOnDisk)
+        + ',"file_deleted":' + BoolToJsonStr(Deleted)
+        + ',"file_still_on_disk":' + BoolToJsonStr(FileStillOnDisk);
+    If Why <> '' Then
+        Data := Data + ',"reason":"' + EscapeJsonString(Why) + '"';
+    Result := BuildSuccessResponse(RequestId, Data + '}');
 End;
 
 {..............................................................................}

@@ -1517,6 +1517,12 @@ Begin
     PumpFinalised := False;
     PumpQuitting := False;
 
+    { Every save pass writes every open document unless App_SaveAll says   }
+    { otherwise for its own pass. Set here so an uninitialised global can  }
+    { never be what decides whether a document is skipped.                 }
+    SaveSkipCleanLibs := False;
+    SaveSkipCleanSheets := False;
+
     StatusStartTick := GetTickCount;
     StatusRequestCount := 0;
     StatusLastCommand := '';

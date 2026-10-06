@@ -72,10 +72,12 @@ _RECIPES: tuple[dict[str, Any], ...] = (
         "backends": ("altium",),
         "use": ["lib_save_library", "lib_reload_library"],
         "avoid": [
-            ("app_save_all", "writes EVERY open document, and each save "
-                             "rewrites open SchDocs and PcbDocs with fresh "
-                             "parameter UniqueIDs, so one library edit "
-                             "churns every open sheet in version control"),
+            ("app_save_all", "rewrites every open SchDoc and PcbDoc with "
+                             "fresh parameter UniqueIDs, so one library edit "
+                             "churns every open sheet in version control; "
+                             "and by default it LEAVES ALONE a library that "
+                             "reads unmodified, which some library edit "
+                             "paths do (include_libraries=True overrides)"),
         ],
         "note": (
             "Library edits are marked dirty, not written. lib_save_library "

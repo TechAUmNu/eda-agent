@@ -7608,11 +7608,13 @@ def register_library_tools(mcp):
     async def lib_save_library(library_path: str) -> dict[str, Any]:
         """Write ONE open library to disk, and prove the file changed.
 
-        ``app_save_all`` writes EVERY open document, and every save
+        ``app_save_all`` writes every open sheet, and every save
         rewrites open SchDocs and PcbDocs with fresh parameter UniqueIDs
         (measured on a live project, 2026-10-02), so saving one library
-        that way puts churn into every open sheet. This writes only the
-        document at ``library_path``.
+        that way puts churn into every open sheet. Since 2026-10-06 it
+        also, by default, leaves alone a library that reads unmodified,
+        and some library edits do not raise that flag. This writes only
+        the document at ``library_path``, whatever the flag says.
 
         MEASURED, NOT TRUSTED. Altium declines a save while a command is
         active and does not raise, so ``written_to_disk`` comes from the
