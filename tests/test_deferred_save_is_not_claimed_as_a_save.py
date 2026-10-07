@@ -120,3 +120,20 @@ def test_no_response_field_calls_a_marked_document_saved():
     assert not offenders, (
         f"a response field still reports marked documents as saved: "
         f"{offenders}")
+
+
+def test_the_object_helpers_do_not_claim_a_save():
+    """MEASURED 2026-10-07: obj_modify on the active sheet answered
+    saved:true five times while the file's mtime never moved; only an
+    app_save_all wrote it. ProcessActiveDoc and ProcessDocByPath mark the
+    document and must say so with the house deferred-write fields."""
+    # pascal_source keeps braces inside string literals; _decommented above
+    # would read the JSON literal '{"matched":...' as a comment and erase it.
+    from tests.pascal_source import load
+    funcs = load(SCRIPTS / "Generic.pas", minimum=100)
+    for name in ("ProcessActiveDoc", "ProcessDocByPath"):
+        body = funcs[name]
+        assert "Saved := True" not in body, f"{name} still calls a marked document saved"
+        assert '"saved":false' in body, f"{name} must answer saved:false for a deferred write"
+        assert '"pending_save":' in body and '"written_to_disk":false' in body
+        assert "MarkDocDirtyByPath(DocPath)" in body

@@ -1696,8 +1696,8 @@ Var
     SchDoc : ISch_Document;
     ServerDoc : IServerDocument;
     TotalMatched : Integer;
-    JsonItems, DocPath, SavedStr : String;
-    IsMutating, Saved : Boolean;
+    JsonItems, DocPath, MarkedStr : String;
+    IsMutating, Marked : Boolean;
 Begin
     SchDoc := SchServer.GetCurrentSchDocument;
     If SchDoc = Nil Then
@@ -1712,12 +1712,12 @@ Begin
         FilterStr, PropsStr, SetStr, Mode, DocPath, TotalMatched, Limit);
 
     IsMutating := (Mode = 'modify') Or (Mode = 'delete') Or (Mode = 'create');
-    Saved := False;
+    Marked := False;
     If IsMutating Then
     Begin
         Try SchDoc.GraphicallyInvalidate; Except End;
         MarkDocDirtyByPath(DocPath);
-        Saved := True;
+        Marked := True;
     End;
 
     If Mode = 'query' Then
@@ -1729,9 +1729,19 @@ Begin
             + ',"properties":' + RenderPropertyDiagJson(0) + '}')
     Else
     Begin
-        If Saved Then SavedStr := 'true' Else SavedStr := 'false';
+        { "saved" WAS TRUE HERE FOR A WRITE THAT NEVER HAPPENED. MEASURED       }
+        { 2026-10-07 (bridge 2026.10.07.02): five label renames on 02.SchDoc   }
+        { each answered saved:true and the file's mtime did not move until an }
+        { app_save_all only_modified=true wrote it. The document is MARKED    }
+        { (MarkDocDirtyByPath), as the project-scope path already says with   }
+        { sheets_marked; Lib_DeleteFootprint's pending_save/written_to_disk    }
+        { are the house fields for a deferred write.                           }
+        If Marked Then MarkedStr := 'true' Else MarkedStr := 'false';
         Result := BuildSuccessResponse(RequestId,
-            '{"matched":' + IntToStr(TotalMatched) + ',"saved":' + SavedStr
+            '{"matched":' + IntToStr(TotalMatched) + ',"saved":false'
+            + ',"marked_modified":' + MarkedStr
+            + ',"pending_save":' + MarkedStr
+            + ',"written_to_disk":false'
             + ModifyOutcomeJson(0) + '}');
     End;
 End;
@@ -1747,8 +1757,8 @@ Var
     SchDoc : ISch_Document;
     ServerDoc : IServerDocument;
     TotalMatched : Integer;
-    JsonItems, SavedStr : String;
-    IsMutating, Saved : Boolean;
+    JsonItems, MarkedStr : String;
+    IsMutating, Marked : Boolean;
 Begin
 
     // Do NOT RunProcess Client:OpenDocument, that loads the file but
@@ -1769,12 +1779,12 @@ Begin
         FilterStr, PropsStr, SetStr, Mode, DocPath, TotalMatched, Limit);
 
     IsMutating := (Mode = 'modify') Or (Mode = 'delete') Or (Mode = 'create');
-    Saved := False;
+    Marked := False;
     If IsMutating Then
     Begin
         Try SchDoc.GraphicallyInvalidate; Except End;
         MarkDocDirtyByPath(DocPath);
-        Saved := True;
+        Marked := True;
     End;
 
     If Mode = 'query' Then
@@ -1786,9 +1796,19 @@ Begin
             + ',"properties":' + RenderPropertyDiagJson(0) + '}')
     Else
     Begin
-        If Saved Then SavedStr := 'true' Else SavedStr := 'false';
+        { "saved" WAS TRUE HERE FOR A WRITE THAT NEVER HAPPENED. MEASURED       }
+        { 2026-10-07 (bridge 2026.10.07.02): five label renames on 02.SchDoc   }
+        { each answered saved:true and the file's mtime did not move until an }
+        { app_save_all only_modified=true wrote it. The document is MARKED    }
+        { (MarkDocDirtyByPath), as the project-scope path already says with   }
+        { sheets_marked; Lib_DeleteFootprint's pending_save/written_to_disk    }
+        { are the house fields for a deferred write.                           }
+        If Marked Then MarkedStr := 'true' Else MarkedStr := 'false';
         Result := BuildSuccessResponse(RequestId,
-            '{"matched":' + IntToStr(TotalMatched) + ',"saved":' + SavedStr
+            '{"matched":' + IntToStr(TotalMatched) + ',"saved":false'
+            + ',"marked_modified":' + MarkedStr
+            + ',"pending_save":' + MarkedStr
+            + ',"written_to_disk":false'
             + ModifyOutcomeJson(0) + '}');
     End;
 End;
