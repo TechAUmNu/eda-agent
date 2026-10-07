@@ -2340,6 +2340,36 @@ Run on Altium 26.10.1.5, this build, the live multiviewer project
   `proj_get_focused` the same project.
 * **Step 6**: not run (needs a second open project).
 
+
+---
+
+## 35. A single-sheet object edit says the write is deferred (run live 2026-10-07, results at the end)
+
+Measured on the previous build (2026-10-07, Step 0 of the 7.1 audio redraw):
+five `obj_modify` label renames on `02.SchDoc` each answered `saved: true`,
+and the file's mtime did not move until `app_save_all only_modified=true`
+wrote it. `ProcessActiveDoc` / `ProcessDocByPath` set `Saved := True` right
+after `MarkDocDirtyByPath`. They now answer `saved: false` with
+`marked_modified`, `pending_save` and `written_to_disk: false` (the fields
+`lib_delete_footprint` already uses). No Altium call changed; only the reply.
+
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.07.03`.
+2. **The reply is honest.** Focus a sheet, `obj_modify` a net label to its
+   own current text. Expect `saved: false, marked_modified: true,
+   pending_save: true, written_to_disk: false`, and the sheet's mtime
+   UNCHANGED.
+3. **The explicit save writes it.** `app_save_all only_modified=true`:
+   `documents_written: 1` (that sheet) and its mtime moves.
+
+### Results 2026-10-07
+
+Run on Altium 26.10.1.5, this build, `02.SchDoc` of the live multiviewer
+project. Step 1 PASS (versions matched). Step 2 PASS: `obj_modify` on the
+AUD_PWR_OK label answered `{matched: 1, saved: false, marked_modified: true,
+pending_save: true, written_to_disk: false}`; mtime still 13:09:56 (the
+earlier save). Step 3 PASS: `documents_attempted 1, documents_written 1`,
+libraries skipped.
+
 ---
 
 ## Still open, and not blocking

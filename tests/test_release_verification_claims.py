@@ -209,8 +209,12 @@ def test_every_step_that_writes_a_property_is_ranked():
 # Step 34 (the project-file fallback) adds one RunProcess of
 # WorkspaceManager:SaveObject with a parameter, a command like step 21's
 # close, not a property write.
+#
+# Step 35 (single-sheet object edits report a deferred write) changes only
+# the reply fields; the property writes obj_modify performs are unchanged
+# and long shipped.
 _STEPS_WITHOUT_A_PROPERTY = {"0", "1", "8", "9", "10", "19", "21", "29", "32",
-                             "33", "34"}
+                             "33", "34", "35"}
 
 
 def _step_headings() -> list[tuple[str, str]]:
