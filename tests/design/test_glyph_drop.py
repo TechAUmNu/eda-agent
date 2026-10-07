@@ -136,6 +136,9 @@ def test_a_glyph_collision_does_not_drop_a_rails_wiring(monkeypatch):
     assert all(any(_point_on_segment(e.x, e.y, *s[:4]) for s in ch) for e in pins.values()), \
         "a CHASSIS shield pin is not wired (its net was culled to repair glyphs)"
     assert culled == [], f"cull loop ran on {sorted(set(culled))} ({len(culled)} culls over the best-of builds)"
+    # The move is visible in the notes (a tuner otherwise cannot tell why a
+    # glyph is not where the default rule puts it).
+    assert any("glyph moved from" in n.text for n in res.notes),         [n.text for n in res.notes]
 
 
 def test_a_trunk_routed_after_a_glyph_does_not_cull_its_net(monkeypatch):
@@ -195,3 +198,132 @@ def test_a_trunk_routed_after_a_glyph_does_not_cull_its_net(monkeypatch):
     for p in cv.power_ports:
         assert not any(_point_on_segment(p.x, p.y, *s[:4])
                        for s in segs if s[4] != p.text), p
+
+
+def test_a_supply_glyph_does_not_rise_onto_an_input_stub():
+    """Unit (D2, the U823 shape): VCC pin 14 sits 400 mil below input 3A on
+    the same side of the IC. VCC's glyph rises 400 and lands mid-span on 3A's
+    (staggered, longer) stub, and the cull then dropped ALL of AUD_LDO_3V3's
+    wiring on AUDIO. The glyph must be moved off the stub instead."""
+    from eda_agent.design.pipeline import _emit_port_cluster
+
+    canvas = SchematicCanvas(sheets=[CSheet(name="main", size="A4")])
+    segs = [(1000, 5000, 1200, 5000, "VCC"),       # VCC pin stub
+            (1000, 5400, 1300, 5400, "IN_3A")]     # 3A's stub, 100 longer
+    recs: list = []
+    vcc = Net(name="VCC", is_power=True,
+              pins=[PinRef(refdes="U1", pin="14"), PinRef(refdes="C1", pin="1")])
+    _emit_port_cluster(
+        canvas=canvas, sheet_name="main", net=vcc,
+        net_actions=[(PinRef(refdes="U1", pin="14"), (1200, 5000), 0)],
+        sheet_wire_segments=segs, routing_obstacles=[],
+        other_net_pin_points=[(1000, 5400)],
+        sheet_width_mils=11690, sheet_height_mils=8270, records=recs)
+    assert _cross_net_meeting_counts(segs) == {}, segs
+    (port,) = canvas.power_ports
+    assert not any(_point_on_segment(port.x, port.y, *s[:4])
+                   for s in segs if s[4] != "VCC"), (port, segs)
+    assert recs[0]["relocated_from"] == (1200, 5400), recs[0]
+    assert recs[0]["unresolved"] is False
+
+
+def test_no_clean_site_keeps_the_default_and_flags_it():
+    """Unit (the safety-critical fallback): a two-pin GND cluster boxed in by
+    foreign wires on every grid row has no clean glyph site. The relocation
+    search must say so (None), the default geometry must be kept unchanged
+    -- the cull loop, not the glyph search, then guarantees the netlist --
+    and the cluster must be recorded as unresolved so a note can say why."""
+    from eda_agent.design.pipeline import (_emit_port_cluster,
+                                           _relocate_port_cluster)
+
+    W, H = 11690, 8270
+    # A foreign wire on every 100-mil row except the pins' own: any glyph
+    # site the search can produce sits on one.
+    fence = [(0, y, W, y, "SIG") for y in range(100, H, 100) if y != 5000]
+    pts = [(2000, 5000), (2300, 5000)]
+    assert _relocate_port_cluster(
+        net_name="GND", style="gnd_power", is_gnd=True, cluster_pts=pts,
+        cluster_orients=[0, 0], spoke_obstacles=[], body_boxes=[],
+        foreign_segs=fence, foreign_points=set(),
+        sheet_width_mils=W, sheet_height_mils=H) is None
+
+    canvas = SchematicCanvas(sheets=[CSheet(name="main", size="A4")])
+    segs = list(fence)
+    recs: list = []
+    gnd = Net(name="GND", is_ground=True,
+              pins=[PinRef(refdes="R1", pin="2"), PinRef(refdes="R2", pin="2")])
+    _emit_port_cluster(
+        canvas=canvas, sheet_name="main", net=gnd,
+        net_actions=[(PinRef(refdes="R1", pin="2"), pts[0], 0),
+                     (PinRef(refdes="R2", pin="2"), pts[1], 0)],
+        sheet_wire_segments=segs, routing_obstacles=[],
+        other_net_pin_points=[], sheet_width_mils=W, sheet_height_mils=H,
+        records=recs)
+    (port,) = canvas.power_ports
+    assert (port.x, port.y) == (2100, 4600), port      # the default site
+    assert recs[0]["unresolved"] is True
+    assert recs[0]["relocated_from"] is None
+
+
+def test_the_at_stub_candidate_respects_the_sheet_margin():
+    """A solo pin that is itself off the sheet (early best-of builds put pins
+    at negative y on PWR_IN_USB) must not be handed an off-sheet glyph: the
+    'pin, stub, glyph' candidate gets the same margin test as every other."""
+    from eda_agent.design.pipeline import _relocate_port_cluster
+
+    got = _relocate_port_cluster(
+        net_name="MCU_V3V3", style="bar", is_gnd=False,
+        cluster_pts=[(10000, -800)], cluster_orients=[1], spoke_obstacles=[],
+        body_boxes=[], foreign_segs=[], foreign_points=set(),
+        sheet_width_mils=16540, sheet_height_mils=11690)
+    if got is not None:
+        (x, y), _ = got
+        assert 200 <= x <= 16540 - 200 and 200 <= y <= 11690 - 200, got
+
+
+def test_relocation_scorer_prefers_the_default_drop_and_sees_touching_names():
+    """Two ranking rules a review measured missing: (1) with nothing in the
+    way a moved glyph should sit at the engine's default 400-mil drop, not at
+    the shortest clean one (moved glyphs at 200 among neighbours at 400 read
+    as uneven drops); (2) a glyph NAME whose box edge only touches a wire
+    still reads as struck through and must be charged."""
+    from eda_agent.design.pipeline import _score_port_site
+    from eda_agent.design.port_glyphs import glyph_geometry
+
+    kw = dict(net_name="GND", style="gnd_power", cluster_pts=[(3000, 5000)],
+              spoke_obstacles=[], body_boxes=[], foreign_segs=[],
+              foreign_points=set(), is_gnd=True)
+    c400 = _score_port_site(3000, 4600, **kw)[0]
+    c200 = _score_port_site(3000, 4800, **kw)[0]
+    assert c400 < c200, (c400, c200)
+
+    _ink, tb = glyph_geometry(3000, 4600, "GND", "gnd_power")
+    edge = (tb[2], tb[1], tb[2], tb[3], "VBUS")   # exactly on the box's right edge
+    kw2 = dict(kw, foreign_segs=[edge])
+    scored = _score_port_site(3000, 4600, **kw2)
+    assert scored is not None and scored[2]["text"] > 0, scored
+
+
+def test_a_solo_drop_into_a_body_shortens_instead_of_marching_past_it():
+    """The C896 shape on AUDIO: a cap's supply pin sits just below an IC
+    (U823) whose keepout starts 350 mil above the pin. The default 400-mil
+    rise lands in the keepout, and the body march then pushed the glyph past
+    the WHOLE IC, so the spoke ran up the IC's outline and through its text.
+    A shorter drop that stops clear of the body is the drawing a person
+    makes; the march is only the fallback."""
+    from eda_agent.design.pipeline import _emit_port_cluster
+
+    canvas = SchematicCanvas(sheets=[CSheet(name="main", size="A3")])
+    segs: list = []
+    net = Net(name="AUD_LDO_3V3", is_power=True,
+              pins=[PinRef(refdes="C896", pin="1"), PinRef(refdes="U1", pin="1")])
+    body = (5850, 9850, 6550, 11050)
+    _emit_port_cluster(
+        canvas=canvas, sheet_name="main", net=net,
+        net_actions=[(PinRef(refdes="C896", pin="1"), (6200, 9500), 1)],
+        sheet_wire_segments=segs, routing_obstacles=[body],
+        other_net_pin_points=[], sheet_width_mils=16540,
+        sheet_height_mils=11690, body_obstacles=[body])
+    (port,) = canvas.power_ports
+    assert (port.x, port.y) == (6200, 9700), port
+    assert segs == [(6200, 9500, 6200, 9700, "AUD_LDO_3V3")], segs

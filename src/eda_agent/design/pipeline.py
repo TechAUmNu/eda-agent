@@ -1659,11 +1659,16 @@ def build_best_canvas_from_plan(
     # again.
     try:
         for factor in (0.8, 0.6):
-            squeezed = _compact_placements(
-                [_canvas_instance_to_placement(i)
-                 for i in base.canvas.instances],
-                factor,
-            )
+            _before = [_canvas_instance_to_placement(i)
+                       for i in base.canvas.instances]
+            # Self-contained motifs already sit at their canonical spacing
+            # (resnap_motif_clusters), which is not the inflated
+            # bbox-guess spacing compaction exists to remove: move each one
+            # as a rigid body. Uniform scaling shrank the pi-filter fixture's
+            # legs to 0.8x and won selection once the glyph fix made the
+            # compacted candidate cheaper (L1-C2 922 against a 1100 floor).
+            squeezed = _move_motifs_rigidly(
+                plan, _before, _compact_placements(_before, factor))
             compact_tries += 1
             compact_cand = build_canvas_from_plan(
                 plan, extractor,
@@ -1739,6 +1744,11 @@ def build_best_canvas_from_plan(
         banded = _band_placements(
             [_canvas_instance_to_placement(i)
              for i in best_result.canvas.instances])
+        banded = _move_motifs_rigidly(
+            plan,
+            [_canvas_instance_to_placement(i)
+             for i in best_result.canvas.instances],
+            banded)
         current = {(i.refdes, _canvas_instance_to_placement(i).x_mils,
                     _canvas_instance_to_placement(i).y_mils)
                    for i in best_result.canvas.instances}
@@ -2117,30 +2127,75 @@ def _canvas_instance_to_placement(inst):  # type: ignore[no-untyped-def]
     )
 
 
-def _banding_distorts_motifs(plan: DesignPlan, before, after) -> bool:
-    """True iff banding moved a self-contained motif's members unequally.
-
-    Banding imposes one y per band on every part, so the members of a
-    self-contained motif (a diode-bridge diamond, a C-L-C pi filter) that
-    sit at different heights get pulled into different bands and the
-    canonical shape resnap_motif_clusters restored is gone. A banded
-    candidate that does that must not be offered to selection: the motif
-    test (test_selfcontained_motifs_keep_canonical_geometry_through_pipeline)
-    asserts the best-of path keeps the shape, and it held only because the
-    banded candidate happened to lose. Measured when the glyph-drop fix
-    removed a forced label from that fixture's banded candidate: banded then
-    won by 0.9 of rank and the pi filter's L1-C2 leg fell from 1281 to 1000.
-    A motif moved as a whole (every member by the same offset) is fine.
-    """
+def _self_contained_motif_members(plan: DesignPlan) -> list[list[str]]:
+    """Refdes groups of every self-contained multi-member motif in ``plan``."""
     from eda_agent.design.motifs import get_motif_by_name, recognize_motifs
 
-    b = {p.refdes: (p.x_mils, p.y_mils) for p in before}
-    a = {p.refdes: (p.x_mils, p.y_mils) for p in after}
+    groups: list[list[str]] = []
     for match in recognize_motifs(plan):
         motif = get_motif_by_name(match.motif_name)
         if motif is None or motif.ic_anchor is not None:
             continue
         members = [match.host_refdes(pat) for pat in motif.canonical]
+        members = [r for r in members if r]
+        if len(members) > 1:
+            groups.append(members)
+    return groups
+
+
+def _move_motifs_rigidly(plan: DesignPlan, before, banded):
+    """Move each self-contained motif through banding or compaction rigidly.
+
+    Banding imposes one y per band on every part, and the members of a
+    self-contained motif (a diode-bridge diamond, a C-L-C pi filter, an RC
+    or a divider) sit at different heights in their canonical shape, so
+    plain banding pulls them into different bands and the shape
+    resnap_motif_clusters restored is gone. Every such motif is shifted
+    instead by ONE offset, the median of the offsets banding gave its
+    members, so the motif still joins the band most of it was assigned to
+    and keeps its shape. Parts outside a motif are banded as before.
+
+    Compaction uses it too: it scales every position toward the centroid,
+    which shrinks a motif that is already at its canonical spacing, so a
+    motif is translated by its members' median offset instead (banding only
+    moves y, so there dx is 0 and x is untouched).
+
+    WHY NOT JUST SKIP BANDING when a motif is present: every one of these
+    motifs has members at different heights, so that guard (the first form
+    of this fix) switched banding off on any plan containing one -- 22 of
+    the 40 multiviewer carrier plans -- although banding is a measured win
+    elsewhere (royer1 883 to 635, buck_conv 333 to 299).
+    """
+    b = {p.refdes: p for p in before}
+    out = {p.refdes: p for p in banded}
+    for members in _self_contained_motif_members(plan):
+        members = [r for r in members if r in b and r in out]
+        if len(members) < 2:
+            continue
+        dxs = sorted(out[r].x_mils - b[r].x_mils for r in members)
+        dys = sorted(out[r].y_mils - b[r].y_mils for r in members)
+        dx, dy = dxs[len(dxs) // 2], dys[len(dys) // 2]
+        for r in members:
+            out[r] = replace(out[r], x_mils=b[r].x_mils + dx,
+                             y_mils=b[r].y_mils + dy)
+    return [out[p.refdes] for p in banded]
+
+
+def _banding_distorts_motifs(plan: DesignPlan, before, after) -> bool:
+    """True iff banding moved a self-contained motif's members unequally.
+
+    The safety net behind ``_move_motifs_rigidly``: a part shared by two
+    motifs can still be pulled two ways, and a banded candidate that breaks
+    a motif's canonical shape must not be offered to selection. Measured
+    when the glyph-drop fix removed a forced label from the pi-filter
+    fixture's banded candidate (test_selfcontained_motifs_keep_canonical_
+    geometry_through_pipeline): plain banding then won by 0.9 of rank and
+    the filter's L1-C2 leg fell from 1281 to 1000. A motif moved as a whole
+    (every member by the same offset) is fine.
+    """
+    b = {p.refdes: (p.x_mils, p.y_mils) for p in before}
+    a = {p.refdes: (p.x_mils, p.y_mils) for p in after}
+    for members in _self_contained_motif_members(plan):
         members = [r for r in members if r in b and r in a]
         shifts = {(a[r][0] - b[r][0], a[r][1] - b[r][1]) for r in members}
         if len(shifts) > 1:
@@ -3628,6 +3683,26 @@ def _wire_sheet(
         canvas=canvas, sheet_name=sheet_name, records=port_records,
         sheet_wire_segments=sheet_wire_segments,
         pin_world_coords=pin_world_coords, body_obstacles=body_obstacles)
+    # Say what the glyph search did, so a tuner can see from the notes why a
+    # glyph is not where the default rule puts it, or why a rail later lost
+    # its wiring to the cull (a cluster with no clean site keeps its default
+    # geometry and leaves the meeting to the cull loop below).
+    for rec in port_records:
+        if rec["unresolved"]:
+            result.notes.append(PipelineNote(
+                severity="warning",
+                text=(f"sheet {sheet_name!r}: {rec['net']} glyph at "
+                      f"({rec['port'].x}, {rec['port'].y}) meets another "
+                      f"net's copper and no clean site was found nearby; "
+                      f"left to the cross-net cull (pins "
+                      f"{sorted(rec['pts'])})")))
+        elif rec["relocated_from"] is not None:
+            fx, fy = rec["relocated_from"]
+            result.notes.append(PipelineNote(
+                severity="info",
+                text=(f"sheet {sheet_name!r}: {rec['net']} glyph moved from "
+                      f"({fx}, {fy}) to ({rec['port'].x}, {rec['port'].y}): "
+                      f"the default site met another net's copper")))
 
     # Cross-net WIRE meetings: two nets whose wires share an endpoint, or one
     # ending on the other's segment, are auto-junctioned by Altium on compile
@@ -4052,6 +4127,15 @@ _RELOC_W_TEXT_BODY = 30.0
 _RELOC_W_BEND = 20.0
 _RELOC_W_LEN = 0.05
 _RELOC_W_AT_STUB = 150.0
+#: Glyph ink drawn inside a part body: bars through a body outline read as
+#: part of the symbol. Charged like the name over a body, but heavier.
+_RELOC_W_INK_BODY = 60.0
+#: Per 100 mil that a relocated drop differs from the engine's default
+#: 400-mil drop (_DEFAULT_PORT_DROP). Without it the shortest clean drop won
+#: on wire length alone, so a moved glyph sat at 200 mil among neighbours at
+#: 400 -- one source of the "uneven drop lengths" a review measured.
+_RELOC_W_DROP_DEV = 10.0
+_DEFAULT_PORT_DROP = 400
 #: How far a relocated glyph may run out along the pins' direction, and the
 #: drop lengths tried below (ground) / above (supply) the cluster.
 _RELOC_MAX_RUN = 1500
@@ -4134,8 +4218,13 @@ def _relocate_port_cluster(
     # it, measured on PWR_IN_USB's LM74800 OUT) this beats a riser through
     # them, and the post-selection glyph pass can still re-aim it. Charged
     # _RELOC_W_AT_STUB, so a drop that crosses nothing still wins.
+    # Same sheet-margin test as every other candidate: a pin that is itself
+    # off the sheet (an early best-of build) must not buy an off-sheet glyph.
     if len(cluster_pts) == 1:
-        cands.append((0.0, cluster_pts[0][0], cluster_pts[0][1]))
+        sx, sy = cluster_pts[0]
+        if (margin <= sx <= sheet_width_mils - margin
+                and margin <= sy <= sheet_height_mils - margin):
+            cands.append((0.0, sx, sy))
     cands.sort()
 
     best: Optional[tuple[float, tuple[int, int], list]] = None
@@ -4145,7 +4234,8 @@ def _relocate_port_cluster(
         scored = _score_port_site(
             cx, cy, net_name=net_name, style=style, cluster_pts=cluster_pts,
             spoke_obstacles=spoke_obstacles, body_boxes=body_boxes,
-            foreign_segs=foreign_segs, foreign_points=foreign_points)
+            foreign_segs=foreign_segs, foreign_points=foreign_points,
+            is_gnd=is_gnd)
         if scored is None:
             continue
         cost, spokes, _parts = scored
@@ -4167,6 +4257,7 @@ def _score_port_site(
     body_boxes: list[tuple[int, int, int, int]],
     foreign_segs: list[tuple[int, int, int, int, str]],
     foreign_points: set[tuple[int, int]],
+    is_gnd: Optional[bool] = None,
 ) -> Optional[tuple[float, list[tuple[int, int, int, int]], dict[str, float]]]:
     """Cost of putting a cluster's glyph at (cx, cy), or None if it connects.
 
@@ -4193,8 +4284,8 @@ def _score_port_site(
                               foreign_segs, foreign_points):
         return None
     parts = {"len": 0.0, "cross": 0.0, "ink": 0.0, "text": 0.0,
-             "text_body": 0.0, "body": 0.0, "hug": 0.0, "bend": 0.0,
-             "at_stub": 0.0}
+             "text_body": 0.0, "ink_body": 0.0, "body": 0.0, "hug": 0.0,
+             "bend": 0.0, "at_stub": 0.0, "drop": 0.0}
     parts["len"] = _RELOC_W_LEN * sum(abs(s[2] - s[0]) + abs(s[3] - s[1])
                                       for s in spokes)
     parts["cross"] = _RELOC_W_CROSS * _strict_crossings(spokes, foreign_segs)
@@ -4207,12 +4298,19 @@ def _score_port_site(
                     or max(i[1], i[3]) + INK_CLR < fb[1]
                     or fb[3] < min(i[1], i[3]) - INK_CLR) for i in ink):
             parts["ink"] += _RELOC_W_INK
-        elif not (tb[2] <= fb[0] or fb[2] <= tb[0]
-                  or tb[3] <= fb[1] or fb[3] <= tb[1]):
+        # Touching counts: a name whose box edge sits exactly on a wire reads
+        # as struck through (measured: C723's relocated GND name on
+        # MCU_POWER's VBUS wire, missed by a strict test).
+        elif not (tb[2] < fb[0] or fb[2] < tb[0]
+                  or tb[3] < fb[1] or fb[3] < tb[1]):
             parts["text"] += _RELOC_W_TEXT
     for (bx1, by1, bx2, by2) in body_boxes:
         if not (tb[2] <= bx1 or bx2 <= tb[0] or tb[3] <= by1 or by2 <= tb[1]):
             parts["text_body"] += _RELOC_W_TEXT_BODY
+        if any(not (max(i[0], i[2]) <= bx1 or bx2 <= min(i[0], i[2])
+                    or max(i[1], i[3]) <= by1 or by2 <= min(i[1], i[3]))
+               for i in ink):
+            parts["ink_body"] += _RELOC_W_INK_BODY
         for s in spokes:
             if _segment_crosses_rect(*s, bx1, by1, bx2, by2):
                 parts["body"] += _RELOC_W_BODY
@@ -4222,6 +4320,12 @@ def _score_port_site(
     parts["bend"] = _RELOC_W_BEND * bends
     if not spokes:
         parts["at_stub"] = _RELOC_W_AT_STUB
+    elif is_gnd is not None:
+        base_y = (min(y for _, y in cluster_pts) if is_gnd
+                  else max(y for _, y in cluster_pts))
+        drop = (base_y - cy) if is_gnd else (cy - base_y)
+        parts["drop"] = (_RELOC_W_DROP_DEV
+                         * abs(drop - _DEFAULT_PORT_DROP) / 100.0)
     return sum(parts.values()), spokes, parts
 
 
@@ -4273,7 +4377,11 @@ def _revalidate_port_clusters(
             sheet_height_mils=sheet_obj.height_mils,
         )
         if moved is None:
+            rec["unresolved"] = True
             continue
+        rec["unresolved"] = False
+        if rec.get("relocated_from") is None:
+            rec["relocated_from"] = (port.x, port.y)
         (nx, ny), new_spokes = moved
         for seg in rec["spokes"]:
             sheet_wire_segments.remove(seg)
@@ -4440,6 +4548,32 @@ def _emit_port_cluster(
                     x == px and lo <= y <= hi for (x, y) in other_pins
                 )
 
+            # A SINGLE pin whose drop lands in a body (or its text keepout)
+            # first tries a SHORTER drop that stops clear of it. Marching
+            # past the body instead sent the spoke the whole height of the
+            # IC along its outline to a glyph on the far side (measured:
+            # C896's AUD_LDO_3V3 drop on the multiviewer AUDIO sheet ran up
+            # U823's edge and through its value text once the cull stopped
+            # hiding it). The march below remains the fallback.
+            if _inside_a_body(centroid_x, port_y) and len(cluster_pts) == 1:
+                from eda_agent.design.router import _segment_crosses_rect
+                spx, spy = cluster_pts[0]
+                for short in (300, 200):
+                    cand_y = ((spy - short if is_gnd else spy + short)
+                              // 100) * 100
+                    if not (_SHEET_MARGIN <= cand_y
+                            <= sheet_height_mils - _SHEET_MARGIN):
+                        continue
+                    if _inside_a_body(centroid_x, cand_y):
+                        continue
+                    if _drop_hits_foreign_pin(centroid_x, cand_y):
+                        continue
+                    if any(_segment_crosses_rect(centroid_x, spy, centroid_x,
+                                                 cand_y, ox1, oy1, ox2, oy2)
+                           for (ox1, oy1, ox2, oy2) in routing_obstacles):
+                        continue
+                    port_y = cand_y
+                    break
             if _inside_a_body(centroid_x, port_y):
                 step = -100 if is_gnd else 100
                 cand_y = port_y
@@ -4470,6 +4604,8 @@ def _emit_port_cluster(
         # (see _relocate_port_cluster for the measured cases). The default
         # site is kept whenever it is clean, so a sheet with no such meeting
         # is drawn exactly as before. A user's port_hint is never moved.
+        relocated_from: Optional[tuple[int, int]] = None
+        unresolved = False
         if port_hint is None:
             if foreign is None:
                 foreign = (
@@ -4491,7 +4627,10 @@ def _emit_port_cluster(
                     sheet_height_mils=sheet_height_mils,
                 )
                 if moved is not None:
+                    relocated_from = (centroid_x, port_y)
                     (centroid_x, port_y), spokes = moved
+                else:
+                    unresolved = True
         port = PowerPort(
             text=net.name,
             x=centroid_x,
@@ -4509,6 +4648,8 @@ def _emit_port_cluster(
                 "style": style, "is_gnd": is_gnd,
                 "spoke_obstacles": spoke_obstacles,
                 "hinted": port_hint is not None,
+                "relocated_from": relocated_from,
+                "unresolved": unresolved,
             })
 
 

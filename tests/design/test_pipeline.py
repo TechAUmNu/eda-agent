@@ -2562,6 +2562,86 @@ def test_banding_refines_the_winner_not_the_base():
         "banding must be accepted only when it ranks better")
 
 
+def test_banding_moves_a_selfcontained_motif_as_one_body(monkeypatch):
+    """Banding must keep a self-contained motif's canonical shape AND stay
+    on offer for plans that contain one.
+
+    The first guard against banding squashing a motif dropped the banded
+    candidate whenever a motif's members shifted unequally -- which plain
+    banding does to every such motif, because their members sit at
+    different heights. It switched banding off on 22 of the 40 multiviewer
+    carrier plans. The motif is now moved rigidly by one offset, so the
+    guard behind it never has to fire and the banded candidate is scored.
+    """
+    from eda_agent.design import pipeline
+    from eda_agent.design.layout import PlacedPart
+    from eda_agent.design.pipeline import (_move_motifs_rigidly,
+                                           _band_placements,
+                                           _banding_distorts_motifs,
+                                           build_best_canvas_from_plan)
+
+    plan, syms = _acdc_frontend_plan_and_symbols()
+    ys = {"J1": 2000, "D1": 2700, "D2": 2700, "D3": 1300, "D4": 1300,
+          "C1": 1400, "L1": 2100, "C2": 1400, "U1": 1800}
+    before = [PlacedPart(refdes=r, sheet="main", x_mils=700 * i, y_mils=y)
+              for i, (r, y) in enumerate(ys.items())]
+    plain = _band_placements(before)
+    assert _banding_distorts_motifs(plan, before, plain), \
+        "fixture must have plain banding split a motif"
+    rigid = _move_motifs_rigidly(plan, before, plain)
+    assert not _banding_distorts_motifs(plan, before, rigid)
+    b = {p.refdes: p for p in before}
+    r = {p.refdes: p for p in rigid}
+    for group in (("D1", "D2", "D3", "D4"), ("C1", "L1", "C2")):
+        assert len({r[m].y_mils - b[m].y_mils for m in group}) == 1, group
+        assert all(r[m].x_mils == b[m].x_mils for m in group)
+    # Parts outside a motif are banded exactly as before.
+    assert r["J1"] == {p.refdes: p for p in plain}["J1"]
+
+    verdicts = []
+    real = pipeline._banding_distorts_motifs
+
+    def spy(*a):
+        v = real(*a)
+        verdicts.append(v)
+        return v
+    monkeypatch.setattr(pipeline, "_banding_distorts_motifs", spy)
+    best = build_best_canvas_from_plan(plan, MockExtractor(syms), n_tries=4)
+    assert best.ok
+    assert verdicts and not any(verdicts), \
+        f"the banded candidate was withheld from selection: {verdicts}"
+
+
+def test_compaction_translates_a_selfcontained_motif_without_shrinking_it():
+    """Compaction scales every position toward the centroid. A self-contained
+    motif is already at its canonical spacing, so scaling shrank it: on the
+    pi-filter fixture compact_0.8 won selection with the L1-C2 leg at 922
+    against the motif test's 1100 floor. Its members must move by one offset.
+    """
+    import math
+
+    from eda_agent.design.layout import PlacedPart
+    from eda_agent.design.pipeline import _compact_placements, _move_motifs_rigidly
+
+    plan, _syms = _acdc_frontend_plan_and_symbols()
+    pos = {"J1": (1300, 5000), "D1": (2000, 5300), "D2": (3300, 5200),
+           "D3": (2000, 4200), "D4": (3200, 4200), "C1": (1100, 5600),
+           "L1": (2200, 6600), "C2": (3200, 5800), "U1": (4300, 6500)}
+    before = [PlacedPart(refdes=r, sheet="main", x_mils=x, y_mils=y)
+              for r, (x, y) in pos.items()]
+    plain = {p.refdes: p for p in _compact_placements(before, 0.8)}
+    rigid = {p.refdes: p for p in _move_motifs_rigidly(
+        plan, before, _compact_placements(before, 0.8))}
+
+    def d(m, a, b):
+        return math.hypot(m[a].x_mils - m[b].x_mils, m[a].y_mils - m[b].y_mils)
+    b = {p.refdes: p for p in before}
+    assert d(plain, "L1", "C2") < d(b, "L1", "C2") - 100, "fixture must shrink"
+    for a, c in (("C1", "L1"), ("L1", "C2"), ("D1", "D2"), ("D3", "D4")):
+        assert abs(d(rigid, a, c) - d(b, a, c)) < 1e-6, (a, c)
+    assert rigid["J1"] == plain["J1"] and rigid["U1"] == plain["U1"]
+
+
 def test_no_same_net_wire_is_drawn_on_top_of_another():
     """Two same-net segments lying partly on each other draw the shared
     span twice.
