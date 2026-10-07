@@ -1,4 +1,4 @@
-# Release verification: 2026.10.06.02
+# Release verification: 2026.10.07.02
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by the linter (and by FPC where a section says so) but **not
@@ -268,7 +268,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.06.02`, `version_match` =
+Expect `altium_script_version` = `2026.10.07.02`, `version_match` =
 `true`, and `mcp_server_version` = `0.6.1`.
 
 Those are two different versions and they fail differently.
@@ -2027,7 +2027,7 @@ sheets, `A`, `B` and `STUBS`, all saved and loaded, plus one open
 library `<lib>` (a scratch copy) that has not been edited. Confirm
 `app_ping` answers after each call.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.06.02`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.07.02`.
 
 2. **The default save-all leaves an unedited library alone.** Note
    `<lib>`'s mtime. `app_save_all` with no arguments. Expect
@@ -2126,13 +2126,13 @@ whose flag never propagated.
 
 ### Results 2026-10-07
 
-Run on Altium 26.10.1.5, bridge `2026.10.06.02`, the live multiviewer
+Run on Altium 26.10.1.5, the second 2026-10-06 bridge build, the live multiviewer
 carrier project (31 sheets, `carrier.SchLib` open and unedited). Steps 3,
 4 and 11 and three of step 8's refusals were NOT run: they write the
 library (moving the symbol-cache key) or aim a refusal at the project's
 PcbDoc, and belong on a scratch project.
 
-* **Step 1, version**: PASS. `app_ping` matched `2026.10.06.02`; the
+* **Step 1, version**: PASS. `app_ping` matched that build; the
   script project compiled (the compile check the stray `End;` would have
   failed).
 * **Step 2, default save-all**: PASS. `libraries_skipped:
@@ -2172,9 +2172,9 @@ PcbDoc, and belong on a scratch project.
 
 ---
 
-## 33. A new sheet that the project file names (not yet run live)
+## 33. A new sheet that the project file names (run live 2026-10-07, results at the end)
 
-Found by step 32's step 10 (2026-10-07, bridge `2026.10.06.02`):
+Found by step 32's step 10 (2026-10-07, the second 2026-10-06 bridge build):
 `proj_add_sheet` answered `{success: true, saved: true, added_to_project:
 true}` while the .PrjPcb on disk kept its old timestamp and did not name
 the sheet. `saved` was the new SHEET's `DoFileSave`; `DM_AddSourceDocument`
@@ -2195,7 +2195,7 @@ compile is what is new.
 Work on the live project only if the .PrjPcb is committed (the check is a
 `git diff`), or on a copy. Focus some other sheet `A` first.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.07.01`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.07.02`.
 
 2. **A default add writes the project.** Note the .PrjPcb's mtime and two
    SchDoc mtimes. `proj_add_sheet name=ZZ33`. Expect `success: true,
@@ -2218,6 +2218,101 @@ Work on the live project only if the .PrjPcb is committed (the check is a
 5. **Clean up with the delete.** `proj_delete_sheet file_path=<ZZ33B>
    delete_file=true`, then the same for `ZZ33`: both `success: true,
    file_deleted: true`. `git diff` on the .PrjPcb is empty.
+
+### Results 2026-10-07
+
+Run on Altium 26.10.1.5, the first 2026-10-07 bridge build, the live multiviewer
+project, `multiviewer__PWR_MECH.SchDoc` focused.
+
+* **Step 1**: PASS. `app_ping` matched; `tool_catalog` showed the new
+  `save_project` parameter (the Python side reloaded too).
+* **Step 2**: PASS. `proj_add_sheet name=ZZ33`: `success, sheet_saved,
+  saved, added_to_project, project_saved, project_file_checked,
+  project_file_lists_sheet` all true. The .PrjPcb gained
+  `DocumentPath=ZZ33.SchDoc` and its mtime moved; PWR_MECH, AUDIO and
+  carrier.SchLib mtimes did not.
+* **Step 3**: PASS. `EXISTS` with the message; `ZZ33.SchDoc`'s mtime
+  unchanged; `proj_list_documents` listed it once.
+* **Step 4**: PASS. `ZZ33B` with `save_project=false`: `success: true,
+  project_saved: false, project_file_lists_sheet: false`, the .PrjPcb mtime
+  unchanged.
+* **Step 5**: **FAILED, and it is a defect in step 32's delete, not in the
+  add.** ZZ33B (never in the file) deleted cleanly. ZZ33 (in the file)
+  answered `success: false, still_member: false, closed: true,
+  project_saved: true, project_file_lists_sheet: true, file_deleted:
+  false` with the delete_file reason. In memory ZZ33 was gone
+  (`proj_list_documents`); on disk it was still listed although the file
+  had just been rewritten. Repeated in isolation (add ZZ34, wait four
+  seconds, delete ZZ34): same answer, timestamp moved, sheet still listed.
+  `WorkspaceManager:SaveObject ObjectKind=FocusedProject` run straight
+  after wrote the file WITHOUT the sheet, byte-identical to the committed
+  project, and rewrote no sheet (every SchDoc mtime unchanged). So
+  SetModified + DoFileSave on the project's own server document writes a
+  REMOVED member back in. Step 32 never met this because every sheet it
+  deleted had never been in the file (the step-33 add defect). The handler
+  stayed honest throughout; it could not finish. Fixed in step 34.
+
+---
+
+## 34. A removal that the project file actually loses (not yet run live)
+
+Step 33's step 5 (2026-10-07, the first 2026-10-07 bridge build): after
+`DM_RemoveSourceDocument`, SetModified + DoFileSave on the project's own
+server document rewrote the .PrjPcb with the removed sheet still listed.
+`WorkspaceManager:SaveObject ObjectKind=FocusedProject` dropped it. The
+same document save did write a new member after `DM_AddSourceDocument`.
+
+Both handlers now write through `Gen_WriteProjectFile`: the document save
+first, a read-back with `Gen_ProjectFileState`, and only if the file
+disagrees, `SaveObject` with `ObjectKind=FocusedProject` (the parameters
+`obj_run_process` passed live) and a second read-back. The fallback runs
+only when the target project IS the focused project, because that process
+saves whichever project has the focus. If the project was focused when the
+call began but closing the sheet moved the focus away (deleting the focused
+sheet), another loaded sheet of the project is shown first with
+`Client.ShowDocument` (`App_SetActiveDocument`'s call); a `project_path` that
+was not focused is never refocused. Replies gain `project_save_route`:
+`document_save`, `save_object`, `save_object_refocused`, `not_focused`,
+`not_confirmed`, or `none` (no project write attempted). A review of the
+first cut also made the add's read-back match the sheet's EXACT path
+(`Gen_ProjectFileStateExact`; a same-named sheet in another folder must not
+confirm it) and write the project only for a sheet that is on disk.
+
+Focus some other sheet `A` of the focused project first.
+
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.07.02`.
+
+2. **The add still takes the document save.** `proj_add_sheet name=ZZ35`:
+   as step 33's step 2, plus `project_save_route: document_save`.
+
+3. **The removal falls back and the file loses the sheet.**
+   `proj_delete_sheet file_path=<ZZ35> delete_file=true`. Expect
+   `success: true, project_save_route: save_object,
+   project_file_lists_sheet: false, file_deleted: true`. `git diff` on the
+   .PrjPcb is empty and no SchDoc mtime moved.
+
+4. **A sheet the file never named needs no fallback.** `proj_add_sheet
+   name=ZZ35B save_project=false`, then `proj_delete_sheet file_path=<ZZ35B>
+   delete_file=true`: `success: true, project_save_route: document_save`
+   (the file already does not name it), and `git diff` on the .PrjPcb
+   empty: the document save must not have written back the sheet that
+   step 3 removed.
+
+5. **Deleting the FOCUSED sheet.** `proj_add_sheet name=ZZ36`, then
+   `app_set_active_document` on ZZ36 itself, then `proj_delete_sheet
+   file_path=<ZZ36> delete_file=true`. Expect `success: true`,
+   `file_deleted: true`, `project_save_route` = `save_object_refocused`
+   (or `save_object` if Altium kept the focus inside the project; either
+   way the file must lose the sheet), `git diff` on the .PrjPcb empty, and
+   `proj_get_focused` naming the same project afterwards.
+
+6. **Unfocused project (needs a second open project; skip otherwise).**
+   Add a throwaway sheet to project `P2`, save `P2`, focus a sheet of the
+   first project, then `proj_delete_sheet file_path=<it>
+   project_path=<P2>`: expect `project_save_route: not_focused`,
+   `success: false`, the reason naming `ObjectKind=FocusedProject`, and
+   the FIRST project's .PrjPcb mtime UNCHANGED (the fallback must never
+   save the wrong project).
 
 ---
 

@@ -73,10 +73,8 @@ def test_add_sheet_rereads_membership_instead_of_asserting_it():
 def test_add_sheet_writes_the_project_file_and_reads_it_back():
     """THE MEASURED DEFECT."""
     body = _generic()["Gen_AddSheet"]
-    assert "Client.GetDocumentByPath(ProjFile)" in body
-    assert "ProjDoc.DoFileSave(''" in body
-    save = _at(body, "ProjDoc.DoFileSave(''")
-    check = _at(body, "Gen_ProjectFileState(ProjFile, NewDocPath)")
+    save = _at(body, "Gen_WriteProjectFile(Workspace, Project, ProjFile, NewDocPath, 1, True)")
+    check = _at(body, "Gen_ProjectFileStateExact(ProjFile, NewDocPath)")
     assert _at(body, "Gen_SheetIsMember(Project, NewDocPath)") < save < check, (
         "the project file is written after membership is confirmed and read "
         "back after it is written")

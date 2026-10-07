@@ -1339,19 +1339,27 @@ def register_generic_tools(mcp):
                   Default "NewSheet".
             save_project: Write the project file afterwards so the new
                 member survives a reload (default True). With False the
-                sheet is a member in memory only; ``proj_save`` or a
-                project save makes it stick.
+                sheet is a member in memory only. ``proj_save`` does NOT
+                write the .PrjPcb; ``obj_run_process`` with
+                ``WorkspaceManager:SaveObject`` / ``ObjectKind=FocusedProject``
+                does. The project file is written only for a sheet that is
+                itself on disk.
 
         Returns:
             ``success``, ``path``, ``sheet_saved`` (``saved`` is the same
             value, kept for older callers: the SHEET file, not the project),
             ``added_to_project`` (membership re-read), ``project_path``,
             ``project_saved`` (file timestamp moved; 2-second accurate),
+            ``project_save_route`` (which save left the file right:
+            ``document_save``, ``save_object``, ``save_object_refocused``,
+            ``not_focused`` or ``not_confirmed``; ``none`` when no project
+            write was attempted: ``save_project`` false, the sheet not on
+            disk, not a member, or no project path),
             ``project_file_checked`` / ``project_file_lists_sheet`` (the
-            project file read off disk; null when it could not be read), and
-            a ``reason`` when a step fell short. With ``save_project``,
-            ``success`` needs a project file that was read and names the
-            sheet.
+            project file read off disk, matched on the sheet's EXACT path;
+            null when it could not be read), and a ``reason`` when a step
+            fell short. With ``save_project``, ``success`` needs a project
+            file that was read and names the sheet.
         """
         params: dict[str, Any] = {"name": name}
         if not save_project:
@@ -1389,6 +1397,19 @@ def register_generic_tools(mcp):
         writes the project file and reads the file BACK to confirm the sheet
         is no longer listed.
 
+        The project document's own save writes a REMOVED sheet back into
+        the file (measured 2026-10-07: timestamp moved, sheet still listed),
+        so when the read-back disagrees the handler saves again through
+        ``WorkspaceManager:SaveObject ObjectKind=FocusedProject``, which
+        drops it. That process reaches only the FOCUSED project. When the
+        project was focused at the start but closing the sheet moved the
+        focus away (deleting the focused sheet does), another loaded sheet
+        of the same project is shown first to bring it back
+        (``save_object_refocused``). A ``project_path`` that was not
+        focused is never refocused: if its file already names the sheet the
+        reply is ``not_focused``, with the steps to finish by hand. Neither
+        the unfocused nor the refocus path has been run live yet.
+
         Args:
             file_path: Full path to the .SchDoc file to remove.
             project_path: The project to remove it from. Default: the
@@ -1397,7 +1418,11 @@ def register_generic_tools(mcp):
                 LOSING its unsaved edits. Never for work.
             save_project: Write the project file afterwards so the removal
                 survives a reload (default True). With False the sheet is
-                removed in memory only; ``proj_save`` makes it stick.
+                removed in memory only. ``proj_save`` does NOT write the
+                .PrjPcb (and the project document's own save writes a removed
+                sheet back in); ``obj_run_process`` with
+                ``WorkspaceManager:SaveObject`` / ``ObjectKind=FocusedProject``
+                makes it stick.
             delete_file: Also delete the .SchDoc from disk. Done ONLY after
                 the sheet is confirmed closed and the project file, actually
                 read back off disk, no longer names it; a project file that
@@ -1411,7 +1436,10 @@ def register_generic_tools(mcp):
             ``closed`` (looked up again after the close),
             ``previously_focused`` / ``previously_focused_still_open`` (the
             document that had the focus, which must still be loaded),
-            ``project_saved`` / ``project_file_checked`` /
+            ``project_saved`` / ``project_save_route`` (``document_save``,
+            ``save_object``, ``save_object_refocused``, ``not_focused``,
+            ``not_confirmed``, or ``none`` when no project write was
+            attempted) / ``project_file_checked`` /
             ``project_file_lists_sheet`` (the project file read off disk:
             only its ``DocumentPath=`` keys count; ``project_file_checked``
             false and ``project_file_lists_sheet`` null when it could not be

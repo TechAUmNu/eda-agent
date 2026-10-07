@@ -3047,6 +3047,185 @@ Begin
     End;
 End;
 
+{ The project file names THIS path, matched exactly. Same three answers as   }
+{ Gen_ProjectFileState (0 not named, 1 named, 2 could not tell), but where    }
+{ that one matches a bare file name in any folder (the safe direction for a   }
+{ removal: a stray match reads "still listed" and blocks delete_file), this   }
+{ one is for an ADD, where a stray match would confirm a write that never     }
+{ happened. A member under the project's folder is written relative to it    }
+{ (DocumentPath=ZZ33.SchDoc, measured 2026-10-07); anything else must match   }
+{ in full.                                                                     }
+Function Gen_ProjectFileStateExact(ProjectPath : String; MemberPath : String) : Integer;
+Var
+    Content, Want, Dir, Rest, Line, Value : String;
+    P, L : Integer;
+Begin
+    Result := 2;
+    If ProjectPath = '' Then Exit;
+    If Not FileExists(ProjectPath) Then Exit;
+    If MemberPath = '' Then Exit;
+    Dir := ProjectPath;
+    While (Length(Dir) > 0) And (Copy(Dir, Length(Dir), 1) <> '\') Do
+        Dir := Copy(Dir, 1, Length(Dir) - 1);
+    Want := UpperCase(MemberPath);
+    If (Dir <> '') And (Copy(Want, 1, Length(Dir)) = UpperCase(Dir)) Then
+        Want := Copy(Want, Length(Dir) + 1, Length(Want) - Length(Dir));
+    Content := UpperCase(ReadFileContent(ProjectPath));
+    If Content = '' Then Exit;
+    If Pos('DOCUMENTPATH=', Content) = 0 Then Exit;
+    Result := 0;
+    Rest := Content;
+    While Rest <> '' Do
+    Begin
+        P := Pos(#10, Rest);
+        If P > 0 Then
+        Begin
+            Line := Copy(Rest, 1, P - 1);
+            Rest := Copy(Rest, P + 1, Length(Rest) - P);
+        End
+        Else
+        Begin
+            Line := Rest;
+            Rest := '';
+        End;
+        L := Length(Line);
+        If (L > 0) And (Pos(#13, Line) = L) Then
+            Line := Copy(Line, 1, L - 1);
+        If Copy(Line, 1, 13) = 'DOCUMENTPATH=' Then
+        Begin
+            Value := Copy(Line, 14, Length(Line) - 13);
+            If Value = Want Then Result := 1;
+        End;
+    End;
+End;
+
+{ Is the project file in the state the caller wants. An add (1) needs the     }
+{ EXACT path named; a removal (0) needs no DocumentPath ending in the file    }
+{ name. Each uses the matcher whose mistakes fall on the refusing side.       }
+Function Gen_ProjectFileWanted(ProjFile : String; MemberPath : String;
+    WantListed : Integer) : Boolean;
+Begin
+    If WantListed = 1 Then
+        Result := Gen_ProjectFileStateExact(ProjFile, MemberPath) = 1
+    Else
+        Result := Gen_ProjectFileState(ProjFile, MemberPath) = 0;
+End;
+
+{ Write the project FILE and confirm it on disk. Returns the route that left  }
+{ the file in the wanted state, or why none did:                              }
+{   'document_save'          the project's own server document,               }
+{                            SetModified+DoFileSave                           }
+{   'save_object'            WorkspaceManager:SaveObject                      }
+{                            ObjectKind=FocusedProject                         }
+{   'save_object_refocused'  the same, after focus had LEFT the project       }
+{                            (closing the focused sheet moves it) and another }
+{                            loaded sheet of the project was shown to bring    }
+{                            it back; only when MayRefocus                     }
+{   'not_confirmed'          every route that could run ran, and the file      }
+{                            still disagrees                                   }
+{   'not_focused'            the document save did not confirm, and the        }
+{                            fallback reaches only the FOCUSED project, which  }
+{                            this is not (and may not be made so)              }
+{ WantListed: 1 after an add, 0 after a removal (Gen_ProjectFileWanted). An   }
+{ unreadable file never matches, so it can only end in a refusal.             }
+{ MayRefocus: the caller had THIS project focused when the call began, so     }
+{ putting the focus back on it undoes the call's own side effect. Never set   }
+{ for a project the caller did not have focused.                              }
+{                                                                              }
+{ WHY TWO ROUTES. MEASURED 2026-10-07 (AD 26.10.1.5, the first 2026-10-07     }
+{ bridge build): after DM_RemoveSourceDocument, SetModified+DoFileSave on the  }
+{ project's own server document WROTE the .PrjPcb (its timestamp moved) with   }
+{ the removed sheet STILL LISTED, twice: once a second after another project   }
+{ save, once isolated by four seconds. WorkspaceManager:SaveObject ObjectKind= }
+{ FocusedProject, run straight after, wrote it WITHOUT the sheet,              }
+{ byte-identical to the committed project, and rewrote no sheet. The same      }
+{ document save DID write a new member after DM_AddSourceDocument. So the      }
+{ document save runs first (it reaches any open project, focused or not), and  }
+{ the file is judged by reading it, never by the save call.                   }
+Function Gen_WriteProjectFile(Workspace : IWorkspace; Project : IProject;
+    ProjFile : String; MemberPath : String; WantListed : Integer;
+    MayRefocus : Boolean) : String;
+Var
+    ProjDoc, Shown, Cand : IServerDocument;
+    Focused : IProject;
+    Doc : IDocument;
+    FocusedPath, P : String;
+    I : Integer;
+    Refocused : Boolean;
+Begin
+    Result := 'not_confirmed';
+    If ProjFile = '' Then Exit;
+
+    ProjDoc := Nil;
+    Try ProjDoc := Client.GetDocumentByPath(ProjFile); Except ProjDoc := Nil; End;
+    If ProjDoc <> Nil Then
+    Begin
+        Try ProjDoc.SetModified(True); Except End;
+        Try ProjDoc.DoFileSave(''); Except End;
+    End;
+    If Gen_ProjectFileWanted(ProjFile, MemberPath, WantListed) Then
+    Begin
+        Result := 'document_save';
+        Exit;
+    End;
+
+    FocusedPath := '';
+    Focused := Nil;
+    Try Focused := Workspace.DM_FocusedProject; Except Focused := Nil; End;
+    If Focused <> Nil Then
+        Try FocusedPath := Focused.DM_ProjectFullPath; Except FocusedPath := ''; End;
+
+    { Closing the focused sheet hands the focus to whatever Altium picks,     }
+    { possibly outside the project. Show another loaded sheet of THIS         }
+    { project (App_SetActiveDocument's Client.ShowDocument) to bring it back. }
+    Refocused := False;
+    If (UpperCase(FocusedPath) <> UpperCase(ProjFile)) And MayRefocus And (Project <> Nil) Then
+    Begin
+        Shown := Nil;
+        For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+        Begin
+            Doc := Project.DM_LogicalDocuments(I);
+            If Doc = Nil Then Continue;
+            P := '';
+            Try P := DocFullPath(Doc); Except P := ''; End;
+            If (P = '') Or (UpperCase(P) = UpperCase(MemberPath)) Then Continue;
+            Cand := Nil;
+            Try Cand := Client.GetDocumentByPath(P); Except Cand := Nil; End;
+            If Cand <> Nil Then
+            Begin
+                Shown := Cand;
+                Break;
+            End;
+        End;
+        If Shown <> Nil Then
+        Begin
+            Try Client.ShowDocument(Shown); Except End;
+            Refocused := True;
+        End;
+        FocusedPath := '';
+        Focused := Nil;
+        Try Focused := Workspace.DM_FocusedProject; Except Focused := Nil; End;
+        If Focused <> Nil Then
+            Try FocusedPath := Focused.DM_ProjectFullPath; Except FocusedPath := ''; End;
+    End;
+    If UpperCase(FocusedPath) <> UpperCase(ProjFile) Then
+    Begin
+        Result := 'not_focused';
+        Exit;
+    End;
+
+    Try
+        ResetParameters;
+        AddStringParameter('ObjectKind', 'FocusedProject');
+        RunProcess('WorkspaceManager:SaveObject');
+    Except End;
+    If Gen_ProjectFileWanted(ProjFile, MemberPath, WantListed) Then
+    Begin
+        If Refocused Then Result := 'save_object_refocused'
+        Else Result := 'save_object';
+    End;
+End;
+
 {..............................................................................}
 { Add a new schematic sheet to the focused project.                           }
 {                                                                              }
@@ -3071,8 +3250,9 @@ Var
     SheetName, ProjFile, NewDocPath, Why, ListedJson, Data : String;
     Workspace : IWorkspace;
     Project : IProject;
-    ServerDoc, ProjDoc : IServerDocument;
+    ServerDoc : IServerDocument;
     Saved, Added, SaveProject, ProjectSaved, FileChecked, ListedOnDisk, Success : Boolean;
+    SaveRoute : String;
     AgeBefore, AgeAfter, FileState : Integer;
 Begin
     SheetName := ExtractJsonValue(Params, 'name');
@@ -3160,26 +3340,24 @@ Begin
 
     { The project FILE, so the new member survives a reload, read back off   }
     { disk rather than taken from the save call, which does not raise when   }
-    { the editor declines.                                                   }
+    { the editor declines (Gen_WriteProjectFile has the measured routes).    }
     ProjectSaved := False;
-    If SaveProject And Added And (ProjFile <> '') Then
+    SaveRoute := 'none';
+    { Only a sheet that is on disk: a project file naming a missing sheet is  }
+    { the state proj_delete_sheet exists never to leave.                      }
+    If SaveProject And Saved And Added And (ProjFile <> '') Then
     Begin
         AgeBefore := -1;
         Try AgeBefore := FileAge(ProjFile); Except AgeBefore := -1; End;
-        ProjDoc := Nil;
-        Try ProjDoc := Client.GetDocumentByPath(ProjFile); Except ProjDoc := Nil; End;
-        If ProjDoc <> Nil Then
-        Begin
-            Try ProjDoc.SetModified(True); Except End;
-            Try ProjDoc.DoFileSave(''); Except End;
-        End;
+        SaveRoute := Gen_WriteProjectFile(Workspace, Project, ProjFile, NewDocPath, 1, True);
         AgeAfter := -1;
         Try AgeAfter := FileAge(ProjFile); Except AgeAfter := -1; End;
         ProjectSaved := AgeAfter <> AgeBefore;
     End;
     { Unknown (2) never counts as listed here: the claim being checked is    }
     { "the file names the new sheet", and an unread file cannot support it.  }
-    FileState := Gen_ProjectFileState(ProjFile, NewDocPath);
+    { Exact path: a same-named sheet in another folder must not confirm it.  }
+    FileState := Gen_ProjectFileStateExact(ProjFile, NewDocPath);
     FileChecked := FileState <> 2;
     ListedOnDisk := FileState = 1;
 
@@ -3210,6 +3388,7 @@ Begin
         + ',"added_to_project":' + BoolToJsonStr(Added)
         + ',"project_path":"' + EscapeJsonString(ProjFile) + '"'
         + ',"project_saved":' + BoolToJsonStr(ProjectSaved)
+        + ',"project_save_route":"' + SaveRoute + '"'
         + ',"project_file_checked":' + BoolToJsonStr(FileChecked)
         + ',"project_file_lists_sheet":' + ListedJson;
     If Why <> '' Then
@@ -3252,16 +3431,16 @@ Var
     FilePath, ProjectPath, MemberPath, DocPath, FocusedBefore, ProjFile : String;
     Why, Data : String;
     Workspace : IWorkspace;
-    Project : IProject;
+    Project, FocusedProj : IProject;
     Doc, FocusedDoc : IDocument;
-    ServerDoc, Again, ProjDoc : IServerDocument;
+    ServerDoc, Again : IServerDocument;
     I, SchCount, AgeBefore, AgeAfter : Integer;
     Found, FoundOther, Discard, SaveProject, DeleteIt : Boolean;
     WasLoaded, WasModified, StillMember, Closed, NameMatches : Boolean;
     FocusedStillOpen, ProjectSaved, ListedOnDisk, FileStillOnDisk, Deleted : Boolean;
-    Success, FileChecked : Boolean;
+    Success, FileChecked, WasFocusedProject : Boolean;
     FileState : Integer;
-    ListedJson : String;
+    ListedJson, SaveRoute : String;
 Begin
     FilePath := ExtractJsonValue(Params, 'file_path');
     ProjectPath := ExtractJsonValue(Params, 'project_path');
@@ -3300,6 +3479,14 @@ Begin
     Try FocusedDoc := Workspace.DM_FocusedDocument; Except FocusedDoc := Nil; End;
     If FocusedDoc <> Nil Then
         Try FocusedBefore := DocFullPath(FocusedDoc); Except FocusedBefore := ''; End;
+
+    { Was THIS project focused when the call began. Only then may the project }
+    { save put the focus back on it after the close moved it away.           }
+    WasFocusedProject := False;
+    FocusedProj := Nil;
+    Try FocusedProj := Workspace.DM_FocusedProject; Except FocusedProj := Nil; End;
+    If (FocusedProj <> Nil) And (ProjFile <> '') Then
+        Try WasFocusedProject := UpperCase(FocusedProj.DM_ProjectFullPath) = UpperCase(ProjFile); Except WasFocusedProject := False; End;
 
     // Count schematic documents and find the target by its full path
     SchCount := 0;
@@ -3417,19 +3604,16 @@ Begin
 
     { The project FILE, so the removal survives a reload, and read back off  }
     { disk rather than taken from the save call, which does not raise when   }
-    { the editor declines.                                                   }
+    { the editor declines. The project document's own save writes a REMOVED  }
+    { member back in (measured 2026-10-07), so Gen_WriteProjectFile falls    }
+    { back to SaveObject on the focused project when the read-back disagrees.}
     ProjectSaved := False;
+    SaveRoute := 'none';
     If SaveProject And (ProjFile <> '') Then
     Begin
         AgeBefore := -1;
         Try AgeBefore := FileAge(ProjFile); Except AgeBefore := -1; End;
-        ProjDoc := Nil;
-        Try ProjDoc := Client.GetDocumentByPath(ProjFile); Except ProjDoc := Nil; End;
-        If ProjDoc <> Nil Then
-        Begin
-            Try ProjDoc.SetModified(True); Except End;
-            Try ProjDoc.DoFileSave(''); Except End;
-        End;
+        SaveRoute := Gen_WriteProjectFile(Workspace, Project, ProjFile, MemberPath, 0, WasFocusedProject);
         AgeAfter := -1;
         Try AgeAfter := FileAge(ProjFile); Except AgeAfter := -1; End;
         ProjectSaved := AgeAfter <> AgeBefore;
@@ -3439,6 +3623,15 @@ Begin
     FileState := Gen_ProjectFileState(ProjFile, MemberPath);
     FileChecked := FileState <> 2;
     ListedOnDisk := FileState = 1;
+
+    If (Why = '') And SaveProject And ListedOnDisk And (SaveRoute = 'not_focused') Then
+        Why := 'the project file on disk still names the sheet: the project '
+            + 'document save writes a removed member back in, and the save that '
+            + 'drops it (WorkspaceManager:SaveObject ObjectKind=FocusedProject) '
+            + 'reaches only the FOCUSED project, which this is not. Focus one of '
+            + 'its sheets (app_set_active_document), run obj_run_process '
+            + 'WorkspaceManager:SaveObject with ObjectKind=FocusedProject, then '
+            + 'delete the file (proj_save does not write the project file)';
 
     Deleted := False;
     If DeleteIt Then
@@ -3483,6 +3676,7 @@ Begin
         + ',"previously_focused_still_open":' + BoolToJsonStr(FocusedStillOpen)
         + ',"project_path":"' + EscapeJsonString(ProjFile) + '"'
         + ',"project_saved":' + BoolToJsonStr(ProjectSaved)
+        + ',"project_save_route":"' + SaveRoute + '"'
         + ',"project_file_checked":' + BoolToJsonStr(FileChecked)
         + ',"project_file_lists_sheet":' + ListedJson
         + ',"file_deleted":' + BoolToJsonStr(Deleted)

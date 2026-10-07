@@ -149,8 +149,11 @@ def test_delete_sheet_refuses_before_it_changes_anything():
 
 def test_delete_sheet_reads_the_project_file_back_off_disk():
     body = _generic()["Gen_DeleteSheet"]
-    assert ".DoFileSave(''" in body
-    assert "Gen_ProjectFileState(ProjFile, MemberPath)" in body
+    # The write itself lives in Gen_WriteProjectFile since 2026.10.07.02
+    # (tests/test_project_file_write_route.py pins its routes).
+    write = _at(body, "Gen_WriteProjectFile(Workspace, Project, ProjFile, MemberPath, 0, WasFocusedProject)")
+    assert write < _at(body, "FileState := Gen_ProjectFileState(ProjFile, MemberPath)")
+    assert ".DoFileSave(''" in _generic()["Gen_WriteProjectFile"]
     assert '"project_file_checked":' in body
     assert '"project_file_lists_sheet":' in body
     assert '"file_still_on_disk":' in body
