@@ -1742,7 +1742,13 @@ def build_best_canvas_from_plan(
         current = {(i.refdes, _canvas_instance_to_placement(i).x_mils,
                     _canvas_instance_to_placement(i).y_mils)
                    for i in best_result.canvas.instances}
-        if banded and {(p.refdes, p.x_mils, p.y_mils) for p in banded} != current:
+        if (banded
+                and {(p.refdes, p.x_mils, p.y_mils) for p in banded} != current
+                and not _banding_distorts_motifs(
+                    plan,
+                    [_canvas_instance_to_placement(i)
+                     for i in best_result.canvas.instances],
+                    banded)):
             band_tries += 1
             band_cand = build_canvas_from_plan(
                 plan, extractor,
@@ -2109,6 +2115,37 @@ def _canvas_instance_to_placement(inst):  # type: ignore[no-untyped-def]
         x_mils=inst.x + offx, y_mils=inst.y + offy, rotation=inst.rotation,
         flipped=inst.flipped,
     )
+
+
+def _banding_distorts_motifs(plan: DesignPlan, before, after) -> bool:
+    """True iff banding moved a self-contained motif's members unequally.
+
+    Banding imposes one y per band on every part, so the members of a
+    self-contained motif (a diode-bridge diamond, a C-L-C pi filter) that
+    sit at different heights get pulled into different bands and the
+    canonical shape resnap_motif_clusters restored is gone. A banded
+    candidate that does that must not be offered to selection: the motif
+    test (test_selfcontained_motifs_keep_canonical_geometry_through_pipeline)
+    asserts the best-of path keeps the shape, and it held only because the
+    banded candidate happened to lose. Measured when the glyph-drop fix
+    removed a forced label from that fixture's banded candidate: banded then
+    won by 0.9 of rank and the pi filter's L1-C2 leg fell from 1281 to 1000.
+    A motif moved as a whole (every member by the same offset) is fine.
+    """
+    from eda_agent.design.motifs import get_motif_by_name, recognize_motifs
+
+    b = {p.refdes: (p.x_mils, p.y_mils) for p in before}
+    a = {p.refdes: (p.x_mils, p.y_mils) for p in after}
+    for match in recognize_motifs(plan):
+        motif = get_motif_by_name(match.motif_name)
+        if motif is None or motif.ic_anchor is not None:
+            continue
+        members = [match.host_refdes(pat) for pat in motif.canonical]
+        members = [r for r in members if r in b and r in a]
+        shifts = {(a[r][0] - b[r][0], a[r][1] - b[r][1]) for r in members}
+        if len(shifts) > 1:
+            return True
+    return False
 
 
 def _band_placements(placements, per_row: int = 3, grid_mils: int = 100):
@@ -3471,6 +3508,9 @@ def _wire_sheet(
     # The one label each wire_named net gets, kept so the cross-net cull
     # below can retire it when it relabels that net at every pin.
     named_anchor: dict[str, NetLabel] = {}
+    # Every glyph cluster emitted below, so the clusters can be re-checked
+    # once the whole sheet's copper exists (_revalidate_port_clusters).
+    port_records: list[dict[str, Any]] = []
 
     for net in nets:
         net_actions = sheet_net_actions.get(net.name)
@@ -3526,6 +3566,8 @@ def _wire_sheet(
                 port_hint=(port_hints or {}).get(net.name),
                 sheet_width_mils=sw,
                 sheet_height_mils=sh,
+                body_obstacles=body_obstacles,
+                records=port_records,
             )
         elif representation in ("wire", "wire_named"):
             segs = _route_signal_pins(stub_ends, routing_obstacles)
@@ -3576,6 +3618,16 @@ def _wire_sheet(
                     orientation=0, sheet=sheet_name,
                     justification=_label_justification(p_orient),
                 )])
+
+    # A glyph is placed against the copper that exists when its net comes up
+    # in plan order, so a signal trunk routed LATER can run through it (the
+    # router is never told about glyphs). Re-check every cluster against the
+    # finished sheet and move the ones that now connect to another net,
+    # before the cull below would drop a whole net for it.
+    _revalidate_port_clusters(
+        canvas=canvas, sheet_name=sheet_name, records=port_records,
+        sheet_wire_segments=sheet_wire_segments,
+        pin_world_coords=pin_world_coords, body_obstacles=body_obstacles)
 
     # Cross-net WIRE meetings: two nets whose wires share an endpoint, or one
     # ending on the other's segment, are auto-junctioned by Altium on compile
@@ -3920,6 +3972,321 @@ def _shift_centroid_clear_of_pins(
     return centroid_x
 
 
+def _cluster_meets_foreign(
+    port_xy: tuple[int, int],
+    spokes: list[tuple[int, int, int, int]],
+    stub_ends: set[tuple[int, int]],
+    foreign_segs: list[tuple[int, int, int, int, str]],
+    foreign_points: set[tuple[int, int]],
+) -> bool:
+    """True iff a cluster's glyph or spokes would CONNECT to another net.
+
+    The connection rules the cull loop enforces (``_cross_net_meeting_counts``
+    -- an endpoint on another net's endpoint or segment, either way round)
+    plus the two it cannot see because it reads wires only: a glyph hotspot
+    on another net's wire, pin or glyph, and a spoke running through another
+    net's pin or glyph. ``foreign_points`` holds those pins and glyphs.
+
+    Only meetings the NEW geometry creates count. A cluster pin's stub end
+    is where every spoke starts; a foreign wire through that point is a
+    meeting of the pin's own stub, which no glyph position can cure, so it
+    is skipped rather than condemning every candidate.
+    """
+    gx, gy = port_xy
+    if port_xy in foreign_points:
+        return True
+    if any(_point_on_segment(gx, gy, *f[:4]) for f in foreign_segs):
+        return True
+    for s in spokes:
+        for ex, ey in ((s[0], s[1]), (s[2], s[3])):
+            if (ex, ey) in stub_ends:
+                continue
+            if any(_point_on_segment(ex, ey, *f[:4]) for f in foreign_segs):
+                return True
+        for f in foreign_segs:
+            for fx, fy in ((f[0], f[1]), (f[2], f[3])):
+                if (fx, fy) in stub_ends:
+                    continue
+                if _point_on_segment(fx, fy, *s[:4]):
+                    return True
+        for (px, py) in foreign_points:
+            if (px, py) not in stub_ends and _point_on_segment(px, py, *s[:4]):
+                return True
+    return False
+
+
+def _strict_crossings(
+    segs: list[tuple[int, int, int, int]],
+    others: list[tuple[int, int, int, int, str]],
+) -> int:
+    """Perpendicular mid-span crossings between ``segs`` and ``others``."""
+    n = 0
+    for a in segs:
+        a_vert = a[0] == a[2]
+        for b in others:
+            if a_vert == (b[0] == b[2]):
+                continue
+            v, h = (a, b) if a_vert else (b, a)
+            if (min(h[0], h[2]) < v[0] < max(h[0], h[2])
+                    and min(v[1], v[3]) < h[1] < max(v[1], v[3])):
+                n += 1
+    return n
+
+
+#: Ranking weights for an alternative glyph site (see _relocate_port_cluster).
+#: A crossing costs what it costs in the engine score (_W_CROSSINGS), and so
+#: does a glyph BAR drawn onto another net's wire: it reads as a connection.
+#: A spoke through a part body costs the score's _W_THROUGH_BODY. The glyph's
+#: NAME over a wire or body is charged lightly: the post-selection glyph pass
+#: (port_glyphs) re-aims or shares glyphs whose name collides, and charging
+#: it like a crossing made the search jog a solo GND drop 500 mil sideways
+#: rather than let its name sit near a wire (measured on USB_CONN). Wire is
+#: charged five times the score's rate and each bend 20, so a long detour or
+#: a jog does not beat a slightly worse straight drop.
+_RELOC_W_CROSS = 100.0
+_RELOC_W_INK = 100.0
+_RELOC_W_BODY = 400.0
+_RELOC_W_HUG = 30.0
+_RELOC_W_TEXT = 30.0
+_RELOC_W_TEXT_BODY = 30.0
+_RELOC_W_BEND = 20.0
+_RELOC_W_LEN = 0.05
+_RELOC_W_AT_STUB = 150.0
+#: How far a relocated glyph may run out along the pins' direction, and the
+#: drop lengths tried below (ground) / above (supply) the cluster.
+_RELOC_MAX_RUN = 1500
+_RELOC_DROPS = (400, 300, 500, 200, 600, 700, 800)
+
+
+def _relocate_port_cluster(
+    *,
+    net_name: str,
+    style: str,
+    is_gnd: bool,
+    cluster_pts: list[tuple[int, int]],
+    cluster_orients: list[int],
+    spoke_obstacles: list[tuple[int, int, int, int]],
+    body_boxes: list[tuple[int, int, int, int]],
+    foreign_segs: list[tuple[int, int, int, int, str]],
+    foreign_points: set[tuple[int, int]],
+    sheet_width_mils: int,
+    sheet_height_mils: int,
+) -> Optional[tuple[tuple[int, int], list[tuple[int, int, int, int]]]]:
+    """A glyph site for a cluster whose default site connects to another net.
+
+    WHY THIS EXISTS. When a rail's glyph or spoke lands on another net's
+    copper the cull loop sees a cross-net meeting, and a rail that loses the
+    cull has EVERY segment on the sheet dropped and each pin repaired with
+    its own glyph (``_wire_sheet._try_cull``). The meeting is symmetric and
+    ties break alphabetically, so the net whose stub was run over is as
+    likely to lose as the net that ran over it. Measured on the multiviewer
+    carrier: the stacked audio jack's sleeve GND glyph landed on the SH4
+    shield stub and CHASSIS lost all its wiring (J802, J807); U823's VCC glyph
+    landed on the 3A input stub and AUD_LDO_3V3 lost all ten of its wires;
+    AUDIO_PWR's GND and VDD_5V glyphs landed on one point and GND (27 pins)
+    was culled; PWR_IN_USB lost PWR_VIN_PROT the same way -- in every one of
+    the best-of builds, so no placement variant could escape it.
+
+    Candidates run the glyph out along the pins' direction (past a fan of
+    staggered neighbouring stubs) in grid steps and try several drop
+    lengths. Each is routed with the same ``_route_l_path`` the default
+    uses and must pass ``_cluster_meets_foreign``; the clean ones are ranked
+    by crossings, glyph ink on other wires, body crossings and hugs, bends
+    and wire. Branch and bound on wire length keeps the search to a handful
+    of routes. Returns None when no candidate is clean: the caller keeps the
+    default geometry and the cull loop still guarantees the netlist, so this
+    can never make a netlist worse.
+    """
+    sign = -1 if is_gnd else 1
+    base_y = (min(y for _, y in cluster_pts) if is_gnd
+              else max(y for _, y in cluster_pts))
+    x0 = (sum(x for x, _ in cluster_pts) // len(cluster_pts) // 100) * 100
+    outs = {orient for orient in cluster_orients}
+    if outs == {0}:
+        sides = (1,)
+    elif outs == {2}:
+        sides = (-1,)
+    else:
+        sides = (1, -1)
+    stub_ends = set(cluster_pts)
+    margin = 200
+
+    cands: list[tuple[float, int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for run in range(0, _RELOC_MAX_RUN + 100, 100):
+        for side in (sides if run else (1,)):
+            cx = x0 + side * run
+            if not margin <= cx <= sheet_width_mils - margin:
+                continue
+            for drop in _RELOC_DROPS:
+                cy = ((base_y + sign * drop) // 100) * 100
+                if not margin <= cy <= sheet_height_mils - margin:
+                    continue
+                if (cx, cy) in seen or (cx, cy) in stub_ends:
+                    continue
+                seen.add((cx, cy))
+                lb = _RELOC_W_LEN * sum(
+                    abs(px - cx) + abs(py - cy) for px, py in cluster_pts)
+                cands.append((lb, cx, cy))
+    # The repair form, "pin, stub, glyph": the glyph on the pin's own stub
+    # end with no spoke at all. Where every drop has to cross the
+    # neighbouring pins' wires (a supply pin with signal pins 100 mil above
+    # it, measured on PWR_IN_USB's LM74800 OUT) this beats a riser through
+    # them, and the post-selection glyph pass can still re-aim it. Charged
+    # _RELOC_W_AT_STUB, so a drop that crosses nothing still wins.
+    if len(cluster_pts) == 1:
+        cands.append((0.0, cluster_pts[0][0], cluster_pts[0][1]))
+    cands.sort()
+
+    best: Optional[tuple[float, tuple[int, int], list]] = None
+    for lb, cx, cy in cands:
+        if best is not None and lb >= best[0]:
+            break
+        scored = _score_port_site(
+            cx, cy, net_name=net_name, style=style, cluster_pts=cluster_pts,
+            spoke_obstacles=spoke_obstacles, body_boxes=body_boxes,
+            foreign_segs=foreign_segs, foreign_points=foreign_points)
+        if scored is None:
+            continue
+        cost, spokes, _parts = scored
+        if best is None or cost < best[0]:
+            best = (cost, (cx, cy), spokes)
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
+def _score_port_site(
+    cx: int,
+    cy: int,
+    *,
+    net_name: str,
+    style: str,
+    cluster_pts: list[tuple[int, int]],
+    spoke_obstacles: list[tuple[int, int, int, int]],
+    body_boxes: list[tuple[int, int, int, int]],
+    foreign_segs: list[tuple[int, int, int, int, str]],
+    foreign_points: set[tuple[int, int]],
+) -> Optional[tuple[float, list[tuple[int, int, int, int]], dict[str, float]]]:
+    """Cost of putting a cluster's glyph at (cx, cy), or None if it connects.
+
+    Returns ``(cost, spokes, parts)`` where ``parts`` breaks the cost down
+    by term (``_RELOC_W_*``). None when the glyph would sit in a part body
+    or on another net's pin or glyph, or when ``_cluster_meets_foreign``
+    finds a connection.
+    """
+    from eda_agent.design.port_glyphs import INK_CLR, glyph_geometry
+    from eda_agent.design.router import _segment_crosses_rect
+
+    if (cx, cy) in foreign_points:
+        return None
+    if any(bx1 - 50 <= cx <= bx2 + 50 and by1 - 50 <= cy <= by2 + 50
+           for (bx1, by1, bx2, by2) in body_boxes):
+        return None
+    spokes: list[tuple[int, int, int, int]] = []
+    bends = 0
+    for px, py in cluster_pts:
+        path = _route_l_path(px, py, cx, cy, spoke_obstacles)
+        bends += max(0, len(path) - 1)
+        spokes.extend(path)
+    if _cluster_meets_foreign((cx, cy), spokes, set(cluster_pts),
+                              foreign_segs, foreign_points):
+        return None
+    parts = {"len": 0.0, "cross": 0.0, "ink": 0.0, "text": 0.0,
+             "text_body": 0.0, "body": 0.0, "hug": 0.0, "bend": 0.0,
+             "at_stub": 0.0}
+    parts["len"] = _RELOC_W_LEN * sum(abs(s[2] - s[0]) + abs(s[3] - s[1])
+                                      for s in spokes)
+    parts["cross"] = _RELOC_W_CROSS * _strict_crossings(spokes, foreign_segs)
+    ink, tb = glyph_geometry(cx, cy, net_name, style)
+    for f in foreign_segs:
+        fb = (min(f[0], f[2]), min(f[1], f[3]),
+              max(f[0], f[2]), max(f[1], f[3]))
+        if any(not (max(i[0], i[2]) + INK_CLR < fb[0]
+                    or fb[2] < min(i[0], i[2]) - INK_CLR
+                    or max(i[1], i[3]) + INK_CLR < fb[1]
+                    or fb[3] < min(i[1], i[3]) - INK_CLR) for i in ink):
+            parts["ink"] += _RELOC_W_INK
+        elif not (tb[2] <= fb[0] or fb[2] <= tb[0]
+                  or tb[3] <= fb[1] or fb[3] <= tb[1]):
+            parts["text"] += _RELOC_W_TEXT
+    for (bx1, by1, bx2, by2) in body_boxes:
+        if not (tb[2] <= bx1 or bx2 <= tb[0] or tb[3] <= by1 or by2 <= tb[1]):
+            parts["text_body"] += _RELOC_W_TEXT_BODY
+        for s in spokes:
+            if _segment_crosses_rect(*s, bx1, by1, bx2, by2):
+                parts["body"] += _RELOC_W_BODY
+            elif _segment_crosses_rect(*s, bx1 - 60, by1 - 60,
+                                       bx2 + 60, by2 + 60):
+                parts["hug"] += _RELOC_W_HUG
+    parts["bend"] = _RELOC_W_BEND * bends
+    if not spokes:
+        parts["at_stub"] = _RELOC_W_AT_STUB
+    return sum(parts.values()), spokes, parts
+
+
+def _revalidate_port_clusters(
+    *,
+    canvas: SchematicCanvas,
+    sheet_name: str,
+    records: list[dict[str, Any]],
+    sheet_wire_segments: list[tuple[int, int, int, int, str]],
+    pin_world_coords: list[tuple[int, int, str]],
+    body_obstacles: list[tuple[int, int, int, int]],
+) -> int:
+    """Move every glyph cluster that now connects to another net.
+
+    ``_emit_port_cluster`` checks a cluster against the copper that exists
+    when it runs; nets are emitted in plan order, so a trunk routed after
+    the glyph can still pass through its hotspot or end on its spoke.
+    Measured: AUDIO's AUD_LRCLK_T trunk over U823's VCC glyph, USB_CONN's
+    SSTX trunks over two GND glyphs, ETHERNET's GND glyph under a V1V8
+    spoke. Each record is re-checked against the finished sheet and, when
+    dirty, relocated with the same search; a record with no clean site
+    keeps its geometry and the cull loop still guarantees the netlist.
+    Clean clusters are never touched. Returns how many were moved.
+    """
+    moved_n = 0
+    sheet_obj = next(s for s in canvas.sheets if s.name == sheet_name)
+    for rec in records:
+        if rec["hinted"]:
+            continue
+        name = rec["net"]
+        port = rec["port"]
+        foreign_segs = [s for s in sheet_wire_segments if s[4] != name]
+        foreign_points = {
+            (p.x, p.y) for p in canvas.power_ports_on(sheet_name)
+            if p.text != name} | {
+            (x, y) for (x, y, pn) in pin_world_coords if pn != name}
+        spokes = [s[:4] for s in rec["spokes"]]
+        if not _cluster_meets_foreign((port.x, port.y), spokes,
+                                      set(rec["pts"]), foreign_segs,
+                                      foreign_points):
+            continue
+        moved = _relocate_port_cluster(
+            net_name=name, style=rec["style"], is_gnd=rec["is_gnd"],
+            cluster_pts=rec["pts"], cluster_orients=rec["orients"],
+            spoke_obstacles=rec["spoke_obstacles"],
+            body_boxes=list(body_obstacles),
+            foreign_segs=foreign_segs, foreign_points=foreign_points,
+            sheet_width_mils=sheet_obj.width_mils,
+            sheet_height_mils=sheet_obj.height_mils,
+        )
+        if moved is None:
+            continue
+        (nx, ny), new_spokes = moved
+        for seg in rec["spokes"]:
+            sheet_wire_segments.remove(seg)
+        new_port = replace(port, x=nx, y=ny)
+        idx = next(i for i, p in enumerate(canvas.power_ports) if p is port)
+        canvas.power_ports[idx] = new_port
+        tagged = [(s[0], s[1], s[2], s[3], name) for s in new_spokes]
+        sheet_wire_segments.extend(tagged)
+        rec["port"], rec["spokes"] = new_port, tagged
+        moved_n += 1
+    return moved_n
+
+
 def _emit_port_cluster(
     *,
     canvas: SchematicCanvas,
@@ -3932,6 +4299,8 @@ def _emit_port_cluster(
     sheet_height_mils: int,
     other_net_pin_points: Optional[list[tuple[int, int]]] = None,
     port_hint: Optional[dict[str, int]] = None,
+    body_obstacles: Optional[list[tuple[int, int, int, int]]] = None,
+    records: Optional[list[dict[str, Any]]] = None,
 ) -> None:
     """Cluster a power/ground net's pins and emit ONE port per cluster.
 
@@ -3972,6 +4341,10 @@ def _emit_port_cluster(
     # other-net pin so the path geometry avoids them.
     pin_point_bboxes = [(x - 25, y - 25, x + 25, y + 25) for (x, y) in other_pins]
     spoke_obstacles = list(routing_obstacles) + pin_point_bboxes
+    # Other nets' copper as it stands, built on the first cluster that needs
+    # it: (wire segments, pin + glyph points). Clusters of this net add only
+    # this net's copper, so one snapshot serves the whole call.
+    foreign: Optional[tuple[list, set]] = None
 
     for cl in clusters:
         cluster_pts = [net_actions[i][1] for i in cl]
@@ -4085,20 +4458,58 @@ def _emit_port_cluster(
             cluster_orients[0], is_ground=is_gnd
         )
         del port_orient_unused
-        canvas.add_power_ports([PowerPort(
+        spokes: list[tuple[int, int, int, int]] = []
+        for pt in cluster_pts:
+            if pt == (centroid_x, port_y):
+                continue
+            spokes.extend(_route_l_path(
+                pt[0], pt[1], centroid_x, port_y, spoke_obstacles))
+        # A glyph or spoke that CONNECTS to another net is moved here, where
+        # the geometry is chosen, instead of being left to the cull loop: a
+        # rail that loses the cull has all its wiring on the sheet dropped
+        # (see _relocate_port_cluster for the measured cases). The default
+        # site is kept whenever it is clean, so a sheet with no such meeting
+        # is drawn exactly as before. A user's port_hint is never moved.
+        if port_hint is None:
+            if foreign is None:
+                foreign = (
+                    [s for s in sheet_wire_segments if s[4] != net.name],
+                    {(p.x, p.y) for p in canvas.power_ports_on(sheet_name)
+                     if p.text != net.name} | set(other_pins),
+                )
+            if _cluster_meets_foreign((centroid_x, port_y), spokes,
+                                      set(cluster_pts), *foreign):
+                moved = _relocate_port_cluster(
+                    net_name=net.name, style=style, is_gnd=is_gnd,
+                    cluster_pts=cluster_pts, cluster_orients=cluster_orients,
+                    spoke_obstacles=spoke_obstacles,
+                    body_boxes=(list(body_obstacles)
+                                if body_obstacles is not None
+                                else list(routing_obstacles)),
+                    foreign_segs=foreign[0], foreign_points=foreign[1],
+                    sheet_width_mils=sheet_width_mils,
+                    sheet_height_mils=sheet_height_mils,
+                )
+                if moved is not None:
+                    (centroid_x, port_y), spokes = moved
+        port = PowerPort(
             text=net.name,
             x=centroid_x,
             y=port_y,
             style=style,
             sheet=sheet_name,
-        )])
-        for pt in cluster_pts:
-            if pt == (centroid_x, port_y):
-                continue
-            for seg in _route_l_path(
-                pt[0], pt[1], centroid_x, port_y, spoke_obstacles
-            ):
-                sheet_wire_segments.append((seg[0], seg[1], seg[2], seg[3], net.name))
+        )
+        canvas.add_power_ports([port])
+        tagged = [(seg[0], seg[1], seg[2], seg[3], net.name) for seg in spokes]
+        sheet_wire_segments.extend(tagged)
+        if records is not None:
+            records.append({
+                "net": net.name, "port": port, "spokes": tagged,
+                "pts": cluster_pts, "orients": cluster_orients,
+                "style": style, "is_gnd": is_gnd,
+                "spoke_obstacles": spoke_obstacles,
+                "hinted": port_hint is not None,
+            })
 
 
 #: How far a repair stub reaches before the glyph sits on it. Short on
