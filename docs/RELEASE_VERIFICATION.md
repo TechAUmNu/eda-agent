@@ -1978,7 +1978,7 @@ Still open after this run:
 
 ---
 
-## 32. A sheet delete that removes the sheet, and a save-all that leaves libraries alone (not yet run live)
+## 32. A sheet delete that removes the sheet, and a save-all that leaves libraries alone (run live 2026-10-07, results at the end)
 
 Two fixes from the live session of 2026-10-06 (Altium 26.10.1.5, the previous bridge build
 (the 2026-10-04 SCRIPT_VERSION), the multiviewer carrier project). **FPC was NOT
@@ -2123,6 +2123,101 @@ skipping there would lose them silently with no later call to report it.
 Changing it is a separate decision. `app_checkpoint` passes
 `include_libraries=true`, so a checkpoint still captures library edits
 whose flag never propagated.
+
+### Results 2026-10-07
+
+Run on Altium 26.10.1.5, bridge `2026.10.06.02`, the live multiviewer
+carrier project (31 sheets, `carrier.SchLib` open and unedited). Steps 3,
+4 and 11 and three of step 8's refusals were NOT run: they write the
+library (moving the symbol-cache key) or aim a refusal at the project's
+PcbDoc, and belong on a scratch project.
+
+* **Step 1, version**: PASS. `app_ping` matched `2026.10.06.02`; the
+  script project compiled (the compile check the stray `End;` would have
+  failed).
+* **Step 2, default save-all**: PASS. `libraries_skipped:
+  [carrier.SchLib]` with the warning; the SchLib's mtime unchanged on disk
+  (still 2026-10-06 16:16:09), so the symbol cache stayed fresh.
+* **Step 5, only_modified**: PASS. `documents_seen 49,
+  documents_attempted 0, documents_written 0, documents_skipped 24` (every
+  loaded document), the library also in `libraries_skipped`, and the note.
+* **Steps 6 + 9, the named sheet with delete_file**: PASS. A throwaway
+  `ZZ_DELETE_TEST` (from `proj_add_sheet`), `multiviewer__PWR_MECH.SchDoc`
+  focused, `proj_delete_sheet delete_file=true`: `success, removed,
+  still_member false, was_loaded, closed, previously_focused = PWR_MECH,
+  previously_focused_still_open, project_saved, project_file_checked,
+  project_file_lists_sheet false, file_deleted, file_still_on_disk false`.
+  Independently: PWR_MECH still loaded, no `ZZ_DELETE_TEST` anywhere in the
+  .PrjPcb, the file gone, and `git diff` on the .PrjPcb EMPTY (byte-identical
+  to the committed project).
+* **Step 7, survives a save-all**: covered. The step-5 save-all ran after
+  the delete and did not recreate the deleted file.
+* **Step 8, refusals**: `NOT_FOUND` PASS ("Sheet not found in project" for
+  a path that is not a member). `MODIFIED`, `NOT_A_SHEET`, `SAFETY_CHECK`
+  not run (see above).
+* **Step 10, save_project=false**: PASS, and it found a defect ELSEWHERE.
+  First try: add `ZZ_T10`, delete it with `save_project=false
+  delete_file=true`. It answered `project_file_lists_sheet: false,
+  file_deleted: true`, not the predicted `true / false`, because the
+  .PrjPcb had NEVER named the sheet: its mtime was still that of the step-9
+  save. **proj_add_sheet does not write the project file**, although it
+  answers `saved: true` (that is the sheet's own save). The delete handler
+  judged the disk correctly and deleting was safe; the add is fixed in
+  step 33. Second try with the project written first
+  (`WorkspaceManager:SaveObject ObjectKind=FocusedProject`, grep showed
+  `DocumentPath=ZZ_T10B.SchDoc`): `success: false, project_saved: false,
+  project_file_lists_sheet: true, file_deleted: false, file_still_on_disk:
+  true`, with the reason. Exactly as specified. Cleanup by a project save +
+  removing the file left the .PrjPcb byte-identical to the committed one.
+
+---
+
+## 33. A new sheet that the project file names (not yet run live)
+
+Found by step 32's step 10 (2026-10-07, bridge `2026.10.06.02`):
+`proj_add_sheet` answered `{success: true, saved: true, added_to_project:
+true}` while the .PrjPcb on disk kept its old timestamp and did not name
+the sheet. `saved` was the new SHEET's `DoFileSave`; `DM_AddSourceDocument`
+changes membership in memory only. Two more holes in the same handler:
+`added_to_project` was a literal `True` written after the call, and
+nothing looked at the target path, so a name whose file existed would have
+been replaced by a blank sheet.
+
+`Gen_AddSheet` now refuses an existing file (`EXISTS`) before
+`Client.OpenNewDocument`, re-reads membership with `Gen_SheetIsMember`,
+and (with `save_project`, the default) writes the project through its own
+server document and reads the file back with `Gen_ProjectFileState`:
+exactly `Gen_DeleteSheet`'s route, which steps 6, 9 and 10 above ran live.
+The two helpers moved above `Gen_AddSheet` (DelphiScript wants a function
+declared before use). Every Altium call here has already run live; the
+compile is what is new.
+
+Work on the live project only if the .PrjPcb is committed (the check is a
+`git diff`), or on a copy. Focus some other sheet `A` first.
+
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.07.01`.
+
+2. **A default add writes the project.** Note the .PrjPcb's mtime and two
+   SchDoc mtimes. `proj_add_sheet name=ZZ33`. Expect `success: true,
+   sheet_saved: true, saved: true, added_to_project: true,
+   project_file_checked: true, project_file_lists_sheet: true` and usually
+   `project_saved: true` (FileAge is 2-second accurate; judge the save by
+   the file). The .PrjPcb contains `DocumentPath=ZZ33.SchDoc` and its mtime
+   moved; the two SchDoc mtimes did NOT (the project save writes only the
+   project document).
+
+3. **An existing name is refused.** `proj_add_sheet name=ZZ33` again:
+   error `EXISTS`; `ZZ33.SchDoc`'s mtime unchanged; `proj_list_documents`
+   lists it once.
+
+4. **save_project=false.** `proj_add_sheet name=ZZ33B save_project=false`:
+   `success: true, added_to_project: true, project_saved: false`,
+   `project_file_lists_sheet: false` (the file was read and does not name
+   it), and the .PrjPcb mtime unchanged.
+
+5. **Clean up with the delete.** `proj_delete_sheet file_path=<ZZ33B>
+   delete_file=true`, then the same for `ZZ33`: both `success: true,
+   file_deleted: true`. `git diff` on the .PrjPcb is empty.
 
 ---
 

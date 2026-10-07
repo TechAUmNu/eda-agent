@@ -1318,22 +1318,48 @@ def register_generic_tools(mcp):
     @mcp.tool()
     async def proj_add_sheet(
         name: str = "NewSheet",
+        save_project: bool = True,
     ) -> dict[str, Any]:
         """Create a new schematic sheet and add it to the focused project.
 
         The sheet is created in the same directory as the project file.
+        Refuses (``EXISTS``) before creating anything when a file of that
+        name is already there, rather than overwriting it with a blank
+        sheet; add an existing file with ``proj_add_document`` instead.
+
+        THE PROJECT FILE USED TO STAY UNWRITTEN. Measured 2026-10-07: the
+        reply said ``saved: true`` but that was the new SHEET's save; the
+        membership change lived in memory and the .PrjPcb on disk did not
+        name the sheet until something else saved the project. It now
+        re-reads membership, writes the project file and reads the file
+        BACK, the same check ``proj_delete_sheet`` makes.
 
         Args:
             name: Name for the new sheet (without .SchDoc extension).
                   Default "NewSheet".
+            save_project: Write the project file afterwards so the new
+                member survives a reload (default True). With False the
+                sheet is a member in memory only; ``proj_save`` or a
+                project save makes it stick.
 
         Returns:
-            Dictionary with the path of the newly created sheet
+            ``success``, ``path``, ``sheet_saved`` (``saved`` is the same
+            value, kept for older callers: the SHEET file, not the project),
+            ``added_to_project`` (membership re-read), ``project_path``,
+            ``project_saved`` (file timestamp moved; 2-second accurate),
+            ``project_file_checked`` / ``project_file_lists_sheet`` (the
+            project file read off disk; null when it could not be read), and
+            a ``reason`` when a step fell short. With ``save_project``,
+            ``success`` needs a project file that was read and names the
+            sheet.
         """
+        params: dict[str, Any] = {"name": name}
+        if not save_project:
+            params["save_project"] = "false"
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "generic.add_sheet",
-            {"name": name},
+            params,
         )
         return result
 

@@ -2961,121 +2961,8 @@ Begin
 End;
 
 {..............................................................................}
-{ Add a new schematic sheet to the focused project                           }
-{..............................................................................}
-
-Function Gen_AddSheet(Params : String; RequestId : String) : String;
-Var
-    SheetName : String;
-    Workspace : IWorkspace;
-    Project : IProject;
-    NewDocPath : String;
-    ServerDoc : IServerDocument;
-    Saved, Added : Boolean;
-Begin
-    SheetName := ExtractJsonValue(Params, 'name');
-    If SheetName = '' Then SheetName := 'NewSheet';
-
-    Workspace := GetWorkspace;
-    If Workspace = Nil Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace available');
-        Exit;
-    End;
-
-    Project := Workspace.DM_FocusedProject;
-    If Project = Nil Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No focused project');
-        Exit;
-    End;
-
-    // Build the new sheet path in the same directory as the project
-    NewDocPath := Project.DM_ProjectFullPath;
-    // Strip project filename to get directory
-    While (Length(NewDocPath) > 0) And (Copy(NewDocPath, Length(NewDocPath), 1) <> '\') Do
-        NewDocPath := Copy(NewDocPath, 1, Length(NewDocPath) - 1);
-    NewDocPath := NewDocPath + SheetName + '.SchDoc';
-
-    { Create the blank schematic via Client.OpenNewDocument, mirroring the
-      working App_CreateDocument path. The previous
-      RunProcess('WorkspaceManager:CreateNewDocument') WITHOUT a FileName
-      raises a modal "Value cannot be null. (Parameter 'key')" and WEDGES
-      the polling loop. OpenNewDocument names the doc up front, so the
-      null-key never happens. }
-    ServerDoc := Client.OpenNewDocument('SCH', NewDocPath, SheetName, False);
-    If ServerDoc = Nil Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'CREATE_FAILED',
-            'Client.OpenNewDocument returned Nil for kind=SCH');
-        Exit;
-    End;
-
-    { Persist to disk: force the path then DoFileSave, falling back to a
-      Save-As via WorkspaceManager:SaveObject (same fallback as
-      App_CreateDocument). }
-    Saved := False;
-    Try ServerDoc.SetFileName(NewDocPath); Except End;
-    Try
-        ServerDoc.SetModified(True);
-        ServerDoc.DoFileSave('');
-        Saved := FileExists(NewDocPath);
-    Except Saved := False; End;
-    If Not Saved Then
-    Begin
-        Try
-            ServerDoc.Focus;
-            ResetParameters;
-            AddStringParameter('ObjectKind', 'Document');
-            AddStringParameter('FileName', NewDocPath);
-            RunProcess('WorkspaceManager:SaveObject');
-            Saved := FileExists(NewDocPath);
-        Except Saved := False; End;
-    End;
-
-    { Add to the focused project via the documented project-side API
-      (DM_AddSourceDocument), which works across workspace states where
-      WorkspaceManager:AddObjectToProject silently no-ops. }
-    Added := False;
-    Try
-        Project.DM_AddSourceDocument(NewDocPath);
-        Added := True;
-    Except Added := False; End;
-
-    Result := BuildSuccessResponse(RequestId,
-        '{"success":true,"path":"' + EscapeJsonString(NewDocPath) + '"' +
-        ',"saved":' + BoolToJsonStr(Saved) +
-        ',"added_to_project":' + BoolToJsonStr(Added) + '}');
-End;
-
-{..............................................................................}
-{ Delete (remove) a schematic sheet from a project.                           }
-{ Safety check: will not remove the last remaining sheet.                    }
-{                                                                              }
-{ THIS USED TO CLOSE THE WRONG DOCUMENT AND REMOVE NOTHING, AND SAY SUCCESS.   }
-{ It ran WorkspaceManager:CloseObject then RemoveObjectFromProject, both with  }
-{ ObjectKind=Document|FileName=<path>, and never looked again. MEASURED        }
-{ 2026-10-06 (AD 26.10.1.5, bridge 2026.10.04.11): asked to delete STUBS while }
-{ PWR_IN_BARREL was focused, it replied success and removed:STUBS, but it had  }
-{ CLOSED PWR_IN_BARREL (a later set_active said "Document not loaded"), STUBS  }
-{ was still a member after a project save and still loaded, and the next       }
-{ save-all wrote STUBS back to disk. Focusing STUBS first: success again,      }
-{ still a member. CloseObject acts on the FOCUSED document whatever FileName   }
-{ says, the same pattern RELEASE_VERIFICATION records for a project close.     }
-{                                                                              }
-{ What worked every time that day is what this does now: membership through    }
-{ DM_RemoveSourceDocument with a re-read (Proj_RemoveDocument's route), then   }
-{ the NAMED document closed through its own IServerDocument with a lookup      }
-{ afterwards (App_CloseDocument's route), then the project file written and    }
-{ READ BACK. Every one of those is reported, so a step that did not happen     }
-{ cannot hide behind a success from the step before it.                        }
-{                                                                              }
-{ Order matters. A modified sheet is refused BEFORE anything changes, so a     }
-{ refusal leaves the project as it was found. The close happens only after     }
-{ the removal is confirmed, and only on a document whose FileName is the       }
-{ member's path, so no other document can be the one that goes. The file is   }
-{ deleted (opt-in, delete_file) only once the project file on disk no longer   }
-{ names it, so the project is never left pointing at a missing file.           }
+{ Sheet membership helpers, shared by Gen_AddSheet and Gen_DeleteSheet. They   }
+{ sit above both because DelphiScript wants a function declared before use.   }
 {..............................................................................}
 
 Function Gen_SheetIsMember(Project : IProject; MemberPath : String) : Boolean;
@@ -3159,6 +3046,206 @@ Begin
         End;
     End;
 End;
+
+{..............................................................................}
+{ Add a new schematic sheet to the focused project.                           }
+{                                                                              }
+{ IT USED TO LEAVE THE PROJECT FILE UNWRITTEN AND STILL SAY saved:true.        }
+{ MEASURED 2026-10-07 (AD 26.10.1.5, bridge 2026.10.06.02): "saved" was the    }
+{ new SHEET's DoFileSave. DM_AddSourceDocument changes membership in memory    }
+{ only; the .PrjPcb on disk kept its old timestamp and did not name the sheet  }
+{ until something else saved the project, so a reload in between would have    }
+{ dropped it. It also never looked before creating: a name whose file already  }
+{ existed would have had that file overwritten by a blank sheet.               }
+{                                                                              }
+{ Now an existing file is refused before anything is created (EXISTS), the     }
+{ membership is re-read instead of assumed, and with save_project (the         }
+{ default) the project is written and its file READ BACK, through the same     }
+{ route and the same three-answer check proj_delete_sheet uses. "saved" keeps  }
+{ its old meaning, the sheet file, for callers that read it; sheet_saved says  }
+{ so by name.                                                                  }
+{..............................................................................}
+
+Function Gen_AddSheet(Params : String; RequestId : String) : String;
+Var
+    SheetName, ProjFile, NewDocPath, Why, ListedJson, Data : String;
+    Workspace : IWorkspace;
+    Project : IProject;
+    ServerDoc, ProjDoc : IServerDocument;
+    Saved, Added, SaveProject, ProjectSaved, FileChecked, ListedOnDisk, Success : Boolean;
+    AgeBefore, AgeAfter, FileState : Integer;
+Begin
+    SheetName := ExtractJsonValue(Params, 'name');
+    If SheetName = '' Then SheetName := 'NewSheet';
+    SaveProject := LowerCase(ExtractJsonValue(Params, 'save_project')) <> 'false';
+
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace available');
+        Exit;
+    End;
+
+    Project := Workspace.DM_FocusedProject;
+    If Project = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No focused project');
+        Exit;
+    End;
+
+    ProjFile := '';
+    Try ProjFile := Project.DM_ProjectFullPath; Except ProjFile := ''; End;
+
+    // Build the new sheet path in the same directory as the project
+    NewDocPath := ProjFile;
+    // Strip project filename to get directory
+    While (Length(NewDocPath) > 0) And (Copy(NewDocPath, Length(NewDocPath), 1) <> '\') Do
+        NewDocPath := Copy(NewDocPath, 1, Length(NewDocPath) - 1);
+    NewDocPath := NewDocPath + SheetName + '.SchDoc';
+
+    { Refuse before creating anything: OpenNewDocument then DoFileSave at a  }
+    { path that exists would replace that file with a blank sheet.           }
+    If FileExists(NewDocPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'EXISTS',
+            'A file already exists at ' + NewDocPath + '; refusing to '
+            + 'overwrite it with a blank sheet. Choose another name, or add '
+            + 'the existing file with proj_add_document.');
+        Exit;
+    End;
+
+    { Create the blank schematic via Client.OpenNewDocument, mirroring the
+      working App_CreateDocument path. The previous
+      RunProcess('WorkspaceManager:CreateNewDocument') WITHOUT a FileName
+      raises a modal "Value cannot be null. (Parameter 'key')" and WEDGES
+      the polling loop. OpenNewDocument names the doc up front, so the
+      null-key never happens. }
+    ServerDoc := Client.OpenNewDocument('SCH', NewDocPath, SheetName, False);
+    If ServerDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'CREATE_FAILED',
+            'Client.OpenNewDocument returned Nil for kind=SCH');
+        Exit;
+    End;
+
+    { Persist to disk: force the path then DoFileSave, falling back to a
+      Save-As via WorkspaceManager:SaveObject (same fallback as
+      App_CreateDocument). }
+    Saved := False;
+    Try ServerDoc.SetFileName(NewDocPath); Except End;
+    Try
+        ServerDoc.SetModified(True);
+        ServerDoc.DoFileSave('');
+        Saved := FileExists(NewDocPath);
+    Except Saved := False; End;
+    If Not Saved Then
+    Begin
+        Try
+            ServerDoc.Focus;
+            ResetParameters;
+            AddStringParameter('ObjectKind', 'Document');
+            AddStringParameter('FileName', NewDocPath);
+            RunProcess('WorkspaceManager:SaveObject');
+            Saved := FileExists(NewDocPath);
+        Except Saved := False; End;
+    End;
+
+    { Add to the focused project via the documented project-side API         }
+    { (DM_AddSourceDocument), which works across workspace states where      }
+    { WorkspaceManager:AddObjectToProject silently no-ops. Membership is     }
+    { re-read afterwards: "I issued it" is not "it happened".                }
+    Try Project.DM_AddSourceDocument(NewDocPath); Except End;
+    Added := False;
+    Try Added := Gen_SheetIsMember(Project, NewDocPath); Except Added := False; End;
+
+    { The project FILE, so the new member survives a reload, read back off   }
+    { disk rather than taken from the save call, which does not raise when   }
+    { the editor declines.                                                   }
+    ProjectSaved := False;
+    If SaveProject And Added And (ProjFile <> '') Then
+    Begin
+        AgeBefore := -1;
+        Try AgeBefore := FileAge(ProjFile); Except AgeBefore := -1; End;
+        ProjDoc := Nil;
+        Try ProjDoc := Client.GetDocumentByPath(ProjFile); Except ProjDoc := Nil; End;
+        If ProjDoc <> Nil Then
+        Begin
+            Try ProjDoc.SetModified(True); Except End;
+            Try ProjDoc.DoFileSave(''); Except End;
+        End;
+        AgeAfter := -1;
+        Try AgeAfter := FileAge(ProjFile); Except AgeAfter := -1; End;
+        ProjectSaved := AgeAfter <> AgeBefore;
+    End;
+    { Unknown (2) never counts as listed here: the claim being checked is    }
+    { "the file names the new sheet", and an unread file cannot support it.  }
+    FileState := Gen_ProjectFileState(ProjFile, NewDocPath);
+    FileChecked := FileState <> 2;
+    ListedOnDisk := FileState = 1;
+
+    Why := '';
+    If Not Saved Then
+        Why := 'the new sheet was not written to disk: ' + NewDocPath
+    Else If Not Added Then
+        Why := 'the sheet is not a member of the project after '
+            + 'DM_AddSourceDocument (membership re-read)'
+    Else If SaveProject And (Not FileChecked) Then
+        Why := 'the project file could not be read back (no project path, no '
+            + 'file, or an empty read), so the new member is not confirmed on '
+            + 'disk: ' + ProjFile
+    Else If SaveProject And (Not ListedOnDisk) Then
+        Why := 'the project file on disk does not name the new sheet after the '
+            + 'save; it is a member in memory only until the project is saved';
+
+    Success := Saved And Added;
+    If SaveProject And ((Not FileChecked) Or (Not ListedOnDisk)) Then Success := False;
+
+    { null, not false, when the file was not read. }
+    If FileChecked Then ListedJson := BoolToJsonStr(ListedOnDisk)
+    Else ListedJson := 'null';
+    Data := '{"success":' + BoolToJsonStr(Success)
+        + ',"path":"' + EscapeJsonString(NewDocPath) + '"'
+        + ',"saved":' + BoolToJsonStr(Saved)
+        + ',"sheet_saved":' + BoolToJsonStr(Saved)
+        + ',"added_to_project":' + BoolToJsonStr(Added)
+        + ',"project_path":"' + EscapeJsonString(ProjFile) + '"'
+        + ',"project_saved":' + BoolToJsonStr(ProjectSaved)
+        + ',"project_file_checked":' + BoolToJsonStr(FileChecked)
+        + ',"project_file_lists_sheet":' + ListedJson;
+    If Why <> '' Then
+        Data := Data + ',"reason":"' + EscapeJsonString(Why) + '"';
+    Result := BuildSuccessResponse(RequestId, Data + '}');
+End;
+
+{..............................................................................}
+{ Delete (remove) a schematic sheet from a project.                           }
+{ Safety check: will not remove the last remaining sheet.                    }
+{                                                                              }
+{ THIS USED TO CLOSE THE WRONG DOCUMENT AND REMOVE NOTHING, AND SAY SUCCESS.   }
+{ It ran WorkspaceManager:CloseObject then RemoveObjectFromProject, both with  }
+{ ObjectKind=Document|FileName=<path>, and never looked again. MEASURED        }
+{ 2026-10-06 (AD 26.10.1.5, bridge 2026.10.04.11): asked to delete STUBS while }
+{ PWR_IN_BARREL was focused, it replied success and removed:STUBS, but it had  }
+{ CLOSED PWR_IN_BARREL (a later set_active said "Document not loaded"), STUBS  }
+{ was still a member after a project save and still loaded, and the next       }
+{ save-all wrote STUBS back to disk. Focusing STUBS first: success again,      }
+{ still a member. CloseObject acts on the FOCUSED document whatever FileName   }
+{ says, the same pattern RELEASE_VERIFICATION records for a project close.     }
+{                                                                              }
+{ What worked every time that day is what this does now: membership through    }
+{ DM_RemoveSourceDocument with a re-read (Proj_RemoveDocument's route), then   }
+{ the NAMED document closed through its own IServerDocument with a lookup      }
+{ afterwards (App_CloseDocument's route), then the project file written and    }
+{ READ BACK. Every one of those is reported, so a step that did not happen     }
+{ cannot hide behind a success from the step before it.                        }
+{                                                                              }
+{ Order matters. A modified sheet is refused BEFORE anything changes, so a     }
+{ refusal leaves the project as it was found. The close happens only after     }
+{ the removal is confirmed, and only on a document whose FileName is the       }
+{ member's path, so no other document can be the one that goes. The file is   }
+{ deleted (opt-in, delete_file) only once the project file on disk no longer   }
+{ names it, so the project is never left pointing at a missing file.           }
+{..............................................................................}
 
 Function Gen_DeleteSheet(Params : String; RequestId : String) : String;
 Var

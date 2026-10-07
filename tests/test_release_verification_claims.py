@@ -200,7 +200,13 @@ def test_every_step_that_writes_a_property_is_ranked():
 # DoFileSave on the project document (all shipped), and ServerDoc.Modified
 # read inside the save pass. Like 21 and 29 it writes no property; its risk
 # is the order of those calls, which the step's read-backs check.
-_STEPS_WITHOUT_A_PROPERTY = {"0", "1", "8", "9", "10", "19", "21", "29", "32"}
+#
+# Step 33 (proj_add_sheet writes the project file) reuses step 32's calls:
+# DM_AddSourceDocument (already shipped in the same handler), the
+# membership re-read, and SetModified + DoFileSave on the project document.
+# No property is written.
+_STEPS_WITHOUT_A_PROPERTY = {"0", "1", "8", "9", "10", "19", "21", "29", "32",
+                             "33"}
 
 
 def _step_headings() -> list[tuple[str, str]]:
