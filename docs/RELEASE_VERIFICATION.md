@@ -2254,7 +2254,7 @@ project, `multiviewer__PWR_MECH.SchDoc` focused.
 
 ---
 
-## 34. A removal that the project file actually loses (not yet run live)
+## 34. A removal that the project file actually loses (run live 2026-10-07, results at the end)
 
 Step 33's step 5 (2026-10-07, the first 2026-10-07 bridge build): after
 `DM_RemoveSourceDocument`, SetModified + DoFileSave on the project's own
@@ -2313,6 +2313,32 @@ Focus some other sheet `A` of the focused project first.
    `success: false`, the reason naming `ObjectKind=FocusedProject`, and
    the FIRST project's .PrjPcb mtime UNCHANGED (the fallback must never
    save the wrong project).
+
+### Results 2026-10-07
+
+Run on Altium 26.10.1.5, this build, the live multiviewer project
+(31 sheets), `multiviewer__PWR_MECH.SchDoc` focused unless stated.
+
+* **Step 1**: PASS. `app_ping` matched; `tool_catalog` showed both
+  handlers' parameters (the Python side reloaded too).
+* **Step 2**: PASS. `proj_add_sheet name=ZZ35`: `success`,
+  `project_save_route: document_save`, `project_file_lists_sheet: true`;
+  `DocumentPath=ZZ35.SchDoc` in the file.
+* **Step 3**: PASS, the defect step 33 found is gone.
+  `proj_delete_sheet delete_file=true` on ZZ35 (listed in the file):
+  `success: true, project_save_route: save_object,
+  project_file_lists_sheet: false, file_deleted: true`. `git diff` on the
+  .PrjPcb EMPTY; every SchDoc, SchLib and PcbDoc mtime unchanged.
+* **Step 4**: PASS. ZZ35B added with `save_project=false` (route `none`,
+  file not naming it), then deleted: `project_save_route: document_save`,
+  `file_deleted: true`, `git diff` on the .PrjPcb EMPTY (the document save
+  did not write back the sheet step 3 removed).
+* **Step 5**: PASS. ZZ36 added, focused, deleted: `success: true,
+  project_save_route: save_object` (Altium moved the focus to PWR_MECH,
+  inside the project, so no refocus was needed; the refocus branch is
+  still not exercised live), `file_deleted: true`, `git diff` EMPTY,
+  `proj_get_focused` the same project.
+* **Step 6**: not run (needs a second open project).
 
 ---
 
