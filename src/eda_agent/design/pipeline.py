@@ -3337,6 +3337,11 @@ def _wire_sheet(
     # so the cross-net cull below must be able to keep a net's stubs
     # while dropping its routing.
     stub_segments: set[tuple[int, int, int, int, str]] = set()
+    # Pins whose stub clipped to zero length, per net: (hot_x, hot_y,
+    # orientation). They have no entry in stub_segments, so the cull below
+    # must handle them separately or a culled signal net leaves them with
+    # neither wire nor label.
+    zero_stub_pins: dict[str, list[tuple[int, int, int]]] = {}
 
     # Pass 1: stub wires + endpoint collection.
     for net in nets:
@@ -3398,6 +3403,9 @@ def _wire_sheet(
             if (hot_x, hot_y) != (end_x, end_y):
                 sheet_wire_segments.append(_stub)
                 stub_segments.add(_stub)
+            else:
+                zero_stub_pins.setdefault(net.name, []).append(
+                    (hot_x, hot_y, endpoint.orientation))
             net_actions.append((pin_ref, (end_x, end_y), endpoint.orientation))
         if net_actions:
             sheet_net_actions[net.name] = net_actions
@@ -3773,6 +3781,39 @@ def _wire_sheet(
                     break
             if not placed:
                 n_stranded += 1
+        # A pin whose stub clipped to ZERO length has no stub segment, so the
+        # loop above never sees it: before this, culling its net left the pin
+        # with no wire and no label -- a split net reported as ok (found by a
+        # differential fuzz; the routed trunk had been its only connection).
+        # Give it a fresh short stub in the pin's direction or either
+        # perpendicular escape, clear of other nets' wires AND pins (a foreign
+        # pin with a zero-length stub of its own has no wire to meet), and
+        # label it there; when none fits it is stranded like any other pin.
+        if not rail:
+            foreign_pin_pts = [(x, y) for (x, y, pn) in pin_world_coords
+                               if pn != candidate]
+            for hot_x, hot_y, p_orient in zero_stub_pins.get(candidate, []):
+                dx, dy = _pin_direction_vector(p_orient)
+                placed = False
+                for ddx, ddy in ([(dx, dy)]
+                                 + ([(0, 1), (0, -1)] if dx
+                                    else [(1, 0), (-1, 0)])):
+                    for length in (100, 200, 300):
+                        trial = (hot_x, hot_y, hot_x + ddx * length,
+                                 hot_y + ddy * length, candidate)
+                        if any(_point_on_segment(fx, fy, *trial[:4])
+                               for fx, fy in foreign_pin_pts):
+                            break
+                        if candidate not in _cross_net_meeting_counts(
+                                kept + [trial]):
+                            kept.append(trial)
+                            points.append(((trial[2], trial[3]), 0))
+                            placed = True
+                            break
+                    if placed:
+                        break
+                if not placed:
+                    n_stranded += 1
         return kept, points, n_stranded, rail
 
     while True:
