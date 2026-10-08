@@ -8479,10 +8479,16 @@ def register_library_tools(mcp):
             tracks: ``layer, x1_mils, y1_mils, x2_mils, y2_mils,
             width_mils``. arcs: ``layer, x_mils, y_mils, radius_mils,
             start_angle, end_angle, width_mils``. fills: ``layer,
-            x1_mils .. y2_mils, rotation``. texts: ``text, layer,
-            x_mils, y_mils, height_mils, rotation, stroke_width_mils``.
-            regions: ``layer, layer_v7, kind, is_keepout, vertex_count,
-            bbox_mils``. Every ``layer`` uses one spelling (``TopLayer``,
+            x1_mils .. y2_mils, rotation, is_keepout``. texts: ``text,
+            layer, x_mils, y_mils, height_mils, rotation,
+            stroke_width_mils``.
+            regions: ``layer, layer_v7, kind, is_keepout,
+            keepout_restrictions (the stored KEEPOUTRESTRICTIONS bitmask,
+            31 = all; null when absent), keepout_restricts (its bits as
+            via | track | copper | smd_pad | th_pad), vertex_count,
+            bbox_mils``. ``is_keepout`` is the record header's keep-out
+            flag, which is where Altium stores it.
+            Every ``layer`` uses one spelling (``TopLayer``,
             ``TopSolder``, ``Mechanical13``, ``MultiLayer``...);
             ``layer_v7`` is the region's or body's name as stored
             (``TOPSOLDER``, ``MECHANICAL13``).

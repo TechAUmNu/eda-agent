@@ -41,6 +41,19 @@ it. Coordinates are int32 in 1/10000 mil, RELATIVE TO THE FOOTPRINT ORIGIN.
   region, body     layer @0; uint32 property-string length @18, then the
                    latin-1 ``|KEY=value|`` string; then uint32 vertex count
                    and that many (x, y) doubles
+  region, fill     keep-out flag = byte @2 (the record's second flag byte)
+                   == 2; a keep-out region also carries
+                   ``KEEPOUTRESTRICTIONS`` in its property string
+
+THE KEEP-OUT FLAG IS IN THE HEADER, NOT THE PROPERTY STRING. This reader
+used to look for an ``ISKEEPOUT`` property, which Altium does not write, so
+every keep-out region read back as ``is_keepout`` False. Measured
+2026-10-08: the carrier library's QSFP28 cage footprint holds four Top-layer
+keep-out regions (header ``01 0c 02 ...``, ``KEEPOUTRESTRICTIONS=31``),
+and every region in the Altium 26 example boards that is NOT a keep-out
+(about 450 of them, copper and cutout alike) has that byte 0 and no
+``KEEPOUTRESTRICTIONS``. KiCad's Altium importer decodes the same byte the
+same way (``is_keepout = flags2 == 2``).
 
 UNKNOWN RECORD TYPES STOP THE PARSE. The block count is known only for the
 eight kinds above (types 1-6, 11, 12). Guessing "one block" for any other
@@ -297,11 +310,44 @@ def parse_via(b: bytes) -> dict[str, Any]:
             "hole_mils": _mil(_i32(b, 25) or 0)}
 
 
+#: The value of the second flag byte (offset 2) of a region or fill record
+#: that marks it a keep-out. See the module docstring.
+_KEEPOUT_FLAG = 2
+
+#: Bits of ``KEEPOUTRESTRICTIONS``, in the order KiCad's Altium importer
+#: decodes them. 31 (all five) is what Altium writes by default.
+_KEEPOUT_BITS = ((0x01, "via"), (0x02, "track"), (0x04, "copper"),
+                 (0x08, "smd_pad"), (0x10, "th_pad"))
+
+
+def _header_keepout(b: bytes) -> bool:
+    """The keep-out flag of a region or fill record header."""
+    return len(b) > 2 and b[2] == _KEEPOUT_FLAG
+
+
+def _restrictions(props: dict[str, str]) -> Optional[int]:
+    raw = props.get("KEEPOUTRESTRICTIONS")
+    if raw is None:
+        return None
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return None
+
+
+def keepout_restriction_names(value: Optional[int]) -> list[str]:
+    """``KEEPOUTRESTRICTIONS`` as names (``31`` -> all five objects)."""
+    if value is None:
+        return []
+    return [name for bit, name in _KEEPOUT_BITS if value & bit]
+
+
 def parse_fill(b: bytes) -> dict[str, Any]:
     return {"layer": layer_name(b[0]) if b else None,
             "x1_mils": _mil(_i32(b, 13) or 0), "y1_mils": _mil(_i32(b, 17) or 0),
             "x2_mils": _mil(_i32(b, 21) or 0), "y2_mils": _mil(_i32(b, 25) or 0),
-            "rotation": _f64(b, 29)}
+            "rotation": _f64(b, 29),
+            "is_keepout": _header_keepout(b)}
 
 
 def parse_text(blocks: list[bytes]) -> dict[str, Any]:
@@ -348,10 +394,18 @@ def _prop_layer(props: dict[str, str], b: bytes) -> Optional[str]:
 
 def parse_region(b: bytes) -> dict[str, Any]:
     props, vertices = _property_block(b)
+    restrictions = _restrictions(props)
+    # ISKEEPOUT is honoured if a file ever carries it, but Altium writes the
+    # flag in the header (byte 2); reading only the property is the bug
+    # that reported every keep-out region as a plain one.
+    keepout = (_header_keepout(b)
+               or props.get("ISKEEPOUT", "").upper() == "TRUE")
     return {"layer": _prop_layer(props, b),
             "layer_v7": props.get("V7_LAYER"),
             "kind": props.get("KIND"),
-            "is_keepout": props.get("ISKEEPOUT", "").upper() == "TRUE",
+            "is_keepout": keepout,
+            "keepout_restrictions": restrictions,
+            "keepout_restricts": keepout_restriction_names(restrictions),
             "vertex_count": len(vertices),
             "bbox_mils": _bbox(vertices)}
 

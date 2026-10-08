@@ -159,7 +159,8 @@ def test_fills_arcs_and_layers():
         _arc(57, 1, 2, 25, 0.0, 270.0, 5)))
     assert fp["fills"][0] == {"layer": "Mechanical13", "x1_mils": -10.0,
                               "y1_mils": 200.0, "x2_mils": 10.0,
-                              "y2_mils": 220.0, "rotation": 45.0}
+                              "y2_mils": 220.0, "rotation": 45.0,
+                              "is_keepout": False}
     arc = fp["arcs"][0]
     assert arc["layer"] == "Mechanical1" and arc["radius_mils"] == 25.0
     assert arc["end_angle"] == 270.0 and arc["width_mils"] == 5.0
