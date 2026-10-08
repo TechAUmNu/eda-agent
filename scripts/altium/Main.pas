@@ -1277,6 +1277,53 @@ Begin
     Else If (O >= Ord('A')) And (O <= Ord('F')) Then Result := O - Ord('A') + 10;
 End;
 
+{..............................................................................}
+{ PctDecode - undo bridge/payload.py stamp_encode.                              }
+{                                                                               }
+{ The batch grammar has no escape syntax: ';' ends a field, '~~' ends an        }
+{ operation and the first '=' splits a key from its value. So the Python side  }
+{ used to SUBSTITUTE ';' with ',' in every value, which is how a Manufacturer   }
+{ Part Number or Description containing ';' reached the part with ',' instead  }
+{ (field report 2026-10-08). A tool that opts in sends value_encoding=pct1 and  }
+{ escapes '%' ';' '~' '=' as %XX; this turns them back, AFTER the payload has  }
+{ been split, so the text arrives exactly.                                      }
+{                                                                               }
+{ '%' followed by two hex digits becomes the character they name. Anything      }
+{ else, a lone or trailing '%' included, is copied unchanged: an encoder that   }
+{ never produced it cannot have meant an escape.                                }
+{..............................................................................}
+
+Function PctDecode(S : String) : String;
+Var
+    I, L, D1, D2 : Integer;
+    Ch : String;
+Begin
+    Result := '';
+    I := 1;
+    L := Length(S);
+    While I <= L Do
+    Begin
+        Ch := Copy(S, I, 1);
+        D1 := -1;
+        D2 := -1;
+        If (Ch = '%') And (I + 2 <= L) Then
+        Begin
+            D1 := HexDigitValue(Copy(S, I + 1, 1));
+            D2 := HexDigitValue(Copy(S, I + 2, 1));
+        End;
+        If (D1 >= 0) And (D2 >= 0) Then
+        Begin
+            Result := Result + Chr(D1 * 16 + D2);
+            Inc(I, 3);
+        End
+        Else
+        Begin
+            Result := Result + Ch;
+            Inc(I);
+        End;
+    End;
+End;
+
 Function UnescapeJsonString(S : String) : String;
 Var
     I, L : Integer;

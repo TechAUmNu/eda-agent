@@ -29,7 +29,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from eda_agent.design._wiring import _sheet_path
-from eda_agent.bridge.payload import payload_safe
+from eda_agent.bridge.payload import (STAMP_ENCODING, encode_stamps,
+                                     payload_safe)
 from eda_agent.design.canvas import (
     SchematicCanvas, SymbolInstance, altium_orientation)
 
@@ -665,7 +666,7 @@ def _emit_parameter_stamps(
     bridge: Any,
     result: EmitResult,
 ) -> None:
-    ops: list[str] = []
+    wanted: list[dict[str, str]] = []
     for inst in instances:
         stamps = parameter_stamps.get(inst.refdes)
         if not stamps:
@@ -675,24 +676,31 @@ def _emit_parameter_stamps(
         # plan-authored parameter value carrying "~~" would therefore
         # end its operation early and forge an extra stamp -- silently,
         # because the payload stays syntactically valid. One shared rule
-        # now, from the bridge layer that owns the grammar.
-        fields = [f"designator={payload_safe(inst.refdes)}"]
+        # now, from the bridge layer that owns the grammar, and it is the
+        # LOSSLESS one: an MPN with a ';' reaches the part with its ';'.
+        stamp: dict[str, str] = {"designator": inst.refdes}
         for k, v in stamps.items():
             if not k or v is None:
                 continue
             vs = str(v).strip()
-            if not vs:
-                continue
-            fields.append(f"{payload_safe(k)}={payload_safe(vs)}")
-        if len(fields) > 1:
-            ops.append(";".join(fields))
-    if not ops:
+            if vs:
+                stamp[str(k)] = vs
+        if len(stamp) > 1:
+            wanted.append(stamp)
+    payload, problems = encode_stamps(wanted)
+    for problem in problems:
+        result.notes.append(
+            f"parameter {problem['key']!r} of {problem['designator']!r} "
+            f"not stamped: {problem['reason']}")
+    if not payload:
         return
+    n_ops = payload.count("~~") + 1
     try:
         bridge.send_command(
             "generic.set_sch_components_parameters",
-            {"stamps": "~~".join(ops), "sheet_path": str(sheet_path)},
-            timeout=_PARAM_TIMEOUT_S * max(1, len(ops) // 8),
+            {"stamps": payload, "sheet_path": str(sheet_path),
+             "value_encoding": STAMP_ENCODING},
+            timeout=_PARAM_TIMEOUT_S * max(1, n_ops // 8),
         )
     except Exception as exc:
         result.notes.append(f"parameter stamp pass failed: {exc}")

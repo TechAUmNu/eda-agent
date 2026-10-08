@@ -23,6 +23,7 @@ from typing import Any, Optional
 
 from pydantic import ValidationError
 
+from eda_agent.bridge.payload import STAMP_ENCODING, encode_stamps
 from eda_agent.design.canvas import POWER_RAIL_CLUSTER_RADIUS_MILS
 from eda_agent.design.layout import PlacedPart, compute_layout
 from eda_agent.design.plan import DesignPlan, Net, Part, PartStatus, PinRef
@@ -364,34 +365,41 @@ def execute_plan(plan: DesignPlan, project_path: str, *, bridge: Optional[Any] =
         # Bulk-stamp Value / Manufacturer / MPN / Footprint on every just-placed
         # part. Bulk handler iterates the sheet once, applies all params under
         # ONE PreProcess/PostProcess. Saves N-1 IPC round trips.
-        stamp_ops: list[str] = []
+        wanted_stamps: list[dict[str, str]] = []
         for part in parts_to_place:
             stamp_payload = _part_parameters(part, bom_lookup)
             if not stamp_payload:
                 continue
-            fields = [f"designator={part.refdes}"]
+            stamp: dict[str, str] = {"designator": part.refdes}
             for k, v in stamp_payload.items():
                 if not k or v is None:
                     continue
                 vs = str(v).strip()
-                if not vs:
-                    continue
-                # The batch field separator is ';' so we strip stray ones from
-                # values to keep the encoding safe. Values with '=' are fine
-                # because GetBatchField splits each field at the FIRST '='.
-                fields.append(f"{k}={vs.replace(';', ',')}")
-            if len(fields) > 1:
-                stamp_ops.append(";".join(fields))
+                if vs:
+                    stamp[str(k)] = vs
+            if len(stamp) > 1:
+                wanted_stamps.append(stamp)
+        # Encoded, not substituted: this used to turn every ';' in a value
+        # into ',', so a BOM line's MPN or Description arrived altered.
+        # The shared encoder escapes the separators (the designator too,
+        # which went out raw here) and the handler decodes them exactly.
+        stamp_ops, stamp_problems = encode_stamps(wanted_stamps)
+        for problem in stamp_problems:
+            result.notes.append(
+                f"parameter {problem['key']!r} of {problem['designator']!r} "
+                f"not stamped: {problem['reason']}")
 
         if stamp_ops:
+            n_ops = stamp_ops.count("~~") + 1
             try:
                 bridge.send_command(
                     "generic.set_sch_components_parameters",
                     {
-                        "stamps": "~~".join(stamp_ops),
+                        "stamps": stamp_ops,
                         "sheet_path": str(_sheet_path(project, sheet_name)),
+                        "value_encoding": STAMP_ENCODING,
                     },
-                    timeout=_PARAM_STAMP_TIMEOUT_S * max(1, len(stamp_ops) // 8),
+                    timeout=_PARAM_STAMP_TIMEOUT_S * max(1, n_ops // 8),
                 )
             except Exception as exc:
                 result.notes.append(

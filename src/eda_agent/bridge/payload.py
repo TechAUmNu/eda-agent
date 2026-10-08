@@ -32,8 +32,13 @@ The rules are narrow on purpose:
   not a bare ``~~``: a value ending in its lone ``~`` would otherwise run
   into the separator.
 
-Substitution rather than escaping is forced: the deployed Pascal parser
-has no escape syntax to escape TO.
+Substitution rather than escaping was forced: the Pascal parser had no
+escape syntax to escape TO. The component-parameter stamp is the
+exception now (:func:`encode_stamps`): a Manufacturer Part Number or a
+Description is data that must arrive EXACTLY, and a ``;`` silently
+turned into ``,`` there is a wrong part number on a BOM (field report
+2026-10-08). That handler opts in with ``value_encoding=pct1`` and
+decodes ``%XX`` in Pascal (``PctDecode`` in Main.pas) after splitting.
 
 Substitution is right only for FREE TEXT. A name that selects or renames
 an object is refused instead (:func:`name_wire_problem`), and numbers and
@@ -49,7 +54,9 @@ from typing import Optional
 
 __all__ = ["payload_safe", "unsendable_chars", "name_wire_problem",
            "finite_number", "non_finite", "whole_number", "wire_bool",
-           "join_ops", "OP_SEPARATOR", "PASCAL_INT_MAX", "MAX_COORD_MILS"]
+           "join_ops", "OP_SEPARATOR", "PASCAL_INT_MAX", "MAX_COORD_MILS",
+           "STAMP_ENCODING", "stamp_encode", "stamp_decode",
+           "stamp_key_route", "encode_stamps"]
 
 #: Two or more consecutive tildes. A single one is data.
 #:
@@ -253,3 +260,137 @@ def wire_bool(value: object) -> Optional[bool]:
         if word in _FALSE_WORDS:
             return False
     return None
+
+
+# ------------------------------------------------- the stamp value encoding
+
+#: Sent as ``value_encoding`` by every builder of a
+#: ``generic.set_sch_components_parameters`` payload, and echoed back by a
+#: handler that decoded it. A reply WITHOUT the echo came from a script that
+#: predates the decoder and wrote the escapes literally.
+STAMP_ENCODING = "pct1"
+
+#: The characters :func:`stamp_encode` escapes. ``;`` ends a field, ``~``
+#: (any run of two) ends an operation, ``=`` splits a key from its value
+#: (only the FIRST one, but escaping every one makes a KEY safe too), and
+#: ``%`` is the escape itself. Nothing else needs it: ``,`` ``|`` quotes and
+#: backslashes are JSON's business and survive the transport already, and
+#: Latin-1 text arrives as itself (``\u00b5`` -> ``Chr(181)``).
+_STAMP_ESCAPED = frozenset("%;~=")
+
+
+def stamp_encode(value: object) -> str:
+    """``value`` with ``% ; ~ =`` as ``%25 %3B %7E %3D``; all else as is.
+
+    Lossless, unlike :func:`payload_safe`: ``PctDecode`` in Main.pas turns
+    it back after the payload has been split, so ``A;B`` arrives as
+    ``A;B`` rather than ``A,B``.
+    """
+    return "".join(f"%{ord(ch):02X}" if ch in _STAMP_ESCAPED else ch
+                   for ch in str(value))
+
+
+def _hex(ch: str) -> int:
+    return int(ch, 16) if ch and ch in "0123456789abcdefABCDEF" else -1
+
+
+def stamp_decode(text: str) -> str:
+    """What ``PctDecode`` in Main.pas makes of ``text``, step for step.
+
+    ``%`` and two hex digits is that character; anything else, a lone or
+    trailing ``%`` included, is copied. Kept beside the encoder so the
+    round trip is testable without Altium.
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "%" and i + 2 < n:
+            d1, d2 = _hex(text[i + 1]), _hex(text[i + 2])
+            if d1 >= 0 and d2 >= 0:
+                out.append(chr(d1 * 16 + d2))
+                i += 3
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def stamp_key_route(key: str) -> str:
+    """Where the stamp handler sends ``key``, as the reply reports it.
+
+    ``Value`` and ``Comment`` set the component's Comment text and
+    ``Description`` its own description (``ComponentDescription``), all
+    properties, never parameters: a ``Description`` key used to create a
+    second, visible parameter called Description at the sheet origin.
+    ``Footprint`` is read-only from DelphiScript and is skipped. Any other
+    key is a parameter, modified in place or created.
+
+    ``Value`` and ``Footprint`` match exactly, as they always have;
+    ``Comment`` and ``Description`` match in any case. Mirrors the
+    branches of ``Gen_SetSchComponentsParameters``.
+    """
+    lower = key.lower()
+    if key == "Value" or lower == "comment":
+        return "property:Comment"
+    if lower == "description":
+        return "property:ComponentDescription"
+    if key == "Footprint":
+        return "skipped:read-only"
+    return "parameter"
+
+
+def encode_stamps(stamps) -> tuple[str, list[dict]]:
+    """The ``stamps`` payload for ``generic.set_sch_components_parameters``.
+
+    ``stamps`` is a list of dicts, each with a ``designator`` and
+    ``{parameter: value}`` pairs. Every designator, key and value goes
+    through :func:`stamp_encode`, so the payload must be sent with
+    ``value_encoding`` = :data:`STAMP_ENCODING`.
+
+    Returns ``(payload, problems)``. A field that cannot be sent exactly
+    is LEFT OUT and named in ``problems`` (``{"designator", "key",
+    "reason"}``) rather than flattened: text above U+00FF, which the
+    bridge turns into ``?``, and an empty key. A stamp with no designator
+    is left out whole. ``None`` and empty values are skipped silently, as
+    the handler skips empty values anyway. The caller decides whether a
+    problem refuses the call.
+    """
+    ops: list[str] = []
+    problems: list[dict] = []
+    for stamp in stamps:
+        designator = stamp.get("designator") if isinstance(stamp, dict) \
+            else None
+        if designator is None or str(designator) == "":
+            problems.append({"designator": None, "key": "designator",
+                             "reason": f"stamp has no designator: {stamp!r}"})
+            continue
+        lost = unsendable_chars(designator)
+        if lost:
+            problems.append({"designator": str(designator),
+                             "key": "designator",
+                             "reason": f"contains {lost!r}, which the "
+                                       f"bridge flattens to '?'"})
+            continue
+        fields = [f"designator={stamp_encode(designator)}"]
+        for key, value in stamp.items():
+            if key == "designator" or value is None:
+                continue
+            text = str(value)
+            if text == "":
+                continue
+            if str(key) == "":
+                problems.append({"designator": str(designator), "key": "",
+                                 "reason": "empty parameter name"})
+                continue
+            lost = unsendable_chars(str(key)) + unsendable_chars(text)
+            if lost:
+                problems.append({"designator": str(designator),
+                                 "key": str(key),
+                                 "reason": f"contains {lost!r}, which the "
+                                           f"bridge flattens to '?'"})
+                continue
+            fields.append(f"{stamp_encode(key)}={stamp_encode(text)}")
+        if len(fields) > 1:
+            ops.append(";".join(fields))
+    return "~~".join(ops), problems

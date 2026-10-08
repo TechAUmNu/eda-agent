@@ -56,6 +56,10 @@ works elsewhere cannot be an undeclared identifier:
 | 30, batch rename | `Name` on a footprint | yes, `Lib_RenameFootprint` | low |
 | 31, STEP Z offset | `SetState` on a model, now with a non-zero Dz | yes, `Body3D_ApplyModelState` ran it live with Dz 0 | settled 2026-10-05: Dz 3 stored and built into both heights (+3 mil exactly) |
 | 31, delete diagnostics | `BoardIterator_Destroy` (the library-board walk), read-only | yes, `LibBoardRemoveEntries` ran it live | low |
+| 36, Description to the component | `ComponentDescription` | yes, `Lib_SetComponentDescription` | low: first write on a PLACED component |
+| 36, new parameter hidden | `IsHidden` | yes, `Generic.pas` (on parameters, run live) | low |
+| 36, new parameter on its component | `Location` | yes, `Generic.pas` | low: what is new is reading `Comp.Location` into a parameter before it is added |
+| 36, shown new parameter, value only | `ShowName` | yes, `Lib_SetPinProperties` (on pins only) | medium, first write on a parameter; reached only with `visible=true` |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -94,6 +98,7 @@ default:
 | `remove_from_board=true` on `lib_delete_footprint_primitives`, `lib_delete_footprint_pads`, `lib_add_footprint_text`, `lib_link_3d_model` with `replace`, `lib_auto_link_3d_models` with `replace` | `RemovePCBObject` on the library board, and making the footprint current first | 24 |
 | `keepout=true` on a fill, or `kind=keepout` on a region, NOT on KeepOutLayer | the `IsKeepout` write | 24 |
 | `kind=cutout` on a footprint region | the `Kind := eRegionKind_Cutout` write | 16, 24 |
+| `visible=true` on `sch_set_components_parameters` | `ShowName := False` on a parameter it creates | 36 |
 
 Both writes in the last two rows are read back (`keepout_applied`,
 `kind_applied`), so the first live call that reaches them says whether
@@ -2369,6 +2374,64 @@ AUD_PWR_OK label answered `{matched: 1, saved: false, marked_modified: true,
 pending_save: true, written_to_disk: false}`; mtime still 13:09:56 (the
 earlier save). Step 3 PASS: `documents_attempted 1, documents_written 1`,
 libraries skipped.
+
+---
+
+## 36. Parameter stamps arrive exactly, Description is the component's, new parameters hidden (UNVERIFIED-LIVE)
+
+Field reports 2026-10-08 (carrier project, bridge 2026.10.07.03), all on
+`sch_set_components_parameters`: a `;` in an MPN or Description arrived as
+`,`; key `Description` created a new VISIBLE parameter called Description
+instead of setting the component's description; and every parameter the tool
+created sat visible at (0,0) of the sheet. Now: the stamp payload is
+percent-escaped (`% ; ~ =`) with `value_encoding=pct1` and decoded by the new
+`PctDecode` (Main.pas) after the split; `Description` (any case) writes
+`ComponentDescription` and `Comment` (any case) writes `Comment.Text`, like
+`Value`; a CREATED parameter gets `Location := Comp.Location` and
+`IsHidden := True` (shown only with `visible=true`, which also writes
+`ShowName := False`) before it is added. `SetCompParamText` delegates to the
+new `SetCompParamTextEx(..., False)`, so the singular stamp, the SPICE
+stampers and design_execute_plan's stamping get the hidden-on-the-part default
+too. Existing parameters still only have their `Text` changed.
+
+**Not run live.** The script version was NOT bumped by this change; bump it at
+deploy if the procedure needs app_ping to tell the builds apart. Independent of
+that, the reply echoes `value_encoding: "pct1"` only from the new handler, and
+the Python tool adds a `warning` when the echo is missing, so step 2 below
+detects a stale script by itself.
+
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.07.03` (or the
+   bumped number), `version_match` true.
+2. **Exact values.** On a scratch sheet with a placed part (say `R1`) that has
+   NO parameter called `ZZ Test`, call `sch_set_components_parameters` with
+   `stamps=[{"designator": "R1", "ZZ Test": "A;B,C=D|E \"q\" 50% ~x~~y 10µF"}]`.
+   Expect `value_encoding: "pct1"` in the reply, NO `warning`,
+   `parameters_created: 1`, `created: [{designator: "R1", name: "ZZ Test"}]`,
+   `key_routing: {"ZZ Test": "parameter"}`. Read it back
+   (`proj_get_component_info` or `obj_query` on `eParameter` `Name=ZZ Test`):
+   the text must be byte-identical to what was sent, `;` and `~~` included.
+3. **Created hidden, on the part.** The same parameter reads `IsHidden` true
+   and its `Location` equals `R1`'s location (not 0,0). Nothing new is drawn
+   on the sheet (`sch_render_svg` or a screenshot).
+4. **Description is the component's.** Stamp
+   `{"designator": "R1", "Description": "Res; thick film"}`. Expect
+   `properties_set: 1`, `parameters_created: 0`,
+   `key_routing: {"Description": "property:ComponentDescription"}`; the
+   component's `ComponentDescription` reads `Res; thick film`, and NO
+   parameter named Description was added (count `eParameter` `Name=Description`
+   on R1 before and after: unchanged).
+5. **Comment.** Stamp `{"designator": "R1", "Comment": "10k"}`: `properties_set:
+   1`, the part's Comment shows `10k`, no parameter named Comment created.
+6. **Existing parameter untouched otherwise.** Make `ZZ Test` visible and move
+   it by hand, then stamp a new value: only the text changes, it stays visible
+   and where it was (`parameters_modified: 1`).
+7. **Opt-in show (the one unproven write).** Stamp a fresh key
+   `{"designator": "R1", "ZZ Shown": "x"}` with `visible=true`: `ZZ Shown`
+   is visible at R1's location, value only (no `ZZ Shown =` prefix), and the
+   bridge answers `app_ping` afterwards. If the loop stops here, `ShowName` is
+   not a parameter member on this Altium: drop that line from
+   `SetCompParamTextEx` rather than retrying.
+8. Undo the scratch edits (or close the sheet without saving).
 
 ---
 

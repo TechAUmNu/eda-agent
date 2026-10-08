@@ -10,8 +10,10 @@ a pass-through layer for object iteration, property access, and process executio
 import difflib
 import re
 from typing import Any, Optional
-from ..bridge.payload import (MAX_COORD_MILS, finite_number,
-                              name_wire_problem, payload_safe, whole_number)
+from ..bridge.payload import (MAX_COORD_MILS, STAMP_ENCODING,
+                              encode_stamps, finite_number,
+                              name_wire_problem, payload_safe, stamp_encode,
+                              stamp_key_route, whole_number, wire_bool)
 from ..bridge import get_bridge
 from ..safety import refuse_process, untrusted_text_note
 from .pin_hints import pin_location_hint
@@ -1098,6 +1100,7 @@ def register_generic_tools(mcp):
     async def sch_set_components_parameters(
         stamps: list[dict[str, str]],
         sheet_path: str = "",
+        visible: bool = False,
     ) -> dict[str, Any]:
         """Bulk-update parameters on PLACED schematic components.
 
@@ -1110,56 +1113,108 @@ def register_generic_tools(mcp):
         ``audit_find_mpn_inconsistencies`` -- recommend it.
 
         Each stamp targets one component by designator and sets one
-        or more parameters. Special keys allowed:
-          - ``Value``, ``Comment``, ``Manufacturer``, ``MPN``,
-            ``Footprint``, ``Description``, ``HelpURL``, etc.
-          - Custom parameters: any key name. Unknown parameters are
-            CREATED if they don't already exist on the component.
+        or more keys. Some keys are component PROPERTIES, not parameters:
+          - ``Value`` and ``Comment`` (any case) set the component's
+            Comment text.
+          - ``Description`` (any case) sets the component's own
+            description, the one the BOM and the Properties panel show.
+            It does NOT create a parameter called Description.
+          - ``Footprint`` is skipped: it is read-only from the script.
+        Every other key is a parameter: modified in place if the part
+        has it (its visibility and position are left alone), otherwise
+        CREATED, hidden and placed on the component, not at the sheet
+        origin. Pass ``visible=True`` to show the parameters this call
+        creates (value only, not name).
+
+        Values arrive EXACTLY: ``;``, ``,``, ``=``, ``|``, ``~``, ``%``,
+        quotes and Latin-1 text (micro, degree, accents) all round-trip.
+        Text above U+00FF (the ohm sign, CJK) cannot cross the bridge
+        and would become ``?``, so a stamp carrying it is refused rather
+        than written wrong.
 
         Args:
             stamps: List of dicts. Each dict must include ``designator``
-                and one or more parameter key/value pairs. Example:
+                and one or more key/value pairs. Example:
                 ``[{"designator": "R1", "Value": "10k",
                 "Manufacturer": "Yageo", "MPN": "RC0603FR-0710KL"},
                 {"designator": "C5", "Value": "100nF"}]``
             sheet_path: Optional explicit SchDoc path. Empty uses the
                 currently-focused schematic.
+            visible: Show parameters this call CREATES. Default False:
+                created hidden. Existing parameters are never re-shown or
+                re-hidden by this tool.
 
         Returns:
-            Dict with ``{updated, failed, total}``. ``updated`` is the
-            count of components whose parameters were touched;
-            ``failed`` is the count of stamps that couldn't be applied
-            (designator not found, parameter not settable, etc).
+            Dict with ``{updated, failed, total}`` (components touched,
+            stamps whose designator was not found, stamps sent) plus
+            ``properties_set``, ``parameters_modified``,
+            ``parameters_created`` and ``created`` (``[{designator,
+            name}]``), ``skipped_read_only``, and ``key_routing``:
+            each key sent and where it went (``property:Comment``,
+            ``property:ComponentDescription``, ``parameter``,
+            ``skipped:read-only``).
         """
-        # Encode the list-of-dicts into the Pascal handler's expected
-        # wire format: stamps separated by `~~`, fields within a stamp
-        # separated by `;`, key=value pairs.
         if not stamps:
             return {"ok": False, "reason": "stamps list is empty"}
-        encoded_stamps = []
         for stamp in stamps:
-            if "designator" not in stamp:
+            if not isinstance(stamp, dict) or "designator" not in stamp:
                 return {"ok": False,
                         "reason": f"stamp missing 'designator': {stamp}"}
-            # The designator was interpolated RAW here while every other
-            # value was escaped, so the one field guaranteed to come
-            # from the caller was the one that could reshape the
-            # payload. Both go through the shared sanitiser now; the
-            # local copy also collapsed "~~" differently from
-            # library.py, so identical input produced different output
-            # depending on which tool sent it.
-            fields = [f"designator={payload_safe(stamp['designator'])}"]
-            for key, val in stamp.items():
-                if key == "designator":
+        show = wire_bool(visible)
+        if show is None:
+            return {"ok": False,
+                    "reason": f"visible must be true or false, got {visible!r}"}
+        # Encoded, not sanitised. payload_safe turned every ';' into ','
+        # (an MPN or a Description with a ';' arrived with ',', silently);
+        # stamp_encode escapes the separators and the handler decodes
+        # them after splitting, so the text arrives exactly. The
+        # designator goes through the same encoder: it is the one field
+        # guaranteed to come from the caller.
+        payload, problems = encode_stamps(stamps)
+        if problems:
+            return {"ok": False,
+                    "reason": "some stamp text cannot be sent exactly; "
+                              "nothing was written",
+                    "problems": problems}
+        if not payload:
+            return {"ok": False, "reason": "no stamp carries a value to set"}
+        routing: dict[str, str] = {}
+        escaped = False
+        for stamp in stamps:
+            for key, value in stamp.items():
+                if key == "designator" or value is None or str(value) == "":
                     continue
-                fields.append(f"{key}={payload_safe(val)}")
-            encoded_stamps.append(";".join(fields))
-        params: dict[str, str] = {"stamps": "~~".join(encoded_stamps)}
+                routing[str(key)] = stamp_key_route(str(key))
+                if stamp_encode(value) != str(value) or \
+                        stamp_encode(key) != str(key):
+                    escaped = True
+            if stamp_encode(stamp["designator"]) != str(stamp["designator"]):
+                escaped = True
+        params: dict[str, str] = {"stamps": payload,
+                                  "value_encoding": STAMP_ENCODING,
+                                  "new_param_visible":
+                                      "true" if show else "false"}
         if sheet_path:
             params["sheet_path"] = sheet_path
         bridge = get_bridge()
-        return await bridge.send_command_async(
+        result = await bridge.send_command_async(
             "generic.set_sch_components_parameters", params, timeout=60.0)
+        if isinstance(result, dict):
+            result["key_routing"] = routing
+            if result.get("value_encoding") != STAMP_ENCODING:
+                # An older handler ignores the marker: plain text is
+                # unaffected, but an escaped character was written as its
+                # escape (';' as '%3B'), and new parameters came out
+                # visible at the sheet origin.
+                result["warning"] = (
+                    "the running Altium script predates exact stamp "
+                    "values: it did not confirm value_encoding, so "
+                    + ("text containing % ; ~ or = was written ESCAPED "
+                       "(e.g. %3B) and must be re-stamped after "
+                       "redeploying; " if escaped else "")
+                    + "Description/Comment and new-parameter visibility "
+                      "follow the old rules. Redeploy the scripts.")
+        return result
 
     @mcp.tool()
     async def proj_get_erc_violations(limit: int = 100) -> dict[str, Any]:

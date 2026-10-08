@@ -8347,11 +8347,23 @@ End;
 
 { Set (or create) a component parameter. Returns True if created, False if     }
 { modified. Caller is responsible for PreProcess/PostProcess on the document. }
-Function SetCompParamText(Comp : ISch_Component; ParamName, ParamValue : String) : Boolean;
+{                                                                              }
+{ An EXISTING parameter only has its text changed: its visibility and its     }
+{ position are the user's and stay as they are.                                }
+{                                                                              }
+{ A parameter this CREATES used to come out of the factory visible and at the  }
+{ sheet origin, so stamping an MPN onto a part drew "RC0603FR-0710KL" at (0,0) }
+{ of the sheet, far from the part it belongs to (field report 2026-10-08,      }
+{ carrier project). It is now placed at the owning component's location and   }
+{ hidden, unless ShowNew asks for it to be shown; a shown one shows its value, }
+{ not its name.                                                                }
+Function SetCompParamTextEx(Comp : ISch_Component; ParamName, ParamValue : String;
+                            ShowNew : Boolean) : Boolean;
 Var
     Iter : ISch_Iterator;
     Param, NewParam : ISch_Parameter;
     Found : ISch_Parameter;
+    CompLoc : TLocation;
 Begin
     Result := False;
     Found := Nil;
@@ -8385,11 +8397,25 @@ Begin
         Begin
             NewParam.Name := ParamName;
             NewParam.Text := ParamValue;
+            Try
+                CompLoc := Comp.Location;
+                NewParam.Location := CompLoc;
+            Except End;
+            NewParam.IsHidden := Not ShowNew;
+            If ShowNew Then
+                NewParam.ShowName := False;
             Comp.AddSchObject(NewParam);
             SchRegisterObject(Comp, NewParam);
             Result := True;
         End;
     End;
+End;
+
+{ The default every caller but the bulk stamp tool gets: a parameter created  }
+{ here is hidden and sits on its component (see SetCompParamTextEx).          }
+Function SetCompParamText(Comp : ISch_Component; ParamName, ParamValue : String) : Boolean;
+Begin
+    Result := SetCompParamTextEx(Comp, ParamName, ParamValue, False);
 End;
 
 {..............................................................................}
@@ -9857,6 +9883,21 @@ End;
 { Gen_SetSchComponentsParameters - Bulk parameter stamping.                    }
 { Params: stamps = 'designator=R1;Value=10k;Manufacturer=Yageo;MPN=...;        }
 {                   Footprint=0603~~designator=R2;Value=1k;Manufacturer=...'    }
+{         value_encoding = 'pct1' (optional): every key and value, the         }
+{                   designator included, is percent-escaped by the Python     }
+{                   side (bridge/payload.py stamp_encode) and decoded here     }
+{                   with PctDecode, so ';' '~' '=' and '%' arrive EXACTLY.     }
+{                   Without it the old raw grammar applies, in which a ';'    }
+{                   could not be sent at all and arrived as ','.               }
+{         new_param_visible = 'true' (optional): parameters this CREATES are   }
+{                   shown. Default hidden. Existing ones keep their own        }
+{                   visibility and position either way.                        }
+{ Keys that are component PROPERTIES, not parameters (case-insensitive except  }
+{ the long-standing exact 'Value' and 'Footprint'):                            }
+{   Value, Comment  -> Comp.Comment.Text                                       }
+{   Description     -> Comp.ComponentDescription (it used to create a stray   }
+{                      visible parameter called Description at the origin)    }
+{   Footprint       -> skipped, read-only in DelphiScript                      }
 { One PreProcess/PostProcess wraps every component update; iterate the doc     }
 { ONCE and apply matching ops on the fly. Avoids 14 singular IPC round-trips. }
 {..............................................................................}
@@ -9871,12 +9912,18 @@ Var
     Comp : ISch_Component;
     DesigList : TStringList;
     OpsList : TStringList;
-    OpStr, FieldStr, Key, Val : String;
+    OpStr, FieldStr, Key, Val, KeyU, CompDesig, EncodingStr : String;
     P, EqPos, SemiPos : Integer;
     SrvDoc : IServerDocument;
+    Encoded, ShowNew : Boolean;
+    PropsSet, ParamsModified, ParamsCreated, SkippedReadOnly : Integer;
+    CreatedJson, ShowNewStr : String;
 Begin
     StampsStr := ExtractJsonValue(Params, 'stamps');
     SheetPath := ExtractJsonValue(Params, 'sheet_path');
+    EncodingStr := ExtractJsonValue(Params, 'value_encoding');
+    Encoded := EncodingStr = 'pct1';
+    ShowNew := LowerCase(ExtractJsonValue(Params, 'new_param_visible')) = 'true';
 
     If StampsStr = '' Then
     Begin
@@ -9896,6 +9943,12 @@ Begin
         Exit;
     End;
 
+    PropsSet := 0;
+    ParamsModified := 0;
+    ParamsCreated := 0;
+    SkippedReadOnly := 0;
+    CreatedJson := '';
+
     { Build parallel arrays: designator -> raw op string.                     }
     DesigList := TStringList.Create;
     OpsList := TStringList.Create;
@@ -9908,6 +9961,7 @@ Begin
             If Op = '' Then Break;
             OpCount := OpCount + 1;
             FieldStr := GetBatchField(Op, 'designator');
+            If Encoded Then FieldStr := PctDecode(FieldStr);
             If FieldStr <> '' Then
             Begin
                 DesigList.Add(FieldStr);
@@ -9927,11 +9981,15 @@ Begin
                 While Obj <> Nil Do
                 Begin
                     Comp := Obj;
-                    OpIdx := DesigList.IndexOf(Comp.Designator.Text);
+                    CompDesig := Comp.Designator.Text;
+                    OpIdx := DesigList.IndexOf(CompDesig);
                     If OpIdx >= 0 Then
                     Begin
                         OpStr := OpsList[OpIdx];
-                        { Iterate semicolon-separated key=value fields.       }
+                        { Iterate semicolon-separated key=value fields. With  }
+                        { the encoding no key or value holds a raw ';' or '=',}
+                        { so the split only ever meets separators; decoding   }
+                        { comes AFTER the split, never before it.             }
                         P := 1;
                         While P <= Length(OpStr) Do
                         Begin
@@ -9948,22 +10006,52 @@ Begin
                                 Key := Copy(FieldStr, 1, EqPos - 1);
                                 Val := Copy(FieldStr, EqPos + 1,
                                     Length(FieldStr) - EqPos);
+                                If Encoded Then
+                                Begin
+                                    Key := PctDecode(Key);
+                                    Val := PctDecode(Val);
+                                End;
+                                KeyU := UpperCase(Key);
 
                                 If (Key <> '') And (Key <> 'designator') And
                                    (Val <> '') Then
                                 Begin
-                                    If Key = 'Value' Then
+                                    If (Key = 'Value') Or (KeyU = 'COMMENT') Then
                                     Begin
                                         SchBeginModify(Comp.Comment);
                                         Try Comp.Comment.Text := Val; Except End;
                                         SchEndModify(Comp.Comment);
+                                        Inc(PropsSet);
+                                    End
+                                    Else If KeyU = 'DESCRIPTION' Then
+                                    Begin
+                                        { The component's own description, }
+                                        { what the BOM and the Properties   }
+                                        { panel read. Not a parameter.      }
+                                        SchBeginModify(Comp);
+                                        Try Comp.ComponentDescription := Val; Except End;
+                                        SchEndModify(Comp);
+                                        Inc(PropsSet);
                                     End
                                     Else If Key = 'Footprint' Then
                                     Begin
-                                        { read-only, skip silently            }
+                                        { read-only in DelphiScript           }
+                                        Inc(SkippedReadOnly);
                                     End
                                     Else
-                                        SetCompParamText(Comp, Key, Val);
+                                    Begin
+                                        If SetCompParamTextEx(Comp, Key, Val, ShowNew) Then
+                                        Begin
+                                            Inc(ParamsCreated);
+                                            If CreatedJson <> '' Then
+                                                CreatedJson := CreatedJson + ',';
+                                            CreatedJson := CreatedJson + '{"designator":"'
+                                                + EscapeJsonString(CompDesig)
+                                                + '","name":"' + EscapeJsonString(Key) + '"}';
+                                        End
+                                        Else
+                                            Inc(ParamsModified);
+                                    End;
                                 End;
                             End;
                         End;
@@ -9990,10 +10078,21 @@ Begin
         If SrvDoc <> Nil Then SrvDoc.SetModified(True);
     Except End;
 
+    If ShowNew Then ShowNewStr := 'true' Else ShowNewStr := 'false';
+
+    { value_encoding is echoed so the Python side can tell a handler that    }
+    { decoded the payload from an older one that wrote '%3B' into the part.  }
     Result := BuildSuccessResponse(RequestId,
         '{"updated":' + IntToStr(Updated) +
         ',"failed":' + IntToStr(Failed) +
-        ',"total":' + IntToStr(OpCount) + '}');
+        ',"total":' + IntToStr(OpCount) +
+        ',"properties_set":' + IntToStr(PropsSet) +
+        ',"parameters_modified":' + IntToStr(ParamsModified) +
+        ',"parameters_created":' + IntToStr(ParamsCreated) +
+        ',"skipped_read_only":' + IntToStr(SkippedReadOnly) +
+        ',"created":[' + CreatedJson + ']' +
+        ',"new_parameters_visible":' + ShowNewStr +
+        ',"value_encoding":"' + EscapeJsonString(EncodingStr) + '"}');
 End;
 
 {..............................................................................}

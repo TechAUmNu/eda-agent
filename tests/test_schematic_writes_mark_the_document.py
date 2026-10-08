@@ -28,8 +28,11 @@ from tests.pascal_source import load, strip_comments
 
 _PAS = Path(__file__).resolve().parents[1] / "scripts" / "altium" / "Generic.pas"
 
-#: Not a handler: a helper called by handlers that mark for themselves.
-_HELPERS = {"SetCompParamText"}
+#: Not handlers: helpers called by handlers that mark for themselves.
+#: SetCompParamTextEx is the body SetCompParamText now delegates to (it
+#: gained the hidden-on-the-component default for created parameters);
+#: its only other caller, Gen_SetSchComponentsParameters, marks.
+_HELPERS = {"SetCompParamText", "SetCompParamTextEx"}
 
 
 @pytest.fixture(scope="module")
