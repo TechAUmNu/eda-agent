@@ -8483,10 +8483,12 @@ def register_library_tools(mcp):
             layer, x_mils, y_mils, height_mils, rotation,
             stroke_width_mils``.
             regions: ``layer, layer_v7, kind, is_keepout,
-            keepout_restrictions (the stored KEEPOUTRESTRICTIONS bitmask,
-            31 = all; null when absent), keepout_restricts (its bits as
-            via | track | copper | smd_pad | th_pad), vertex_count,
-            bbox_mils``. ``is_keepout`` is the record header's keep-out
+            keepout_restrictions (the KEEPOUTRESTRICTIONS bitmask,
+            31 = all; null on a region that is not a keep-out; 31 on a
+            keep-out whose record stores none, which is how Altium reads
+            it), keepout_restrictions_defaulted (true in that last case),
+            keepout_restricts (its bits as via | track | copper | smd_pad
+            | th_pad), vertex_count, bbox_mils``. ``is_keepout`` is the record header's keep-out
             flag, which is where Altium stores it.
             Every ``layer`` uses one spelling (``TopLayer``,
             ``TopSolder``, ``Mechanical13``, ``MultiLayer``...);

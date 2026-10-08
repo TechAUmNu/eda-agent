@@ -13,7 +13,8 @@ from typing import Any, Optional
 from ..bridge.payload import (MAX_COORD_MILS, STAMP_ENCODING,
                               encode_stamps, finite_number,
                               name_wire_problem, payload_safe, stamp_encode,
-                              stamp_key_route, whole_number, wire_bool)
+                              stamp_key_route, stamp_reply_problem,
+                              is_stamp_reply, whole_number, wire_bool)
 from ..bridge import get_bridge
 from ..safety import refuse_process, untrusted_text_note
 from .pin_hints import pin_location_hint
@@ -1118,19 +1119,30 @@ def register_generic_tools(mcp):
             Comment text.
           - ``Description`` (any case) sets the component's own
             description, the one the BOM and the Properties panel show.
-            It does NOT create a parameter called Description.
+            It does NOT create a parameter called Description; if the
+            part ALREADY carries one (imported and DbLib-style symbols
+            often do) that parameter is updated too, so the two never
+            disagree, and is listed in
+            ``description_parameters_also_set``.
           - ``Footprint`` is skipped: it is read-only from the script.
         Every other key is a parameter: modified in place if the part
         has it (its visibility and position are left alone), otherwise
         CREATED, hidden and placed on the component, not at the sheet
         origin. Pass ``visible=True`` to show the parameters this call
-        creates (value only, not name).
+        creates (value only, not name), stacked 100 mil apart beside the
+        part's Comment and turned with the part.
+
+        An empty value (``""`` or ``None``) writes nothing: a parameter
+        cannot be CLEARED by this tool. Such keys are reported in
+        ``skipped_empty`` rather than dropped silently.
 
         Values arrive EXACTLY: ``;``, ``,``, ``=``, ``|``, ``~``, ``%``,
         quotes and Latin-1 text (micro, degree, accents) all round-trip.
         Text above U+00FF (the ohm sign, CJK) cannot cross the bridge
-        and would become ``?``, so a stamp carrying it is refused rather
-        than written wrong.
+        and would become ``?``, and a control character other than tab,
+        line feed or carriage return cannot either (a NUL truncates the
+        text), so a stamp carrying one is refused rather than written
+        wrong.
 
         Args:
             stamps: List of dicts. Each dict must include ``designator``
@@ -1149,10 +1161,16 @@ def register_generic_tools(mcp):
             stamps whose designator was not found, stamps sent) plus
             ``properties_set``, ``parameters_modified``,
             ``parameters_created`` and ``created`` (``[{designator,
-            name}]``), ``skipped_read_only``, and ``key_routing``:
-            each key sent and where it went (``property:Comment``,
-            ``property:ComponentDescription``, ``parameter``,
-            ``skipped:read-only``).
+            name}]``), ``description_parameters_also_set``
+            (``[{designator, name}]``, counted in
+            ``parameters_modified``), ``skipped_read_only``,
+            ``skipped_empty`` (``[{designator, key}]``, never sent), and
+            ``key_routing``: each key sent and where it went
+            (``property:Comment``, ``property:ComponentDescription``,
+            which also covers an existing Description parameter,
+            ``parameter``, ``skipped:read-only``). A refused call (for
+            example by policy) comes back as it was refused, with no
+            ``key_routing``: nothing was written.
         """
         if not stamps:
             return {"ok": False, "reason": "stamps list is empty"}
@@ -1176,8 +1194,21 @@ def register_generic_tools(mcp):
                     "reason": "some stamp text cannot be sent exactly; "
                               "nothing was written",
                     "problems": problems}
+        # An empty value is dropped by the encoder and by the handler
+        # alike, so a caller trying to clear an MPN used to get a clean
+        # reply with nothing changed. Name every such key instead.
+        skipped_empty = [
+            {"designator": str(stamp["designator"]), "key": str(key)}
+            for stamp in stamps for key, value in stamp.items()
+            if key != "designator" and (value is None or str(value) == "")]
         if not payload:
-            return {"ok": False, "reason": "no stamp carries a value to set"}
+            out: dict[str, Any] = {"ok": False,
+                                   "reason": "no stamp carries a value to "
+                                             "set; this tool cannot clear "
+                                             "a parameter"}
+            if skipped_empty:
+                out["skipped_empty"] = skipped_empty
+            return out
         routing: dict[str, str] = {}
         escaped = False
         for stamp in stamps:
@@ -1199,9 +1230,14 @@ def register_generic_tools(mcp):
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "generic.set_sch_components_parameters", params, timeout=60.0)
-        if isinstance(result, dict):
+        # Only a real handler reply is annotated. A policy refusal is
+        # RETURNED, not raised, and has no value_encoding either: judging
+        # it as a reply would warn of a stale script and print a routing
+        # table for writes that never happened.
+        if is_stamp_reply(result):
             result["key_routing"] = routing
-            if result.get("value_encoding") != STAMP_ENCODING:
+            result["skipped_empty"] = skipped_empty
+            if stamp_reply_problem(result):
                 # An older handler ignores the marker: plain text is
                 # unaffected, but an escaped character was written as its
                 # escape (';' as '%3B'), and new parameters came out

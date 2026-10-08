@@ -3,7 +3,7 @@
 """A keep-out region in a saved .PcbLib reads back as a keep-out.
 
 Field report, 2026-10-08, the multiviewer carrier library: the QSFP28 cage
-footprint ``QSFP28_CAGE_1x1_PF-10_TE2170704`` was given four Top-layer
+footprint ``QSFP28_CAGE_1x1_PF-10_TE2170704-5`` was given four Top-layer
 keep-out regions, saved, and read back through ``lib_read_pcblib_file`` as
 four ordinary copper regions, ``is_keepout`` False on every one. The tool
 that exists to prove what the FILE holds denied the one property the edit
@@ -118,3 +118,47 @@ def test_a_keepout_fill_reads_its_header_flag_too():
     fp = pcblib.parse_footprint(_stream(b"\x06" + struct.pack("<I", 50)
                                         + bytes(b)))
     assert fp["fills"][0]["is_keepout"] is False
+
+
+def _without_restrictions(record: bytes) -> bytes:
+    """``record`` with ``|KEEPOUTRESTRICTIONS=31`` cut out of its property
+    string and the string's length field (uint32 @18) shortened to match,
+    as a file older than the property stores a keep-out."""
+    cut = b"|KEEPOUTRESTRICTIONS=31"
+    assert record.count(cut) == 1
+    (length,) = struct.unpack_from("<I", record, 18)
+    out = bytearray(record.replace(cut, b""))
+    struct.pack_into("<I", out, 18, length - len(cut))
+    return bytes(out)
+
+
+def test_a_keepout_without_stored_restrictions_restricts_everything():
+    """Review follow-up, 2026-10-08: a record flagged keep-out in its header
+    but carrying no ``KEEPOUTRESTRICTIONS`` (older files) reported
+    ``keepout_restrictions`` None and ``keepout_restricts`` [], which reads
+    as "restricts nothing". Altium treats the missing value as 0x1F and
+    KiCad's importer reads it with that default: all five."""
+    old = _without_restrictions(_REAL_KEEPOUT_REGION)
+    assert b"KEEPOUTRESTRICTIONS" not in old
+    region = pcblib.parse_footprint(_stream(_region_record(old)))["regions"][0]
+    assert region["is_keepout"] is True
+    assert region["vertex_count"] == 15, "the length fix-up broke the record"
+    assert region["keepout_restrictions"] == 31
+    assert region["keepout_restrictions_defaulted"] is True
+    assert region["keepout_restricts"] == ["via", "track", "copper",
+                                           "smd_pad", "th_pad"]
+
+
+def test_a_stored_mask_is_not_reported_as_defaulted():
+    region = pcblib.parse_footprint(
+        _stream(_region_record(_REAL_KEEPOUT_REGION)))["regions"][0]
+    assert region["keepout_restrictions_defaulted"] is False
+
+    plain = bytearray(_without_restrictions(_REAL_KEEPOUT_REGION))
+    plain[2] = 0
+    region = pcblib.parse_footprint(
+        _stream(_region_record(bytes(plain))))["regions"][0]
+    assert region["is_keepout"] is False
+    assert region["keepout_restrictions"] is None, (
+        "only a keep-out gets the default; a plain region restricts nothing")
+    assert region["keepout_restrictions_defaulted"] is False

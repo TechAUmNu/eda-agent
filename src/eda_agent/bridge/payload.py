@@ -56,7 +56,8 @@ __all__ = ["payload_safe", "unsendable_chars", "name_wire_problem",
            "finite_number", "non_finite", "whole_number", "wire_bool",
            "join_ops", "OP_SEPARATOR", "PASCAL_INT_MAX", "MAX_COORD_MILS",
            "STAMP_ENCODING", "stamp_encode", "stamp_decode",
-           "stamp_key_route", "encode_stamps"]
+           "stamp_key_route", "encode_stamps", "stamp_control_chars",
+           "is_stamp_reply", "stamp_reply_problem", "STAMP_SKEW_NOTE"]
 
 #: Two or more consecutive tildes. A single one is data.
 #:
@@ -329,6 +330,12 @@ def stamp_key_route(key: str) -> str:
     ``Value`` and ``Footprint`` match exactly, as they always have;
     ``Comment`` and ``Description`` match in any case. Mirrors the
     branches of ``Gen_SetSchComponentsParameters``.
+
+    ``Description`` also updates a parameter called Description when the
+    part ALREADY carries one (imported and DbLib-style symbols often do;
+    the old route updated it in place, and leaving it would give the part
+    two descriptions that disagree). It is never created. The reply lists
+    those under ``description_parameters_also_set``.
     """
     lower = key.lower()
     if key == "Value" or lower == "comment":
@@ -338,6 +345,35 @@ def stamp_key_route(key: str) -> str:
     if key == "Footprint":
         return "skipped:read-only"
     return "parameter"
+
+
+#: Control characters a stamp may carry: tab, line feed, carriage return.
+#: Any other below U+0020 is refused. A NUL in particular reaches Pascal as
+#: ``Chr(0)`` and the COM string conversion truncates the text there.
+_STAMP_CONTROL_OK = frozenset("\t\n\r")
+
+
+def stamp_control_chars(value: object) -> str:
+    """Control characters in ``value`` a stamp cannot carry, first-seen."""
+    seen: list[str] = []
+    for ch in str(value):
+        if ord(ch) < 0x20 and ch not in _STAMP_CONTROL_OK \
+                and ch not in seen:
+            seen.append(ch)
+    return "".join(seen)
+
+
+def _stamp_text_problem(*texts: object) -> str:
+    """Why these texts cannot arrive exactly through a stamp, or ""."""
+    lost = "".join(unsendable_chars(t) for t in texts)
+    if lost:
+        return f"contains {lost!r}, which the bridge flattens to '?'"
+    ctrl = "".join(stamp_control_chars(t) for t in texts)
+    if ctrl:
+        return (f"contains control character(s) {ctrl!r}; a NUL truncates "
+                f"the text in Altium and the others are not carried "
+                f"reliably")
+    return ""
 
 
 def encode_stamps(stamps) -> tuple[str, list[dict]]:
@@ -351,7 +387,9 @@ def encode_stamps(stamps) -> tuple[str, list[dict]]:
     Returns ``(payload, problems)``. A field that cannot be sent exactly
     is LEFT OUT and named in ``problems`` (``{"designator", "key",
     "reason"}``) rather than flattened: text above U+00FF, which the
-    bridge turns into ``?``, and an empty key. A stamp with no designator
+    bridge turns into ``?``, a control character other than tab, line
+    feed and carriage return (a NUL truncates the text), and an empty
+    key. A stamp with no designator
     is left out whole. ``None`` and empty values are skipped silently, as
     the handler skips empty values anyway. The caller decides whether a
     problem refuses the call.
@@ -365,12 +403,10 @@ def encode_stamps(stamps) -> tuple[str, list[dict]]:
             problems.append({"designator": None, "key": "designator",
                              "reason": f"stamp has no designator: {stamp!r}"})
             continue
-        lost = unsendable_chars(designator)
-        if lost:
+        why = _stamp_text_problem(designator)
+        if why:
             problems.append({"designator": str(designator),
-                             "key": "designator",
-                             "reason": f"contains {lost!r}, which the "
-                                       f"bridge flattens to '?'"})
+                             "key": "designator", "reason": why})
             continue
         fields = [f"designator={stamp_encode(designator)}"]
         for key, value in stamp.items():
@@ -383,14 +419,50 @@ def encode_stamps(stamps) -> tuple[str, list[dict]]:
                 problems.append({"designator": str(designator), "key": "",
                                  "reason": "empty parameter name"})
                 continue
-            lost = unsendable_chars(str(key)) + unsendable_chars(text)
-            if lost:
+            why = _stamp_text_problem(str(key), text)
+            if why:
                 problems.append({"designator": str(designator),
-                                 "key": str(key),
-                                 "reason": f"contains {lost!r}, which the "
-                                           f"bridge flattens to '?'"})
+                                 "key": str(key), "reason": why})
                 continue
             fields.append(f"{stamp_encode(key)}={stamp_encode(text)}")
         if len(fields) > 1:
             ops.append(";".join(fields))
     return "~~".join(ops), problems
+
+#: What every caller says when a stamp reply came from a handler older than
+#: the encoding. One wording, so a log search finds every path that hit it.
+STAMP_SKEW_NOTE = ("stamp handler predates pct1: values containing % ; ~ = "
+                   "were written escaped; redeploy scripts and re-run")
+
+
+def is_stamp_reply(reply: object) -> bool:
+    """True when ``reply`` is what ``Gen_SetSchComponentsParameters``
+    answered, rather than a refusal that never reached Altium.
+
+    ``send_command`` and ``send_command_async`` RETURN a policy refusal
+    (``{"success": False, "error": {...}}``) instead of raising it. That
+    dict has no ``value_encoding`` either, so judging it as a reply would
+    report a stale script, and a routing table, for writes that never
+    happened. Every handler reply carries ``updated``.
+    """
+    return (isinstance(reply, dict) and reply.get("success") is not False
+            and "updated" in reply)
+
+
+def stamp_reply_problem(reply: object) -> str:
+    """:data:`STAMP_SKEW_NOTE` when a stamp reply shows deploy skew, or "".
+
+    A handler that predates ``PctDecode`` ignores ``value_encoding`` and
+    writes the escapes literally: a datasheet URL's ``?a=b`` becomes
+    ``?a%3Db``, ``%20`` becomes ``%2520``. Plain text is unaffected, so the
+    only evidence is the missing echo. The bulk tool, the plan executor and
+    the sheet emitter all send this payload; all three ask here, so none
+    of them discards the one signal that the values went in wrong.
+
+    Not a stamp reply at all (a refusal, ``None``) is not skew: "".
+    """
+    if not is_stamp_reply(reply):
+        return ""
+    if reply.get("value_encoding") == STAMP_ENCODING:
+        return ""
+    return STAMP_SKEW_NOTE

@@ -30,7 +30,7 @@ from typing import Any, Optional
 
 from eda_agent.design._wiring import _sheet_path
 from eda_agent.bridge.payload import (STAMP_ENCODING, encode_stamps,
-                                     payload_safe)
+                                     payload_safe, stamp_reply_problem)
 from eda_agent.design.canvas import (
     SchematicCanvas, SymbolInstance, altium_orientation)
 
@@ -696,7 +696,7 @@ def _emit_parameter_stamps(
         return
     n_ops = payload.count("~~") + 1
     try:
-        bridge.send_command(
+        reply = bridge.send_command(
             "generic.set_sch_components_parameters",
             {"stamps": payload, "sheet_path": str(sheet_path),
              "value_encoding": STAMP_ENCODING},
@@ -705,13 +705,20 @@ def _emit_parameter_stamps(
     except Exception as exc:
         result.notes.append(f"parameter stamp pass failed: {exc}")
         return
+    # A stale deploy writes ';' as '%3B' and a datasheet URL's '=' as
+    # '%3D' without any error. The missing value_encoding echo is the only
+    # sign, so the reply is kept and checked rather than discarded.
+    skew = stamp_reply_problem(reply)
+    if skew:
+        result.notes.append(skew)
 
     # Discipline rule 16: Manufacturer, Manufacturer Part Number, and
     # Datasheet must be invisible on the schematic body by default --
-    # only Designator + Value are user-facing. The stamping API creates
-    # the parameters with default visibility, so we sweep the placed
-    # sheet right after stamping and flip IsHidden=true on those three
-    # parameter names across every component.
+    # only Designator + Value are user-facing. Parameters the stamp
+    # CREATES now come out hidden on their part, but an EXISTING one keeps
+    # its own visibility, and library symbols often carry these three
+    # visible. So the placed sheet is still swept right after stamping,
+    # flipping IsHidden=true on those three names across every component.
     _DISCIPLINE_HIDDEN_PARAMS = (
         "Manufacturer",
         "Manufacturer Part Number",

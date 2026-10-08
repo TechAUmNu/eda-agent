@@ -266,14 +266,29 @@ def test_key_routes(key, route):
     assert wire.stamp_key_route(key) == route
 
 
+def _description_branch(gen: str) -> str:
+    """The whole Description branch, from its test to the next one.
+
+    Delimited by the two branch heads rather than a lazy ``Begin(.*?)End``:
+    that stopped at the ``End`` of the first ``Try ... Except End;`` and
+    checked one line of the branch, so anything after it went unseen.
+    """
+    head = "Else If KeyU = 'DESCRIPTION' Then"
+    assert head in gen, "no Description branch: it would fall through to " \
+                        "a parameter called Description"
+    start = gen.index(head)
+    end = gen.index("Else If Key = 'Footprint'", start)
+    assert end > start
+    return gen[start:end]
+
+
 def test_the_handler_routes_description_to_the_component():
     gen = load(_ALTIUM / "Generic.pas")["Gen_SetSchComponentsParameters"]
-    branch = re.search(r"Else If KeyU = 'DESCRIPTION' Then\s*Begin(.*?)End",
-                       gen, re.S)
-    assert branch, "no Description branch: it would fall through to a " \
-                   "parameter called Description"
-    assert "Comp.ComponentDescription := Val" in branch.group(1)
-    assert "SetCompParamText" not in branch.group(1)
+    branch = _description_branch(gen)
+    assert "Comp.ComponentDescription := Val" in branch
+    assert "SetCompParamText" not in branch, (
+        "SetCompParamText(Ex) CREATES a missing parameter: the stray "
+        "Description parameter this branch exists to prevent")
     assert re.search(r"If \(Key = 'Value'\) Or \(KeyU = 'COMMENT'\) Then\s*"
                      r"Begin\s*SchBeginModify\(Comp\.Comment\);", gen)
     assert gen.index("KeyU = 'DESCRIPTION'") < \
@@ -291,9 +306,24 @@ def test_the_reply_counts_properties_and_parameters_separately():
 
 # ------------------------------------- 3. new parameters: hidden, on the part
 
-def _create_branch() -> str:
+def _found_and_create_branches() -> tuple[str, str]:
+    """(modify branch, create branch) of SetCompParamTextEx.
+
+    Split at the first ``Else`` AFTER ``If Found <> Nil Then``, not the
+    first in the function: an ``Else`` earlier on would leave the modify
+    slice empty and its "untouched" checks passing on nothing.
+    """
     ex = load(_ALTIUM / "Generic.pas")["SetCompParamTextEx"]
-    return ex[ex.index("Else"):]
+    start = ex.index("If Found <> Nil Then")
+    els = ex.index("Else", start)
+    assert els > start
+    found = ex[start:els]
+    assert "Found.Text := ParamValue" in found, "the modify slice is empty"
+    return found, ex[els:]
+
+
+def _create_branch() -> str:
+    return _found_and_create_branches()[1]
 
 
 def test_a_created_parameter_is_hidden_and_sits_on_its_component():
@@ -307,8 +337,7 @@ def test_a_created_parameter_is_hidden_and_sits_on_its_component():
 
 
 def test_an_existing_parameter_keeps_its_visibility_and_position():
-    ex = load(_ALTIUM / "Generic.pas")["SetCompParamTextEx"]
-    found = ex[ex.index("If Found <> Nil Then"):ex.index("Else")]
+    found, _ = _found_and_create_branches()
     assert "Found.Text := ParamValue" in found
     for untouched in ("IsHidden", "Location", "ShowName"):
         assert untouched not in found, (
@@ -360,3 +389,235 @@ def test_an_older_script_is_named_when_it_ignored_the_encoding(monkeypatch):
     out = _tool(monkeypatch, bridge)(stamps=[{"designator": "R1",
                                               "MPN": "A;B"}])
     assert "warning" not in out
+
+
+# ------------------------------------------------- review follow-ups, 2026-10-08
+#
+# A review of the change above found that it fixed the three field reports
+# and opened smaller gaps next to each: a part's real Description parameter
+# left stale, a deploy skew that two of the three senders could not see, a
+# refusal dressed up as a stale script, shown parameters piled on the
+# symbol origin, and values that still did not arrive and said nothing.
+
+
+def test_an_existing_description_parameter_is_updated_never_created():
+    """Imported and DbLib-style symbols often carry a REAL parameter called
+    Description. The old route (SetCompParamText) updated it in place; the
+    first version of the property route wrote only ComponentDescription,
+    so such a part kept two descriptions that disagree and the reply
+    (properties_set 1, parameters_modified 0) hid it. The branch now also
+    updates that parameter if present, through a helper that cannot
+    create one."""
+    fns = load(_ALTIUM / "Generic.pas")
+    helper = fns["ModifyCompParamIfPresent"]
+    assert "UpperCase(Param.Name) = UpperCase(ParamName)" in helper, (
+        "the search must be case-insensitive, like SetCompParamTextEx's")
+    assert "Found.Text := ParamValue" in helper
+    for creates in ("SchObjectFactory", "AddSchObject", "SchRegisterObject",
+                    "SetCompParamText"):
+        assert creates not in helper, (
+            f"{creates}: a modify-only helper must never create a parameter")
+
+    gen = fns["Gen_SetSchComponentsParameters"]
+    branch = _description_branch(gen)
+    prop = branch.index("Comp.ComponentDescription := Val")
+    also = branch.index("If ModifyCompParamIfPresent(Comp, Key, Val) Then")
+    assert prop < also
+    assert "Inc(ParamsModified)" in branch[also:]
+    assert "DescParamJson" in branch[also:]
+    assert '"description_parameters_also_set"' in gen
+
+    text = (_ALTIUM / "Generic.pas").read_text(encoding="utf-8")
+    assert text.index("Function ModifyCompParamIfPresent(") < \
+        text.index("Function Gen_SetSchComponentsParameters("), (
+            "DelphiScript needs the callee declared first")
+
+
+def test_a_shown_new_parameter_is_offset_and_turned_with_the_part():
+    """With visible=true every created parameter used to land on exactly
+    Comp.Location at orientation 0: two shown parameters drew on top of
+    each other and on the body, and stayed horizontal on a part turned
+    90/270. Hidden ones (the default) are unaffected. A shown one now goes
+    one 100 mil row per parameter already shown, away from the Comment,
+    and takes the part's orientation."""
+    ex = load(_ALTIUM / "Generic.pas")["SetCompParamTextEx"]
+    search = ex[:ex.index("If Found <> Nil Then")]
+    assert "If Not Param.IsHidden Then Inc(ShownCount);" in search, (
+        "the offset must count the parameters already shown on the part")
+
+    create = _create_branch()
+    show = create.index("If ShowNew Then")
+    add = create.index("Comp.AddSchObject(NewParam)")
+    shown = create[show:add]
+    for needle in ("NewParam.ShowName := False;",
+                   "Ori := Comp.Orientation;",
+                   "CompLoc := Comp.Comment.Location;",
+                   "MilsToCoord(100 * (ShownCount + 1))",
+                   "NewParam.Location := CompLoc;",
+                   "NewParam.Orientation := Ori;"):
+        assert needle in shown, needle
+    assert re.search(r"If \(Ori = 1\) Or \(Ori = 3\) Then\s*"
+                     r"CompLoc\.X := CompLoc\.X \+", shown), (
+        "a part turned 90/270 runs its text vertically: step along X")
+    hidden = create[:show]
+    assert "Orientation" not in hidden and "Comment.Location" not in hidden, (
+        "a hidden created parameter keeps the plain on-the-part default")
+
+
+def test_a_refusal_is_not_reported_as_a_stale_script(monkeypatch):
+    """send_command_async RETURNS a policy refusal instead of raising it.
+    That dict has no value_encoding either, so the tool used to attach a
+    key_routing and the 'running Altium script predates' warning to a call
+    that wrote nothing."""
+    refused = {"success": False,
+               "error": {"code": "REFUSED_BY_POLICY", "message": "no"}}
+    bridge = _RecordingBridge(reply=refused)
+    out = _tool(monkeypatch, bridge)(stamps=[{"designator": "R1",
+                                              "MPN": "A;B"}])
+    assert out == refused
+    assert "warning" not in out and "key_routing" not in out
+
+
+@pytest.mark.parametrize("reply,problem", [
+    ({"updated": 1, "failed": 0, "total": 1, "value_encoding": _PCT1}, False),
+    ({"updated": 1, "failed": 0, "total": 1}, True),
+    ({"updated": 0, "failed": 1, "total": 1, "value_encoding": ""}, True),
+    ({"success": False, "error": {"code": "REFUSED_BY_POLICY"}}, False),
+    ({"success": True}, False),
+    (None, False),
+    ("text", False),
+])
+def test_the_shared_skew_check(reply, problem):
+    assert bool(wire.stamp_reply_problem(reply)) is problem
+    if problem:
+        assert wire.stamp_reply_problem(reply) == wire.STAMP_SKEW_NOTE
+        assert "redeploy" in wire.STAMP_SKEW_NOTE
+
+
+def test_every_stamp_sender_checks_the_reply():
+    """Under deploy skew a handler without PctDecode writes the escapes
+    literally: a datasheet URL's '?a=b' becomes '?a%3Db', '%20' becomes
+    '%2520'. Only the bulk tool looked at the echo; the plan executor and
+    the sheet emitter discarded the reply, and pipeline.py stamps datasheet
+    URLs through the emitter. Every sender now keeps it and asks the one
+    shared check."""
+    senders = [p for p in _SRC.rglob("*.py")
+               if '"generic.set_sch_components_parameters"'
+               in p.read_text(encoding="utf-8")]
+    assert len(senders) >= 3, senders
+    for path in senders:
+        src = path.read_text(encoding="utf-8")
+        assert "stamp_reply_problem(" in src, path
+
+
+def test_the_emitter_notes_a_stale_handler():
+    from eda_agent.design.emitter import EmitResult, _emit_parameter_stamps
+
+    class _Inst:
+        refdes = "U1"
+
+    class _Bridge:
+        def __init__(self, reply):
+            self.reply = reply
+
+        def send_command(self, command, params=None, **kw):
+            if command == "generic.set_sch_components_parameters":
+                return dict(self.reply)
+            return {"success": True}
+
+    stamps = {"U1": {"Datasheet": "https://x.example/ds?a=b%20c"}}
+    stale = EmitResult()
+    _emit_parameter_stamps([_Inst()], stamps, Path("s.SchDoc"),
+                           _Bridge({"updated": 1, "failed": 0, "total": 1}),
+                           stale)
+    assert wire.STAMP_SKEW_NOTE in stale.notes
+
+    fresh = EmitResult()
+    _emit_parameter_stamps([_Inst()], stamps, Path("s.SchDoc"),
+                           _Bridge({"updated": 1, "failed": 0, "total": 1,
+                                    "value_encoding": _PCT1}), fresh)
+    assert not any("pct1" in n for n in fresh.notes), fresh.notes
+
+
+def test_the_executor_notes_a_stale_handler(tmp_path):
+    from eda_agent.design.executor import execute_plan
+    from tests.design.test_executor import _FakeBridge, _two_part_plan
+
+    class _Stale(_FakeBridge):
+        def __init__(self, echo):
+            super().__init__()
+            self.echo = echo
+
+        def send_command(self, command, params=None, timeout=None):
+            out = super().send_command(command, params, timeout)
+            if command == "generic.set_sch_components_parameters":
+                out = {"updated": 1, "failed": 0, "total": 1}
+                if self.echo:
+                    out["value_encoding"] = _PCT1
+            return out
+
+    stale = _Stale(echo=False)
+    result = execute_plan(_two_part_plan(), str(tmp_path / "x.PrjPcb"),
+                          bridge=stale)
+    assert any(c == "generic.set_sch_components_parameters"
+               for c, _ in stale.calls), "the plan stamped nothing"
+    assert any(wire.STAMP_SKEW_NOTE in n for n in result.notes), result.notes
+
+    fresh = _Stale(echo=True)
+    result = execute_plan(_two_part_plan(), str(tmp_path / "y.PrjPcb"),
+                          bridge=fresh)
+    assert not any(wire.STAMP_SKEW_NOTE in n for n in result.notes)
+
+
+def test_an_empty_value_is_reported_not_silently_dropped(monkeypatch):
+    """The encoder and the handler both skip an empty value, so a caller
+    trying to CLEAR an MPN got a clean reply with nothing changed. The
+    tool cannot clear a parameter; it now says which keys it skipped."""
+    bridge = _RecordingBridge()
+    run = _tool(monkeypatch, bridge)
+    out = run(stamps=[{"designator": "R1", "MPN": "", "Value": "10k",
+                       "Note": None}])
+    assert out["skipped_empty"] == [{"designator": "R1", "key": "MPN"},
+                                    {"designator": "R1", "key": "Note"}]
+    assert "MPN" not in out["key_routing"]
+    (_, params), = bridge.calls
+    assert _handler_reads(params) == [{"designator": "R1", "Value": "10k"}]
+
+    bridge = _RecordingBridge()
+    out = _tool(monkeypatch, bridge)(stamps=[{"designator": "R1", "MPN": ""}])
+    assert out["ok"] is False and bridge.calls == []
+    assert "cannot clear" in out["reason"]
+    assert out["skipped_empty"] == [{"designator": "R1", "key": "MPN"}]
+
+
+@pytest.mark.parametrize("bad", ["A\x00B", "x\x01", "\x1b[0m"])
+def test_a_control_character_is_refused(monkeypatch, bad):
+    """A NUL passed unsendable_chars, became Chr(0) in Pascal, and the COM
+    string conversion truncated the text there: 'A\\x00B' arrives as 'A'
+    with an ok reply."""
+    bridge = _RecordingBridge()
+    out = _tool(monkeypatch, bridge)(stamps=[{"designator": "R1",
+                                              "Note": bad}])
+    assert out["ok"] is False and bridge.calls == []
+    assert out["problems"][0]["key"] == "Note"
+    assert "control" in out["problems"][0]["reason"]
+
+
+def test_tab_and_newlines_still_travel(monkeypatch):
+    bridge = _RecordingBridge()
+    _tool(monkeypatch, bridge)(stamps=[{"designator": "R1",
+                                        "Note": "a\tb\r\nc"}])
+    (_, params), = bridge.calls
+    assert _handler_reads(params) == [{"designator": "R1",
+                                       "Note": "a\tb\r\nc"}]
+
+
+def test_the_supplier_pn_audit_points_at_a_tool_that_can_hide():
+    """audit_find_visible_supplier_pn told agents to hide its findings with
+    sch_set_components_parameters, which never changes the visibility of an
+    existing parameter (and never could)."""
+    src = (_SRC / "tools" / "audit.py").read_text(encoding="utf-8")
+    start = src.index("async def audit_find_visible_supplier_pn(")
+    body = src[start:src.index("@mcp.tool()", start)]
+    assert "to hide them in bulk" not in body
+    assert "obj_batch_modify" in body and "IsHidden=true" in body

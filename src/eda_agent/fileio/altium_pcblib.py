@@ -319,6 +319,12 @@ _KEEPOUT_FLAG = 2
 _KEEPOUT_BITS = ((0x01, "via"), (0x02, "track"), (0x04, "copper"),
                  (0x08, "smd_pad"), (0x10, "th_pad"))
 
+#: What a keep-out restricts when its record carries no
+#: ``KEEPOUTRESTRICTIONS`` at all (files older than the property): all five.
+#: Altium treats the missing value that way and KiCad's importer reads it
+#: with this default, so reporting "restricts nothing" would be wrong.
+_KEEPOUT_DEFAULT = 0x1F
+
 
 def _header_keepout(b: bytes) -> bool:
     """The keep-out flag of a region or fill record header."""
@@ -400,11 +406,17 @@ def parse_region(b: bytes) -> dict[str, Any]:
     # that reported every keep-out region as a plain one.
     keepout = (_header_keepout(b)
                or props.get("ISKEEPOUT", "").upper() == "TRUE")
+    # A keep-out with no stored mask restricts everything, not nothing:
+    # report the effective value and say it was defaulted.
+    defaulted = keepout and restrictions is None
+    if defaulted:
+        restrictions = _KEEPOUT_DEFAULT
     return {"layer": _prop_layer(props, b),
             "layer_v7": props.get("V7_LAYER"),
             "kind": props.get("KIND"),
             "is_keepout": keepout,
             "keepout_restrictions": restrictions,
+            "keepout_restrictions_defaulted": defaulted,
             "keepout_restricts": keepout_restriction_names(restrictions),
             "vertex_count": len(vertices),
             "bbox_mils": _bbox(vertices)}

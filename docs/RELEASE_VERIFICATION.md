@@ -60,6 +60,8 @@ works elsewhere cannot be an undeclared identifier:
 | 36, new parameter hidden | `IsHidden` | yes, `Generic.pas` (on parameters, run live) | low |
 | 36, new parameter on its component | `Location` | yes, `Generic.pas` | low: what is new is reading `Comp.Location` into a parameter before it is added |
 | 36, shown new parameter, value only | `ShowName` | yes, `Lib_SetPinProperties` (on pins only) | medium, first write on a parameter; reached only with `visible=true` |
+| 36, shown new parameter, turned with the part | `Orientation` | yes, `Generic.pas` (net labels, power ports) | medium, first write on a parameter; reached only with `visible=true` |
+| 36, existing Description parameter kept in step | `Text` | yes, `SetCompParamTextEx` (the same write on the same object) | low |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -98,7 +100,7 @@ default:
 | `remove_from_board=true` on `lib_delete_footprint_primitives`, `lib_delete_footprint_pads`, `lib_add_footprint_text`, `lib_link_3d_model` with `replace`, `lib_auto_link_3d_models` with `replace` | `RemovePCBObject` on the library board, and making the footprint current first | 24 |
 | `keepout=true` on a fill, or `kind=keepout` on a region, NOT on KeepOutLayer | the `IsKeepout` write | 24 |
 | `kind=cutout` on a footprint region | the `Kind := eRegionKind_Cutout` write | 16, 24 |
-| `visible=true` on `sch_set_components_parameters` | `ShowName := False` on a parameter it creates | 36 |
+| `visible=true` on `sch_set_components_parameters` | `ShowName := False`, `Orientation := Comp.Orientation` and a `Location` offset from `Comp.Comment.Location` on a parameter it creates | 36 |
 
 Both writes in the last two rows are read back (`keepout_applied`,
 `kind_applied`), so the first live call that reaches them says whether
@@ -2394,14 +2396,29 @@ new `SetCompParamTextEx(..., False)`, so the singular stamp, the SPICE
 stampers and design_execute_plan's stamping get the hidden-on-the-part default
 too. Existing parameters still only have their `Text` changed.
 
-**Not run live.** The script version was NOT bumped by this change; bump it at
-deploy if the procedure needs app_ping to tell the builds apart. Independent of
-that, the reply echoes `value_encoding: "pct1"` only from the new handler, and
-the Python tool adds a `warning` when the echo is missing, so step 2 below
-detects a stale script by itself.
+Review follow-ups (same day): `Description` ALSO updates a parameter called
+Description that the part already carries (`ModifyCompParamIfPresent`,
+modify-only, never creates; reported in `description_parameters_also_set`),
+because the old route updated it and leaving it stale gives the part two
+descriptions. A shown created parameter (`visible=true`) is placed one 100 mil
+row per already-shown parameter away from the Comment label (along X on a part
+turned 90/270) and takes the part's `Orientation`, instead of every one piling
+onto the symbol origin. The plan executor and the sheet emitter now check the
+reply for the `value_encoding` echo too (`stamp_reply_problem`), and a policy
+refusal is no longer reported as a stale script. Empty values are reported in
+`skipped_empty`; control characters other than tab/CR/LF are refused.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.07.03` (or the
-   bumped number), `version_match` true.
+**Not run live.** The script version was NOT bumped in this branch (the lead
+bumps it in the deploy commit). It MUST be bumped there: the Pascal changed,
+and with the old number `app_ping` reports `version_match` true against a
+stale deploy. Independent of that, the reply echoes `value_encoding: "pct1"`
+only from the new handler, and every sender reports its absence (the tool as
+a `warning`, the plan paths as a note), so step 2 below detects a stale
+script by itself.
+
+1. **Version.** `app_ping`: `altium_script_version` = the number the deploy
+   commit bumped SCRIPT_VERSION to (NOT `2026.10.07.03`, which is the
+   pre-change build), `version_match` true.
 2. **Exact values.** On a scratch sheet with a placed part (say `R1`) that has
    NO parameter called `ZZ Test`, call `sch_set_components_parameters` with
    `stamps=[{"designator": "R1", "ZZ Test": "A;B,C=D|E \"q\" 50% ~x~~y 10µF"}]`.
@@ -2419,19 +2436,45 @@ detects a stale script by itself.
    `key_routing: {"Description": "property:ComponentDescription"}`; the
    component's `ComponentDescription` reads `Res; thick film`, and NO
    parameter named Description was added (count `eParameter` `Name=Description`
-   on R1 before and after: unchanged).
+   on R1 before and after: unchanged), `description_parameters_also_set: []`.
+   Then a part that ALREADY carries a Description parameter (an imported or
+   DbLib-style symbol; or add one by hand to `R2` with text `old`): stamp
+   `{"designator": "R2", "Description": "Res; new"}`. Expect
+   `properties_set: 1`, `parameters_modified: 1`, `parameters_created: 0`,
+   `description_parameters_also_set: [{designator: "R2", name:
+   "Description"}]`; BOTH `ComponentDescription` and the parameter read
+   `Res; new`, and the count of `Description` parameters on R2 is still 1.
 5. **Comment.** Stamp `{"designator": "R1", "Comment": "10k"}`: `properties_set:
    1`, the part's Comment shows `10k`, no parameter named Comment created.
 6. **Existing parameter untouched otherwise.** Make `ZZ Test` visible and move
    it by hand, then stamp a new value: only the text changes, it stays visible
    and where it was (`parameters_modified: 1`).
-7. **Opt-in show (the one unproven write).** Stamp a fresh key
-   `{"designator": "R1", "ZZ Shown": "x"}` with `visible=true`: `ZZ Shown`
-   is visible at R1's location, value only (no `ZZ Shown =` prefix), and the
-   bridge answers `app_ping` afterwards. If the loop stops here, `ShowName` is
-   not a parameter member on this Altium: drop that line from
-   `SetCompParamTextEx` rather than retrying.
-8. Undo the scratch edits (or close the sheet without saving).
+7. **Opt-in show (the unproven writes).** Stamp two fresh keys
+   `{"designator": "R1", "ZZ Shown": "x", "ZZ Shown2": "y"}` with
+   `visible=true`: both are visible, value only (no `ZZ Shown =` prefix),
+   NOT on the symbol origin and NOT on each other: on an upright R1 the first
+   sits 100 mil below R1's Comment label (plus 100 mil per parameter that was
+   already shown), the second 100 mil below that. Repeat on a part rotated 90
+   (`R3`): the two read `Orientation` 1 like the part and step along X from
+   the Comment instead. The bridge answers `app_ping` afterwards. If the loop
+   stops here, `ShowName` or `Orientation` is not a parameter member on this
+   Altium: drop that line from `SetCompParamTextEx` rather than retrying.
+8. **Nothing written says so.** Stamp `{"designator": "R1", "ZZ Test": ""}`:
+   the reply is `ok: false` with `skipped_empty: [{designator: "R1", key:
+   "ZZ Test"}]` and `ZZ Test` keeps its text (the tool cannot clear a
+   parameter). Offline-verified; this only confirms nothing reaches Altium.
+9. Undo the scratch edits (or close the sheet without saving).
+10. **Keep-out regions read back as keep-outs (offline, VERIFIED 2026-10-08
+    on a copy of the carrier library).** `lib_read_pcblib_file` on
+    `carrier.PcbLib` with footprint `QSFP28_CAGE_1x1_PF-10_TE2170704-5`
+    (the `-5` is part of the stored name; without it the reader answers
+    `found: false`): 4 regions, every one `is_keepout: true`,
+    `keepout_restrictions: 31`, `keepout_restrictions_defaulted: false`,
+    `keepout_restricts: [via, track, copper, smd_pad, th_pad]`; the footprint
+    has no fills (any it had would read `is_keepout: false`). Run with the
+    branch reader against a copy of the library: exactly that. Needs no
+    Altium; repeat after deploy only to confirm the installed package is
+    this tree.
 
 ---
 

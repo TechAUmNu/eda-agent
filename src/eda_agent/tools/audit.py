@@ -513,8 +513,11 @@ def register_audit_tools(mcp):
         Returns:
             Dict with `{checked, violations, items[]}` where each item
             carries `{designator, parameter, value}` for a visible
-            supplier-PN parameter. Pair with `sch_set_components_parameters`
-            to hide them in bulk.
+            supplier-PN parameter. To hide them, use `obj_batch_modify`
+            (or `obj_modify`) on `eParameter` with filter `Name=<the
+            parameter>` and set `IsHidden=true`, one operation per name.
+            `sch_set_components_parameters` cannot: it never changes the
+            visibility of a parameter that already exists.
         """
         bridge = get_bridge()
         return await bridge.send_command_async(

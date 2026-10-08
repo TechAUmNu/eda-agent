@@ -23,7 +23,8 @@ from typing import Any, Optional
 
 from pydantic import ValidationError
 
-from eda_agent.bridge.payload import STAMP_ENCODING, encode_stamps
+from eda_agent.bridge.payload import (STAMP_ENCODING, encode_stamps,
+                                     stamp_reply_problem)
 from eda_agent.design.canvas import POWER_RAIL_CLUSTER_RADIUS_MILS
 from eda_agent.design.layout import PlacedPart, compute_layout
 from eda_agent.design.plan import DesignPlan, Net, Part, PartStatus, PinRef
@@ -392,7 +393,7 @@ def execute_plan(plan: DesignPlan, project_path: str, *, bridge: Optional[Any] =
         if stamp_ops:
             n_ops = stamp_ops.count("~~") + 1
             try:
-                bridge.send_command(
+                stamp_reply = bridge.send_command(
                     "generic.set_sch_components_parameters",
                     {
                         "stamps": stamp_ops,
@@ -405,6 +406,13 @@ def execute_plan(plan: DesignPlan, project_path: str, *, bridge: Optional[Any] =
                 result.notes.append(
                     f"bulk param-stamp for sheet {sheet_name} failed: {exc}"
                 )
+            else:
+                # A stale deploy writes the escapes literally (';' as
+                # '%3B'); the missing echo is the only sign of it.
+                skew = stamp_reply_problem(stamp_reply)
+                if skew:
+                    result.notes.append(
+                        f"bulk param-stamp for sheet {sheet_name}: {skew}")
 
     # Wiring stage, drop a net label at every plan-defined pin endpoint.
     # Power and ground nets get power ports instead of plain labels.

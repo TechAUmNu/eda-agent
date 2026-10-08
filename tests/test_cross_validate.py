@@ -1888,7 +1888,8 @@ class TestPayloadSurvivesHostileInput:
         assert stamp_decode(raw_value) == "10k~~designator=R99", (
             "an injected Value overrode the real one")
         assert ";" not in get_batch_field(ops[0], "designator")
-        assert stamp_decode(get_batch_field(ops[0], "designator")) ==             "R1;Value=0"
+        assert stamp_decode(get_batch_field(ops[0], "designator")) == (
+            "R1;Value=0")
         assert ";" not in get_batch_field(ops[0], "Note")
         assert stamp_decode(get_batch_field(ops[0], "Note")) == "a;b=2"
 

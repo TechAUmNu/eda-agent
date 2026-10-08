@@ -8355,8 +8355,15 @@ End;
 { sheet origin, so stamping an MPN onto a part drew "RC0603FR-0710KL" at (0,0) }
 { of the sheet, far from the part it belongs to (field report 2026-10-08,      }
 { carrier project). It is now placed at the owning component's location and   }
-{ hidden, unless ShowNew asks for it to be shown; a shown one shows its value, }
-{ not its name.                                                                }
+{ hidden, unless ShowNew asks for it to be shown.                              }
+{                                                                              }
+{ A SHOWN one shows its value, not its name, and must not land on the symbol  }
+{ origin: two shown parameters there draw on top of each other and on the     }
+{ body. It goes one 100 mil row per parameter already shown on the part away   }
+{ from the Comment label (below it on an upright part, beside it on one turned }
+{ 90/270, where the text runs vertically), turned with the part.               }
+{ Designator and Comment are sub-objects, not iterator children, so ShownCount }
+{ counts only the visible PARAMETERS, the ones this would otherwise overlap.  }
 Function SetCompParamTextEx(Comp : ISch_Component; ParamName, ParamValue : String;
                             ShowNew : Boolean) : Boolean;
 Var
@@ -8364,9 +8371,11 @@ Var
     Param, NewParam : ISch_Parameter;
     Found : ISch_Parameter;
     CompLoc : TLocation;
+    ShownCount, Ori : Integer;
 Begin
     Result := False;
     Found := Nil;
+    ShownCount := 0;
     Iter := Comp.SchIterator_Create;
     Try
         Iter.AddFilter_ObjectSet(MkSet(eParameter));
@@ -8378,6 +8387,9 @@ Begin
                 Found := Param;
                 Break;
             End;
+            Try
+                If Not Param.IsHidden Then Inc(ShownCount);
+            Except End;
             Param := Iter.NextSchObject;
         End;
     Finally
@@ -8403,7 +8415,20 @@ Begin
             Except End;
             NewParam.IsHidden := Not ShowNew;
             If ShowNew Then
+            Begin
                 NewParam.ShowName := False;
+                Ori := 0;
+                Try Ori := Comp.Orientation; Except End;
+                Try
+                    CompLoc := Comp.Comment.Location;
+                    If (Ori = 1) Or (Ori = 3) Then
+                        CompLoc.X := CompLoc.X + MilsToCoord(100 * (ShownCount + 1))
+                    Else
+                        CompLoc.Y := CompLoc.Y - MilsToCoord(100 * (ShownCount + 1));
+                    NewParam.Location := CompLoc;
+                Except End;
+                Try NewParam.Orientation := Ori; Except End;
+            End;
             Comp.AddSchObject(NewParam);
             SchRegisterObject(Comp, NewParam);
             Result := True;
@@ -8416,6 +8441,50 @@ End;
 Function SetCompParamText(Comp : ISch_Component; ParamName, ParamValue : String) : Boolean;
 Begin
     Result := SetCompParamTextEx(Comp, ParamName, ParamValue, False);
+End;
+
+{ Change the text of a parameter the component ALREADY carries; never create  }
+{ one. Same case-insensitive search as SetCompParamTextEx. Returns True if it  }
+{ found (and changed) one.                                                     }
+{                                                                              }
+{ For the bulk stamp's Description key. That key writes the component's own   }
+{ ComponentDescription, but imported and DbLib-style symbols often ALSO carry  }
+{ a real parameter called Description, and the old route (SetCompParamText)   }
+{ updated that one in place. Writing only the property would leave the part   }
+{ with two descriptions that disagree, and the BOM or audit reading the        }
+{ parameter would see the stale one. Creating the parameter instead is the     }
+{ original bug (a stray Description parameter), hence modify-only.             }
+Function ModifyCompParamIfPresent(Comp : ISch_Component; ParamName, ParamValue : String) : Boolean;
+Var
+    Iter : ISch_Iterator;
+    Param, Found : ISch_Parameter;
+Begin
+    Result := False;
+    Found := Nil;
+    Iter := Comp.SchIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eParameter));
+        Param := Iter.FirstSchObject;
+        While Param <> Nil Do
+        Begin
+            If UpperCase(Param.Name) = UpperCase(ParamName) Then
+            Begin
+                Found := Param;
+                Break;
+            End;
+            Param := Iter.NextSchObject;
+        End;
+    Finally
+        Comp.SchIterator_Destroy(Iter);
+    End;
+
+    If Found <> Nil Then
+    Begin
+        SchBeginModify(Found);
+        Found.Text := ParamValue;
+        SchEndModify(Found);
+        Result := True;
+    End;
 End;
 
 {..............................................................................}
@@ -9897,6 +9966,9 @@ End;
 {   Value, Comment  -> Comp.Comment.Text                                       }
 {   Description     -> Comp.ComponentDescription (it used to create a stray   }
 {                      visible parameter called Description at the origin)    }
+{                      plus an EXISTING Description parameter, if the part   }
+{                      has one (modified, never created; see                 }
+{                      ModifyCompParamIfPresent)                             }
 {   Footprint       -> skipped, read-only in DelphiScript                      }
 { One PreProcess/PostProcess wraps every component update; iterate the doc     }
 { ONCE and apply matching ops on the fly. Avoids 14 singular IPC round-trips. }
@@ -9917,7 +9989,7 @@ Var
     SrvDoc : IServerDocument;
     Encoded, ShowNew : Boolean;
     PropsSet, ParamsModified, ParamsCreated, SkippedReadOnly : Integer;
-    CreatedJson, ShowNewStr : String;
+    CreatedJson, ShowNewStr, DescParamJson : String;
 Begin
     StampsStr := ExtractJsonValue(Params, 'stamps');
     SheetPath := ExtractJsonValue(Params, 'sheet_path');
@@ -9948,6 +10020,7 @@ Begin
     ParamsCreated := 0;
     SkippedReadOnly := 0;
     CreatedJson := '';
+    DescParamJson := '';
 
     { Build parallel arrays: designator -> raw op string.                     }
     DesigList := TStringList.Create;
@@ -10032,6 +10105,19 @@ Begin
                                         Try Comp.ComponentDescription := Val; Except End;
                                         SchEndModify(Comp);
                                         Inc(PropsSet);
+                                        { A part that ALSO carries a real   }
+                                        { Description parameter gets it in  }
+                                        { step, or it keeps the old text.   }
+                                        { Modify only: never create one.    }
+                                        If ModifyCompParamIfPresent(Comp, Key, Val) Then
+                                        Begin
+                                            Inc(ParamsModified);
+                                            If DescParamJson <> '' Then
+                                                DescParamJson := DescParamJson + ',';
+                                            DescParamJson := DescParamJson + '{"designator":"'
+                                                + EscapeJsonString(CompDesig)
+                                                + '","name":"' + EscapeJsonString(Key) + '"}';
+                                        End;
                                     End
                                     Else If Key = 'Footprint' Then
                                     Begin
@@ -10091,6 +10177,7 @@ Begin
         ',"parameters_created":' + IntToStr(ParamsCreated) +
         ',"skipped_read_only":' + IntToStr(SkippedReadOnly) +
         ',"created":[' + CreatedJson + ']' +
+        ',"description_parameters_also_set":[' + DescParamJson + ']' +
         ',"new_parameters_visible":' + ShowNewStr +
         ',"value_encoding":"' + EscapeJsonString(EncodingStr) + '"}');
 End;
