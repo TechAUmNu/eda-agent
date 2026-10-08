@@ -1,4 +1,4 @@
-# Release verification: 2026.10.07.03
+# Release verification: 2026.10.08.01
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by the linter (and by FPC where a section says so) but **not
@@ -275,7 +275,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.07.03`, `version_match` =
+Expect `altium_script_version` = `2026.10.08.01`, `version_match` =
 `true`, and `mcp_server_version` = `0.6.1`.
 
 Those are two different versions and they fail differently.
@@ -2034,7 +2034,7 @@ sheets, `A`, `B` and `STUBS`, all saved and loaded, plus one open
 library `<lib>` (a scratch copy) that has not been edited. Confirm
 `app_ping` answers after each call.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.07.03`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.08.01`.
 
 2. **The default save-all leaves an unedited library alone.** Note
    `<lib>`'s mtime. `app_save_all` with no arguments. Expect
@@ -2202,7 +2202,7 @@ compile is what is new.
 Work on the live project only if the .PrjPcb is committed (the check is a
 `git diff`), or on a copy. Focus some other sheet `A` first.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.07.03`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.08.01`.
 
 2. **A default add writes the project.** Note the .PrjPcb's mtime and two
    SchDoc mtimes. `proj_add_sheet name=ZZ33`. Expect `success: true,
@@ -2287,7 +2287,7 @@ confirm it) and write the project only for a sheet that is on disk.
 
 Focus some other sheet `A` of the focused project first.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.07.03`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.08.01`.
 
 2. **The add still takes the document save.** `proj_add_sheet name=ZZ35`:
    as step 33's step 2, plus `project_save_route: document_save`.
@@ -2360,7 +2360,7 @@ after `MarkDocDirtyByPath`. They now answer `saved: false` with
 `marked_modified`, `pending_save` and `written_to_disk: false` (the fields
 `lib_delete_footprint` already uses). No Altium call changed; only the reply.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.07.03`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.08.01`.
 2. **The reply is honest.** Focus a sheet, `obj_modify` a net label to its
    own current text. Expect `saved: false, marked_modified: true,
    pending_save: true, written_to_disk: false`, and the sheet's mtime
@@ -2381,7 +2381,7 @@ libraries skipped.
 
 ## 36. Parameter stamps arrive exactly, Description is the component's, new parameters hidden (UNVERIFIED-LIVE)
 
-Field reports 2026-10-08 (carrier project, bridge 2026.10.07.03), all on
+Field reports 2026-10-08 (carrier project, the bridge build of 2026-10-07), all on
 `sch_set_components_parameters`: a `;` in an MPN or Description arrived as
 `,`; key `Description` created a new VISIBLE parameter called Description
 instead of setting the component's description; and every parameter the tool
@@ -2408,17 +2408,16 @@ reply for the `value_encoding` echo too (`stamp_reply_problem`), and a policy
 refusal is no longer reported as a stale script. Empty values are reported in
 `skipped_empty`; control characters other than tab/CR/LF are refused.
 
-**Not run live.** The script version was NOT bumped in this branch (the lead
-bumps it in the deploy commit). It MUST be bumped there: the Pascal changed,
-and with the old number `app_ping` reports `version_match` true against a
-stale deploy. Independent of that, the reply echoes `value_encoding: "pct1"`
+**Not run live.** SCRIPT_VERSION is bumped to `2026.10.08.01` for this
+change: the Pascal changed, and with the old number `app_ping` would report
+`version_match` true against a stale deploy. Independent of that, the reply echoes `value_encoding: "pct1"`
 only from the new handler, and every sender reports its absence (the tool as
 a `warning`, the plan paths as a note), so step 2 below detects a stale
 script by itself.
 
-1. **Version.** `app_ping`: `altium_script_version` = the number the deploy
-   commit bumped SCRIPT_VERSION to (NOT `2026.10.07.03`, which is the
-   pre-change build), `version_match` true.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.08.01`
+   (bumped for this change; the 2026-10-07 build is the pre-change one),
+   `version_match` true.
 2. **Exact values.** On a scratch sheet with a placed part (say `R1`) that has
    NO parameter called `ZZ Test`, call `sch_set_components_parameters` with
    `stamps=[{"designator": "R1", "ZZ Test": "A;B,C=D|E \"q\" 50% ~x~~y 10µF"}]`.
