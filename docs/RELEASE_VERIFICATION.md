@@ -1,4 +1,4 @@
-# Release verification: 2026.10.08.01
+# Release verification: 2026.10.10.01
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by the linter (and by FPC where a section says so) but **not
@@ -60,8 +60,10 @@ works elsewhere cannot be an undeclared identifier:
 | 36, new parameter hidden | `IsHidden` | yes, `Generic.pas` (on parameters, run live) | low |
 | 36, new parameter on its component | `Location` | yes, `Generic.pas` | low: what is new is reading `Comp.Location` into a parameter before it is added |
 | 36, shown new parameter, value only | `ShowName` | yes, `Lib_SetPinProperties` (on pins only) | medium, first write on a parameter; reached only with `visible=true` |
-| 36, shown new parameter, turned with the part | `Orientation` | yes, `Generic.pas` (net labels, power ports) | medium, first write on a parameter; reached only with `visible=true` |
+| 36, shown new parameter, turned with its Comment label | `Orientation` | yes, `Generic.pas` (net labels, power ports) | medium, first write on a parameter; reached only with `visible=true`; the value now comes from `Comp.Comment.Orientation` (36.7 re-verify) |
 | 36, existing Description parameter kept in step | `Text` | yes, `SetCompParamTextEx` (the same write on the same object) | low |
+| 37, footprint height | `Height` on a footprint | yes, `Lib_UpdateFootprintHeightsFrom3D` | low: the same write, now bracketed with `PCBM_BeginModify`/`PCBM_EndModify` and read back |
+| 37, making the footprint current after the write | `CurrentComponent` | yes, `LibMakeCurrentVerified` | low: the shipped verified switch; what is new is calling it after a height write, which is the measured recipe that kept 55 of 55 heights |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -262,6 +264,8 @@ for mid-session.
 | 6 | a PcbLib, plus a KiCad `.kicad_mod` carrying `B.SilkS` text |
 | 7 | a SchLib for the pins, and a schematic sheet for the power ports |
 | 22 | a COPY of a PcbLib built by the IPC generator, plus a maker STEP for one of its footprints |
+| 36.7 | a scratch sheet with an upright part and a part rotated 90 whose Comment label is horizontal |
+| 37 | a COPY of a PcbLib with three or more footprints, a scratch COPY of a sheet, and a placed part carrying a Description parameter |
 
 Steps 4 and 5 write to the design. Take an `app_checkpoint` first, or
 work on a copy. Everything else either reads or builds new library
@@ -275,7 +279,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.08.01`, `version_match` =
+Expect `altium_script_version` = `2026.10.10.01`, `version_match` =
 `true`, and `mcp_server_version` = `0.6.1`.
 
 Those are two different versions and they fail differently.
@@ -2034,7 +2038,7 @@ sheets, `A`, `B` and `STUBS`, all saved and loaded, plus one open
 library `<lib>` (a scratch copy) that has not been edited. Confirm
 `app_ping` answers after each call.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.08.01`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.10.01`.
 
 2. **The default save-all leaves an unedited library alone.** Note
    `<lib>`'s mtime. `app_save_all` with no arguments. Expect
@@ -2202,7 +2206,7 @@ compile is what is new.
 Work on the live project only if the .PrjPcb is committed (the check is a
 `git diff`), or on a copy. Focus some other sheet `A` first.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.08.01`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.10.01`.
 
 2. **A default add writes the project.** Note the .PrjPcb's mtime and two
    SchDoc mtimes. `proj_add_sheet name=ZZ33`. Expect `success: true,
@@ -2287,7 +2291,7 @@ confirm it) and write the project only for a sheet that is on disk.
 
 Focus some other sheet `A` of the focused project first.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.08.01`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.10.01`.
 
 2. **The add still takes the document save.** `proj_add_sheet name=ZZ35`:
    as step 33's step 2, plus `project_save_route: document_save`.
@@ -2360,7 +2364,7 @@ after `MarkDocDirtyByPath`. They now answer `saved: false` with
 `marked_modified`, `pending_save` and `written_to_disk: false` (the fields
 `lib_delete_footprint` already uses). No Altium call changed; only the reply.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.08.01`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.10.01`.
 2. **The reply is honest.** Focus a sheet, `obj_modify` a net label to its
    own current text. Expect `saved: false, marked_modified: true,
    pending_save: true, written_to_disk: false`, and the sheet's mtime
@@ -2379,7 +2383,7 @@ libraries skipped.
 
 ---
 
-## 36. Parameter stamps arrive exactly, Description is the component's, new parameters hidden (UNVERIFIED-LIVE)
+## 36. Parameter stamps arrive exactly, Description is the component's, new parameters hidden (run live 2026-10-10 on the 2026-10-08 build, results at the end; step 7 FIXED since, re-verify)
 
 Field reports 2026-10-08 (carrier project, the bridge build of 2026-10-07), all on
 `sch_set_components_parameters`: a `;` in an MPN or Description arrived as
@@ -2408,15 +2412,17 @@ reply for the `value_encoding` echo too (`stamp_reply_problem`), and a policy
 refusal is no longer reported as a stale script. Empty values are reported in
 `skipped_empty`; control characters other than tab/CR/LF are refused.
 
-**Not run live.** SCRIPT_VERSION is bumped to `2026.10.08.01` for this
-change: the Pascal changed, and with the old number `app_ping` would report
-`version_match` true against a stale deploy. Independent of that, the reply echoes `value_encoding: "pct1"`
+**Run live 2026-10-10 on the 2026-10-08 build: every step passed except 7**
+(results at the end of this section). Step 7's two defects are fixed in this
+build (`SetCompParamTextEx`, see "Fixed after the live run" below), so step 7
+must be re-run after the deploy; the other steps need not be. Independent of
+the version check, the reply echoes `value_encoding: "pct1"`
 only from the new handler, and every sender reports its absence (the tool as
 a `warning`, the plan paths as a note), so step 2 below detects a stale
 script by itself.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.08.01`
-   (bumped for this change; the 2026-10-07 build is the pre-change one),
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.10.01`
+   (the 2026-10-08 build is the one the results below were measured on),
    `version_match` true.
 2. **Exact values.** On a scratch sheet with a placed part (say `R1`) that has
    NO parameter called `ZZ Test`, call `sch_set_components_parameters` with
@@ -2452,12 +2458,17 @@ script by itself.
    `{"designator": "R1", "ZZ Shown": "x", "ZZ Shown2": "y"}` with
    `visible=true`: both are visible, value only (no `ZZ Shown =` prefix),
    NOT on the symbol origin and NOT on each other: on an upright R1 the first
-   sits 100 mil below R1's Comment label (plus 100 mil per parameter that was
-   already shown), the second 100 mil below that. Repeat on a part rotated 90
-   (`R3`): the two read `Orientation` 1 like the part and step along X from
-   the Comment instead. The bridge answers `app_ping` afterwards. If the loop
-   stops here, `ShowName` or `Orientation` is not a parameter member on this
-   Altium: drop that line from `SetCompParamTextEx` rather than retrying.
+   sits EXACTLY 100 mil below R1's Comment label (plus 100 mil per OTHER
+   parameter already shown; the Comment and Designator do not count), the
+   second 100 mil below that. Repeat on a part rotated 90 (`R3`) whose
+   Comment label is horizontal (Comment `Orientation` 0, the usual case): the
+   two read `Orientation` 0 like the COMMENT, not 1 like the part, and sit
+   100 and 200 mil BELOW the Comment (step -Y), clear of its text. If R3's
+   Comment is itself vertical (Comment `Orientation` 1 or 3), they read that
+   orientation and step +X beside it instead. The bridge answers `app_ping`
+   afterwards. If the loop stops here, `ShowName` or `Orientation` is not a
+   parameter member on this Altium: drop that line from `SetCompParamTextEx`
+   rather than retrying.
 8. **Nothing written says so.** Stamp `{"designator": "R1", "ZZ Test": ""}`:
    the reply is `ok: false` with `skipped_empty: [{designator: "R1", key:
    "ZZ Test"}]` and `ZZ Test` keeps its text (the tool cannot clear a
@@ -2474,6 +2485,127 @@ script by itself.
     branch reader against a copy of the library: exactly that. Needs no
     Altium; repeat after deploy only to confirm the installed package is
     this tree.
+
+### Results 2026-10-10
+
+Run on Altium 26.10.1.5, the 2026-10-08 build, a scratch sheet. Steps 1-6
+and 8-10 PASS. **Step 7 FAIL**, two defects, both in the `visible=true`
+placement only (hidden creation, the default, was correct):
+
+* **(a) One row too far.** Every shown created parameter landed one 100 mil
+  row further from the Comment than specified. `SetCompParamTextEx` counted
+  the visible parameters its eParameter iterator returns, and that iterator
+  ALSO returns the component's visible Comment parameter (`obj_query` lists
+  `Name=Comment` as an eParameter on every part), so the label the rows are
+  measured from was counted as a row.
+* **(b) Across the Comment on a turned part.** On a part at `Orientation` 1
+  whose Comment label is horizontal (`Orientation` 0), the new parameters took
+  the part's orientation (vertical text) and stepped along X, so they ran over
+  the Comment text.
+
+### Fixed after the live run (this build; re-verify step 7)
+
+`SetCompParamTextEx` skips parameters named Comment and Designator (any case)
+when counting shown rows, and a shown created parameter takes the COMMENT
+label's orientation (the part's only when the Comment cannot be read) and
+steps perpendicular to the Comment's text: Comment 0/2 -> -Y, 1/3 -> +X.
+Hidden creation is unchanged. Offline proof:
+`tests/test_shown_param_rows_follow_the_comment.py` evaluates the counting
+guard from the source on the live iterator contents and reproduces the
+2026-10-08 build's misplacement exactly ((1200, 2000) vertical where
+(1000, 1900) horizontal was wanted); it fails on that build and passes on
+this one. **Re-run step 7 after the deploy.**
+
+---
+
+## 37. Heights that reach the save, a discard that does not deny itself, the component description under its own key (UNVERIFIED-LIVE)
+
+Three more gaps found on 2026-10-10 with the 2026-10-08 build, by the 3D-link
+agent and the live checker on the multiviewer carrier:
+
+* **`lib_set_footprint_height` lost its writes on save.** 55 heights set,
+  every reply `changed: true`; after `lib_save_library` 51 of the 55 were not
+  in the file. The survivors had been the CURRENT footprint, and making each
+  footprint current again before the save kept all 55. The handler wrote
+  `Target.Height` on whatever the walk found, restored the previous current
+  footprint, and never marked the library modified. Now the write is
+  bracketed `PCBM_BeginModify`/`PCBM_EndModify` and read back, the footprint
+  is made current AFTER the write (verified; the measured recipe), the
+  caller's current footprint is restored, and the library document is marked
+  modified. The reply adds `read_back_height_mm`, `made_current_after_write`,
+  `current_restored`, `marked_modified`, `pending_save` and
+  `written_to_disk: false`; `changed` is now read back.
+* **`app_close_document(discard_changes=true)` replied `discarded: false`**
+  for a sheet whose title bar showed it modified, while the file on disk was
+  untouched (the edits WERE thrown away). `discarded` was `Discard And
+  WasModified`, and `WasModified` is `IServerDocument.Modified`, a floor that
+  missed the editor's edits. Now three-valued: `true` (read modified, thrown
+  away), `null` (discard asked, the read said clean: unknown), `false` (not
+  asked); plus `discard_requested`, `modified_read` and
+  `file_unchanged_on_disk` (FileAge before and after the close).
+* **`proj_get_component_info` `parameters['Description']` had two
+  meanings**: the component's description when the part had no Description
+  parameter, the parameter's value when it had one (the compiled DM list
+  synthesises the entry). Both the single and the batch handler now report
+  `component_description` (`DM_Description`) and drop the ONE `Description`
+  entry whose value equals it from `parameters`. No caller in `src/` read the
+  old key.
+
+**Not run live.** SCRIPT_VERSION is `2026.10.10.01` for these and for the
+step 36.7 fix.
+
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.10.01`,
+   `version_match` true.
+2. **Heights survive the save.** On a COPY of a .PcbLib with at least three
+   footprints, focus footprint A, then `lib_set_footprint_height` on B and C
+   (NOT current) with distinctive values (say 7.11 and 7.22 mm). Each reply:
+   `changed: true`, `read_back_height_mm` = the value,
+   `made_current_after_write: true`, `current_restored: true`,
+   `marked_modified: true`, `pending_save: true`, `written_to_disk: false`,
+   and the current footprint is still A. `lib_save_library` on that path:
+   `written_to_disk: true`. Then `lib_read_pcblib_file` (or close and reopen
+   the library and `lib_get_footprints`): B and C carry 7.11 and 7.22 mm.
+   This is the field case; on the 2026-10-08 build B and C came back with
+   their old heights. If the loop stops on the first call, `PCBM_BeginModify`
+   on a library footprint is the suspect (it is shipped in
+   `Lib_SetFootprintDescription`, so this is unlikely).
+   NOT CHANGED: the sweep `lib_update_footprint_heights_from_3d` writes the
+   same property on every footprint it walks without this recipe, so it very
+   likely loses its non-current writes the same way. While here, run it on
+   the copy (mode `match`), save, and read back two footprints it reported
+   in `items[]`: if their heights did not reach the file, the sweep needs
+   the same fix (record it; do not rely on the sweep until then).
+3. **A same-value write is not a change.** Repeat B at 7.11: `changed:
+   false`, `pending_save: false`, and `save_note` says there is nothing to
+   save.
+4. **The discard reply.** On a scratch COPY of a sheet, move one object (the
+   title bar shows the sheet modified), then `app_close_document(file_path,
+   discard_changes=true)`. Expect `closed: true`, `discard_requested: true`,
+   `file_unchanged_on_disk: true`, and `discarded` = `true` if `modified_read`
+   is true, `null` if it is false; NEVER `false`. Record which: a `null` with
+   the title bar showing modified confirms the floor read (the old reply would
+   have said `false`). The file's mtime is unchanged. Reopen it: the move is
+   gone.
+5. **A close without discard.** Close an unmodified copy with
+   `discard_changes=false`: `discarded: false`, `discard_requested: false`,
+   `file_unchanged_on_disk: true`.
+6. **The description key.** `proj_get_component_info` on a part with a
+   component description and NO Description parameter: `component_description`
+   is that text and `parameters` has no `Description` key. On a part that
+   carries a Description PARAMETER whose text differs from its component
+   description (36.4's R2 after editing one of the two by hand):
+   `parameters['Description']` = the parameter's text and
+   `component_description` = the component's. The same through
+   `proj_get_component_info_many`. If `component_description` comes back as
+   the PARAMETER's text instead, `DM_Description` reads the parameter on this
+   Altium: record it, because the skip rule would then drop the real
+   parameter.
+   RISK: `DM_Description` is read on a compiled `IComponent` for the first
+   time here (shipped code reads it only on project variants). A read
+   cannot write a wrong value, but an undeclared identifier faults where
+   `Try/Except` cannot catch it: if the bridge stops answering on the
+   first `proj_get_component_info`, that read is the cause. Run this step
+   before anything else that needs component info.
 
 ---
 
