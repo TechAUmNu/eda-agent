@@ -540,9 +540,23 @@ def register_application_tools(mcp):
                 Altium changed by merely opening them, never for work.
 
         Returns:
-            ``{"closed": bool, "discarded": bool, "file_path": ...}``; an
-            error when the path is not open, or when the document reads
-            modified and ``discard_changes`` is not set.
+            ``{"closed", "discarded", "discard_requested", "modified_read",
+            "file_unchanged_on_disk", "file_path"}``; an error when the
+            path is not open, or when the document reads modified and
+            ``discard_changes`` is not set.
+
+            ``discarded`` is three-valued because the modified read is a
+            floor. ``true``: discard was asked and the document read
+            modified, so unsaved edits were thrown away. ``null``:
+            discard was asked but the read said clean, and edits held in
+            the editor that the read cannot see MAY have been thrown away
+            (measured 2026-10-10: a sheet whose title bar showed it
+            modified read clean here and the old reply said ``false``).
+            ``false``: discard was not asked. ``modified_read`` is that
+            raw reading. ``file_unchanged_on_disk`` (``null`` when the
+            file cannot be aged) says whether the close wrote the file;
+            ``true`` with ``discard_changes`` is the proof the edits did
+            not slip through as a save.
         """
         params = {"file_path": file_path}
         if discard_changes:

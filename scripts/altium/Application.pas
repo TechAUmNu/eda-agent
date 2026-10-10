@@ -262,11 +262,28 @@ End;
 { and looks it up again afterwards to say whether it is really gone.        }
 { With discard, the modified flag is cleared first, unread, which is what   }
 { keeps the save prompt away; the edits are lost.                           }
+{                                                                            }
+{ WHAT "discarded" MAY CLAIM (live, 2026-10-10, bridge 2026.10.08.01): a     }
+{ close with discard_changes=true of a sheet whose title bar showed it      }
+{ modified replied discarded:false, and the file on disk was untouched: the }
+{ edits WERE thrown away. The reply was Discard And WasModified, and        }
+{ WasModified is ServerDoc.Modified, the read this header already calls a   }
+{ floor - it missed the editor's edits. A false built from a floor is a     }
+{ claim the handler cannot support. So:                                      }
+{   discarded true   discard asked and the document read modified          }
+{   discarded null   discard asked, the read said clean - edits the read    }
+{                    cannot see may have been thrown away; unknown         }
+{   discarded false  discard not asked (a modified read refuses the close)  }
+{ modified_read is the raw floor reading, discard_requested echoes the      }
+{ request, and file_unchanged_on_disk (FileAge before and after, null when  }
+{ the file cannot be aged) says whether the close wrote anything: true is   }
+{ the proof a discard did not slip through as a save.                       }
 Function App_CloseDocument(Params : String; RequestId : String) : String;
 Var
-    FilePath : String;
+    FilePath, DiscardedJson, UnchangedJson, DiskPath : String;
     ServerDoc, Again : IServerDocument;
     WasModified, Discard : Boolean;
+    AgeBefore, AgeAfter : Integer;
 Begin
     FilePath := ExtractJsonValue(Params, 'file_path');
     Discard := LowerCase(ExtractJsonValue(Params, 'discard')) = 'true';
@@ -289,6 +306,12 @@ Begin
             'The document has unsaved changes, so it was not closed: ' + FilePath);
         Exit;
     End;
+    DiskPath := FilePath;
+    Try
+        If ServerDoc.FileName <> '' Then DiskPath := ServerDoc.FileName;
+    Except End;
+    AgeBefore := -1;
+    Try AgeBefore := FileAge(DiskPath); Except AgeBefore := -1; End;
     If Discard Then
     Begin
         Try ServerDoc.SetModified(False); Except End;
@@ -296,8 +319,20 @@ Begin
     Client.CloseDocument(ServerDoc);
     Again := Nil;
     Try Again := Client.GetDocumentByPath(FilePath); Except Again := Nil; End;
+    AgeAfter := -1;
+    Try AgeAfter := FileAge(DiskPath); Except AgeAfter := -1; End;
+
+    If Not Discard Then DiscardedJson := 'false'
+    Else If WasModified Then DiscardedJson := 'true'
+    Else DiscardedJson := 'null';
+    If (AgeBefore = -1) Or (AgeAfter = -1) Then UnchangedJson := 'null'
+    Else UnchangedJson := BoolToJsonStr(AgeBefore = AgeAfter);
+
     Result := BuildSuccessResponse(RequestId, '{"closed":' + BoolToJsonStr(Again = Nil)
-        + ',"discarded":' + BoolToJsonStr(Discard And WasModified)
+        + ',"discarded":' + DiscardedJson
+        + ',"discard_requested":' + BoolToJsonStr(Discard)
+        + ',"modified_read":' + BoolToJsonStr(WasModified)
+        + ',"file_unchanged_on_disk":' + UnchangedJson
         + ',"file_path":"' + EscapeJsonString(FilePath) + '"}');
 End;
 
