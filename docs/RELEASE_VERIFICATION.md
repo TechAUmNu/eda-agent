@@ -61,9 +61,13 @@ works elsewhere cannot be an undeclared identifier:
 | 36, new parameter on its component | `Location` | yes, `Generic.pas` | low: what is new is reading `Comp.Location` into a parameter before it is added |
 | 36, shown new parameter, value only | `ShowName` | yes, `Lib_SetPinProperties` (on pins only) | medium, first write on a parameter; reached only with `visible=true` |
 | 36, shown new parameter, turned with its Comment label | `Orientation` | yes, `Generic.pas` (net labels, power ports) | medium, first write on a parameter; reached only with `visible=true`; the value now comes from `Comp.Comment.Orientation` (36.7 re-verify) |
+| 36, shown new parameter, justified like its Comment label | `Justification` on a parameter (read from `Comp.Comment`, written on the new one) | yes, `Generic.pas` (net labels, the generic property writer) | medium, first write on a parameter; reached only with `visible=true` (36.7 re-verify) |
 | 36, existing Description parameter kept in step | `Text` | yes, `SetCompParamTextEx` (the same write on the same object) | low |
-| 37, footprint height | `Height` on a footprint | yes, `Lib_UpdateFootprintHeightsFrom3D` | low: the same write, now bracketed with `PCBM_BeginModify`/`PCBM_EndModify` and read back |
+| 37, footprint height | `Height` on a footprint | yes, `Lib_UpdateFootprintHeightsFrom3D` | low: the same write, now bracketed with `PCBM_BeginModify`/`PCBM_EndModify` and read back after the footprint switches |
 | 37, making the footprint current after the write | `CurrentComponent` | yes, `LibMakeCurrentVerified` | low: the shipped verified switch; what is new is calling it after a height write, which is the measured recipe that kept 55 of 55 heights |
+| 37, an already-current footprint switched away and back | `LibParkCurrentElsewhere` (LibraryIterator walk + `CurrentComponent`) | yes, `Lib_DeleteFootprintPrimitives` and `Lib_DeleteFootprintPads` (their park-current option) | low: shipped members; new is running it on the DEFAULT path (`footprint_name` empty) of a height write (37.2b) |
+| 37, component_description | `ComponentParamFieldsJson`, which READS DM_Description on IComponent (a read, so the property column names the new routine that makes it) | no, nowhere: shipped code reads DM_Description only on IProjectVariant | HIGH: an unknown member stops the bridge loop on the first component-info call. Read only with with_parameters (the default, so the orchestrator's and the dashboard's calls reach it); run 37.6 FIRST |
+| 37, does the part carry a Description parameter | `SchDescriptionParamState`, which reads DM_LogicalDesignator, then GetSchDocumentByPath and the eParameter walk | no, nowhere as a routine; every member it reads is shipped (DM_LogicalDesignator in the Generic.pas sheet snapshot, the walk and name test in ModifyCompParamIfPresent) | low; reached only when the part has exactly one Description entry equal to its component description |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -102,7 +106,7 @@ default:
 | `remove_from_board=true` on `lib_delete_footprint_primitives`, `lib_delete_footprint_pads`, `lib_add_footprint_text`, `lib_link_3d_model` with `replace`, `lib_auto_link_3d_models` with `replace` | `RemovePCBObject` on the library board, and making the footprint current first | 24 |
 | `keepout=true` on a fill, or `kind=keepout` on a region, NOT on KeepOutLayer | the `IsKeepout` write | 24 |
 | `kind=cutout` on a footprint region | the `Kind := eRegionKind_Cutout` write | 16, 24 |
-| `visible=true` on `sch_set_components_parameters` | `ShowName := False`, `Orientation := Comp.Orientation` and a `Location` offset from `Comp.Comment.Location` on a parameter it creates | 36 |
+| `visible=true` on `sch_set_components_parameters` | `ShowName := False`, `Orientation := Comp.Comment.Orientation` (the part's only as a fallback), `Justification := Comp.Comment.Justification` and a `Location` offset from `Comp.Comment.Location` on a parameter it creates | 36 |
 
 Both writes in the last two rows are read back (`keepout_applied`,
 `kind_applied`), so the first live call that reaches them says whether
@@ -265,7 +269,7 @@ for mid-session.
 | 7 | a SchLib for the pins, and a schematic sheet for the power ports |
 | 22 | a COPY of a PcbLib built by the IPC generator, plus a maker STEP for one of its footprints |
 | 36.7 | a scratch sheet with an upright part and a part rotated 90 whose Comment label is horizontal |
-| 37 | a COPY of a PcbLib with three or more footprints, a scratch COPY of a sheet, and a placed part carrying a Description parameter |
+| 37 | a COPY of a PcbLib with three or more footprints, a scratch COPY of a sheet (and of a project holding a disposable sheet, for 37.4b), and a placed part carrying a Description parameter |
 
 Steps 4 and 5 write to the design. Take an `app_checkpoint` first, or
 work on a copy. Everything else either reads or builds new library
@@ -2465,10 +2469,12 @@ script by itself.
    two read `Orientation` 0 like the COMMENT, not 1 like the part, and sit
    100 and 200 mil BELOW the Comment (step -Y), clear of its text. If R3's
    Comment is itself vertical (Comment `Orientation` 1 or 3), they read that
-   orientation and step +X beside it instead. The bridge answers `app_ping`
-   afterwards. If the loop stops here, `ShowName` or `Orientation` is not a
-   parameter member on this Altium: drop that line from `SetCompParamTextEx`
-   rather than retrying.
+   orientation and step +X beside it instead. Every new row reads the same
+   `Justification` as its part's Comment (`obj_query` both); set one
+   Comment to Center by hand first and confirm its rows follow it. The bridge answers `app_ping`
+   afterwards. If the loop stops here, `ShowName`, `Orientation` or
+   `Justification` is not a parameter member on this Altium: drop that line
+   from `SetCompParamTextEx` rather than retrying.
 8. **Nothing written says so.** Stamp `{"designator": "R1", "ZZ Test": ""}`:
    the reply is `ok: false` with `skipped_empty: [{designator: "R1", key:
    "ZZ Test"}]` and `ZZ Test` keeps its text (the tool cannot clear a
@@ -2509,7 +2515,10 @@ placement only (hidden creation, the default, was correct):
 when counting shown rows, and a shown created parameter takes the COMMENT
 label's orientation (the part's only when the Comment cannot be read) and
 steps perpendicular to the Comment's text: Comment 0/2 -> -Y, 1/3 -> +X.
-Hidden creation is unchanged. Offline proof:
+Review addition: it also copies the Comment's `Justification`, because the
+100 mil step clears the Comment only when both labels share orientation AND
+justification (a TopLeft or Center Comment would still overlap a
+factory-justified row). Hidden creation is unchanged. Offline proof:
 `tests/test_shown_param_rows_follow_the_comment.py` evaluates the counting
 guard from the source on the live iterator contents and reproduces the
 2026-10-08 build's misplacement exactly ((1200, 2000) vertical where
@@ -2525,16 +2534,27 @@ agent and the live checker on the multiviewer carrier:
 
 * **`lib_set_footprint_height` lost its writes on save.** 55 heights set,
   every reply `changed: true`; after `lib_save_library` 51 of the 55 were not
-  in the file. The survivors had been the CURRENT footprint, and making each
-  footprint current again before the save kept all 55. The handler wrote
-  `Target.Height` on whatever the walk found, restored the previous current
-  footprint, and never marked the library modified. Now the write is
-  bracketed `PCBM_BeginModify`/`PCBM_EndModify` and read back, the footprint
-  is made current AFTER the write (verified; the measured recipe), the
-  caller's current footprint is restored, and the library document is marked
-  modified. The reply adds `read_back_height_mm`, `made_current_after_write`,
-  `current_restored`, `marked_modified`, `pending_save` and
-  `written_to_disk: false`; `changed` is now read back.
+  in the file, and making each footprint current again before the save kept
+  all 55. That is the measurement. Which four survived was not recorded:
+  probably the footprints that were current at some point after their write
+  (a hypothesis, not a reading). The handler wrote `Target.Height` on
+  whatever the walk found, restored the previous current footprint, never
+  switched to the edited one, and never marked the library modified. Now the
+  write is bracketed `PCBM_BeginModify`/`PCBM_EndModify`, then the library
+  SWITCHES TO the footprint on every path (the measured recipe): a footprint
+  that was not current is made current and the caller's current one
+  restored; one that was ALREADY current (`footprint_name` empty, the
+  default, or naming it) is parked on another footprint
+  (`LibParkCurrentElsewhere`) and switched back, since making the current
+  footprint current is a no-op. The height is read back AFTER the switches
+  (a switch that reloaded the stored copy cannot hide behind an earlier
+  read; the pre-switch read is reported as `read_back_before_switch_mm`),
+  and the library document is marked modified. The reply adds
+  `read_back_height_mm`, `read_back_before_switch_mm`, `was_current`,
+  `parked_elsewhere_first`, `made_current_after_write`, `current_restored`,
+  `marked_modified`, `pending_save` (true only when the height changed AND
+  the switch happened) and `written_to_disk: false`; `changed` comes from the
+  final read.
 * **`app_close_document(discard_changes=true)` replied `discarded: false`**
   for a sheet whose title bar showed it modified, while the file on disk was
   untouched (the edits WERE thrown away). `discarded` was `Discard And
@@ -2542,39 +2562,65 @@ agent and the live checker on the multiviewer carrier:
   missed the editor's edits. Now three-valued: `true` (read modified, thrown
   away), `null` (discard asked, the read said clean: unknown), `false` (not
   asked); plus `discard_requested`, `modified_read` and
-  `file_unchanged_on_disk` (FileAge before and after the close).
+  `file_unchanged_on_disk` (FileAge before and after the close). Review
+  follow-up: `proj_delete_sheet` (`Gen_DeleteSheet`) built the same field the
+  same way; it now uses the same three values (`false` also when the sheet
+  was not loaded or the named document was not the one closed) and carries
+  `discard_requested` and `modified_read`.
 * **`proj_get_component_info` `parameters['Description']` had two
   meanings**: the component's description when the part had no Description
   parameter, the parameter's value when it had one (the compiled DM list
   synthesises the entry). Both the single and the batch handler now report
-  `component_description` (`DM_Description`) and drop the ONE `Description`
-  entry whose value equals it from `parameters`. No caller in `src/` read the
-  old key.
+  `component_description` (`DM_Description`) and keep `parameters` to real
+  parameters. Review follow-up, before any live run: the first version
+  dropped the Description entry whose VALUE equalled the description, which
+  drops a REAL parameter in the bridge's own normal state (the Description
+  stamp writes both, equal on purpose). The copy is now chosen by structure:
+  two or more Description entries, drop one equal to the description; one
+  entry with different text, keep it; one entry with the same text, the
+  placed part on its sheet decides (the walk `ModifyCompParamIfPresent`
+  makes), and with the sheet not open the entry is KEPT and
+  `description_parameter_present` is `null`. The fields are built only with
+  `with_parameters` (the default), so a `with_parameters=false` call never
+  reaches `DM_Description`. The dashboard's component drawer, which reads
+  `description`, now takes `component_description`.
 
 **Not run live.** SCRIPT_VERSION is `2026.10.10.01` for these and for the
-step 36.7 fix.
+step 36.7 fix. Run 37.6 FIRST: it is the step that can stop the loop.
 
 1. **Version.** `app_ping`: `altium_script_version` = `2026.10.10.01`,
    `version_match` true.
 2. **Heights survive the save.** On a COPY of a .PcbLib with at least three
    footprints, focus footprint A, then `lib_set_footprint_height` on B and C
    (NOT current) with distinctive values (say 7.11 and 7.22 mm). Each reply:
-   `changed: true`, `read_back_height_mm` = the value,
-   `made_current_after_write: true`, `current_restored: true`,
-   `marked_modified: true`, `pending_save: true`, `written_to_disk: false`,
-   and the current footprint is still A. `lib_save_library` on that path:
-   `written_to_disk: true`. Then `lib_read_pcblib_file` (or close and reopen
-   the library and `lib_get_footprints`): B and C carry 7.11 and 7.22 mm.
-   This is the field case; on the 2026-10-08 build B and C came back with
-   their old heights. If the loop stops on the first call, `PCBM_BeginModify`
-   on a library footprint is the suspect (it is shipped in
-   `Lib_SetFootprintDescription`, so this is unlikely).
+   `changed: true`, `read_back_height_mm` = the value (and
+   `read_back_before_switch_mm` the same), `was_current: false`,
+   `parked_elsewhere_first: false`, `made_current_after_write: true`,
+   `current_restored: true`, `marked_modified: true`, `pending_save: true`,
+   `written_to_disk: false`, and the current footprint is still A.
+   `lib_save_library` on that path: `written_to_disk: true`. Then
+   `lib_read_pcblib_file` (or close and reopen the library and
+   `lib_get_footprints`): B and C carry 7.11 and 7.22 mm. This is the field
+   case; on the 2026-10-08 build B and C came back with their old heights.
+   If the loop stops on the first call, `PCBM_BeginModify` on a library
+   footprint is the suspect (it is shipped in `Lib_SetFootprintDescription`,
+   so this is unlikely). If a reply has `changed: false` with
+   `read_back_before_switch_mm` = the new value, the switch itself discarded
+   the write: record it, the recipe does not hold.
+   2b. **The default path.** With A current, `lib_set_footprint_height` with
+   `footprint_name` EMPTY and 7.33 mm. Expect `was_current: true`,
+   `parked_elsewhere_first: true`, `made_current_after_write: true`,
+   `current_restored: true` (A is current again), `pending_save: true`.
+   Save, then read A's height back from the FILE: 7.33 mm. (The first
+   version of this fix never switched on this path; whether a write to the
+   already-current footprint survived was an inference.)
    NOT CHANGED: the sweep `lib_update_footprint_heights_from_3d` writes the
    same property on every footprint it walks without this recipe, so it very
-   likely loses its non-current writes the same way. While here, run it on
-   the copy (mode `match`), save, and read back two footprints it reported
-   in `items[]`: if their heights did not reach the file, the sweep needs
-   the same fix (record it; do not rely on the sweep until then).
+   likely loses its non-current writes the same way. Its reply now says so
+   (`heights_confirmed_on_save: false` and a `save_note`). While here, run it
+   on the copy (mode `match`), save, and read back two footprints it reported
+   in `items[]`: if their heights did not reach the file, the sweep needs the
+   same fix (record it; do not rely on the sweep until then).
 3. **A same-value write is not a change.** Repeat B at 7.11: `changed:
    false`, `pending_save: false`, and `save_note` says there is nothing to
    save.
@@ -2586,26 +2632,45 @@ step 36.7 fix.
    the title bar showing modified confirms the floor read (the old reply would
    have said `false`). The file's mtime is unchanged. Reopen it: the move is
    gone.
+   4b. **The same field on a sheet delete.** In a scratch COPY of a project,
+   edit a disposable sheet without saving, then `proj_delete_sheet(file_path,
+   discard=true)`: `discard_requested: true`, `discarded` `true` or `null`
+   by `modified_read`, never `false` while `closed` is true.
 5. **A close without discard.** Close an unmodified copy with
    `discard_changes=false`: `discarded: false`, `discard_requested: false`,
    `file_unchanged_on_disk: true`.
-6. **The description key.** `proj_get_component_info` on a part with a
-   component description and NO Description parameter: `component_description`
-   is that text and `parameters` has no `Description` key. On a part that
+6. **The description key. RUN THIS FIRST.** `proj_get_component_info` on a
+   part with a component description and NO Description parameter, its sheet
+   OPEN: `component_description` is that text, `parameters` has no
+   `Description` key, `description_parameter_present: false`. On a part that
    carries a Description PARAMETER whose text differs from its component
    description (36.4's R2 after editing one of the two by hand):
-   `parameters['Description']` = the parameter's text and
-   `component_description` = the component's. The same through
+   `parameters['Description']` = the parameter's text,
+   `component_description` = the component's,
+   `description_parameter_present: true`. The same through
    `proj_get_component_info_many`. If `component_description` comes back as
    the PARAMETER's text instead, `DM_Description` reads the parameter on this
-   Altium: record it, because the skip rule would then drop the real
-   parameter.
+   Altium: record it, because the two-entry rule would then drop the real
+   parameter and keep the copy.
+   6b. **After a stamp.** `sch_set_components_parameters` with
+   `{"designator": "R2", "Description": "Res; same"}` (R2 carries a real
+   Description parameter), then `proj_get_component_info` on R2:
+   `parameters['Description']` = `Res; same` is STILL present,
+   `component_description` = `Res; same`, `description_parameter_present:
+   true`. The first version of this fix dropped it here. Repeat with R2's
+   sheet CLOSED (project still open): the entry is kept and
+   `description_parameter_present` is `true` (two DM entries) or `null`
+   (one); record which, it says how the DM list carries a real parameter.
+   6c. `with_parameters=false` on the same part: no `component_description`,
+   no `parameters` (the `DM_Description` read is not reached).
    RISK: `DM_Description` is read on a compiled `IComponent` for the first
    time here (shipped code reads it only on project variants). A read
    cannot write a wrong value, but an undeclared identifier faults where
    `Try/Except` cannot catch it: if the bridge stops answering on the
-   first `proj_get_component_info`, that read is the cause. Run this step
-   before anything else that needs component info.
+   first `proj_get_component_info`, that read is the cause, and every
+   default component-info call (the orchestrator's, the dashboard drawer's)
+   would hit it. Run this step before anything else that needs component
+   info.
 
 ---
 
