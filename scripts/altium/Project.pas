@@ -1132,51 +1132,175 @@ End;
 { Get full info for a single component (params + nets in one call)           }
 {..............................................................................}
 
-{ ComponentParamsJson - a compiled component's REAL parameters, as the body  }
-{ of a JSON object, and nothing else.                                         }
+{ SchDescriptionParamState - does the PLACED part carry a real parameter     }
+{ named Description? 1 = yes, 0 = the part was found on its sheet and it     }
+{ carries none, -1 = cannot tell (the sheet is not open in the editor, no    }
+{ part on it has that designator, or a read failed).                         }
+{                                                                              }
+{ Same walk and the same name test as Generic.pas ModifyCompParamIfPresent    }
+{ (the eParameter children of the ISch_Component, UpperCase(Name)), which is  }
+{ the decision the stamp tool makes; RELEASE_VERIFICATION 36.4 ran that walk  }
+{ live and it found no Description child on a part without one. Every part   }
+{ of a multi-part component is checked: any one carrying it answers 1.       }
+{ GetSchDocumentByPath answers only for a sheet loaded in the editor, so an  }
+{ unopened sheet is -1, never 0. Reads only its arguments.                   }
+Function SchDescriptionParamState(SheetPath, LogicalDesig : String) : Integer;
+Var
+    SchDoc : ISch_Document;
+    SchIter, PIter : ISch_Iterator;
+    SchComp : ISch_Component;
+    Param : ISch_Parameter;
+    Desig : String;
+    FoundPart, HasReal, Failed : Boolean;
+Begin
+    Result := -1;
+    If (SheetPath = '') Or (LogicalDesig = '') Then Exit;
+    SchDoc := Nil;
+    Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except SchDoc := Nil; End;
+    If SchDoc = Nil Then Exit;
+    FoundPart := False;
+    HasReal := False;
+    Failed := False;
+    Try
+        SchIter := SchDoc.SchIterator_Create;
+        Try
+            SchIter.AddFilter_ObjectSet(MkSet(eSchComponent));
+            SchComp := SchIter.FirstSchObject;
+            While SchComp <> Nil Do
+            Begin
+                Desig := '';
+                Try Desig := SchComp.Designator.Text; Except Desig := ''; End;
+                If UpperCase(Desig) = UpperCase(LogicalDesig) Then
+                Begin
+                    FoundPart := True;
+                    PIter := SchComp.SchIterator_Create;
+                    Try
+                        PIter.AddFilter_ObjectSet(MkSet(eParameter));
+                        Param := PIter.FirstSchObject;
+                        While Param <> Nil Do
+                        Begin
+                            If UpperCase(Param.Name) = 'DESCRIPTION' Then HasReal := True;
+                            Param := PIter.NextSchObject;
+                        End;
+                    Finally
+                        SchComp.SchIterator_Destroy(PIter);
+                    End;
+                End;
+                If HasReal Then Break;
+                SchComp := SchIter.NextSchObject;
+            End;
+        Finally
+            SchDoc.SchIterator_Destroy(SchIter);
+        End;
+    Except
+        Failed := True;
+    End;
+    If HasReal Then Result := 1
+    Else If Failed Or (Not FoundPart) Then Result := -1
+    Else Result := 0;
+End;
+
+{ ComponentParamFieldsJson - the description and parameter fields of a       }
+{ compiled component, as JSON members with a leading comma:                  }
+{ component_description (a string), description_parameter_present (true,    }
+{ false or null) and parameters (an object of name/value strings).          }
 {                                                                              }
 { ONE KEY, TWO MEANINGS (live, 2026-10-10, bridge 2026.10.08.01): the DM      }
 { parameter list carries a "Description" entry holding the COMPONENT's own    }
 { description when the part has no Description parameter, and the            }
 { parameter's value when it has one. parameters['Description'] therefore     }
-{ meant two different things, and a caller checking whether a part carries   }
-{ a Description parameter (the stamp tool's ModifyCompParamIfPresent case)   }
-{ could not tell. The component description now has its own key,            }
-{ component_description, from DM_Description, and parameters[] drops the ONE }
-{ entry named Description (any case) whose value equals it - the synthesised }
-{ copy. A real Description parameter with a different value stays. When the  }
-{ list holds two Description entries (the copy and a real one) the first     }
-{ equal one goes and the other stays. A real parameter whose value is        }
-{ identical to the component description is indistinguishable from the copy }
-{ here and is dropped; its text is still in component_description.           }
-{ Reads only its arguments (CompDesc is read by the caller).                  }
-Function ComponentParamsJson(Comp : IComponent; CompDesc : String) : String;
+{ meant two different things. The component description now has its own     }
+{ key, component_description (DM_Description), and parameters[] holds real   }
+{ parameters only.                                                            }
+{                                                                              }
+{ WHICH ENTRY IS THE COPY IS DECIDED BY STRUCTURE, NOT BY VALUE (review of    }
+{ the first version). sch_set_components_parameters' Description key writes   }
+{ the component description AND any Description parameter the part already  }
+{ carries (ModifyCompParamIfPresent), so after a stamp the two are EQUAL on  }
+{ purpose - the bridge's own normal state. Dropping "the entry equal to the  }
+{ description" would then drop a REAL parameter and say the part has none.   }
+{ So, counting the entries named Description (any case):                     }
+{   0      nothing to drop; present false                                    }
+{   2+     one is the synthesised copy: drop ONE whose value equals the      }
+{          description (none if none does); present true                     }
+{   1, value differs from the description: it is the real parameter, keep;   }
+{          present true                                                      }
+{   1, value equals the description: a copy OR a real parameter with the     }
+{          same text. The placed part on its sheet decides                   }
+{          (SchDescriptionParamState): carries one -> keep, present true;    }
+{          carries none -> drop, present false; cannot tell (sheet not open) }
+{          -> KEEP, present null. A real parameter is never dropped on a     }
+{          guess; the null says the entry may be the copy.                   }
+{ SheetPath is the component's source sheet (Doc.DM_FullPath). Called only   }
+{ when the caller asked for parameters, so a with_parameters=false call      }
+{ never reaches DM_Description (RELEASE_VERIFICATION 37.6, first use on an   }
+{ IComponent). Reads only its arguments.                                     }
+Function ComponentParamFieldsJson(Comp : IComponent; SheetPath : String) : String;
 Var
-    K : Integer;
-    PName, PValue : String;
-    FirstParam, SkippedCopy : Boolean;
+    K, DescCount, State : Integer;
+    PName, PValue, CompDesc, Body, PresentJson, LogDes : String;
+    FirstParam, SingleCopy, DropCopy, Dropped : Boolean;
 Begin
-    Result := '';
+    CompDesc := '';
+    Try CompDesc := Comp.DM_Description; Except CompDesc := ''; End;
+
+    DescCount := 0;
+    SingleCopy := False;
+    Try
+        For K := 0 To Comp.DM_ParameterCount - 1 Do
+        Begin
+            If UpperCase(Comp.DM_Parameters(K).DM_Name) = 'DESCRIPTION' Then
+            Begin
+                Inc(DescCount);
+                SingleCopy := Comp.DM_Parameters(K).DM_Value = CompDesc;
+            End;
+        End;
+    Except
+    End;
+    If DescCount <> 1 Then SingleCopy := False;
+
+    State := -1;
+    If SingleCopy Then
+    Begin
+        LogDes := '';
+        Try LogDes := Comp.DM_LogicalDesignator; Except LogDes := ''; End;
+        If LogDes = '' Then
+            Try LogDes := Comp.DM_PhysicalDesignator; Except LogDes := ''; End;
+        State := SchDescriptionParamState(SheetPath, LogDes);
+    End;
+
+    DropCopy := (DescCount >= 2) Or (SingleCopy And (State = 0));
+    If DescCount = 0 Then PresentJson := 'false'
+    Else If Not SingleCopy Then PresentJson := 'true'
+    Else If State = 1 Then PresentJson := 'true'
+    Else If State = 0 Then PresentJson := 'false'
+    Else PresentJson := 'null';
+
+    Body := '';
     FirstParam := True;
-    SkippedCopy := False;
+    Dropped := False;
     Try
         For K := 0 To Comp.DM_ParameterCount - 1 Do
         Begin
             PName := Comp.DM_Parameters(K).DM_Name;
             PValue := Comp.DM_Parameters(K).DM_Value;
-            If (Not SkippedCopy) And (UpperCase(PName) = 'DESCRIPTION')
+            If DropCopy And (Not Dropped) And (UpperCase(PName) = 'DESCRIPTION')
                And (PValue = CompDesc) Then
             Begin
-                SkippedCopy := True;
+                Dropped := True;
                 Continue;
             End;
-            If Not FirstParam Then Result := Result + ',';
+            If Not FirstParam Then Body := Body + ',';
             FirstParam := False;
-            Result := Result + '"' + EscapeJsonString(PName) + '":"'
+            Body := Body + '"' + EscapeJsonString(PName) + '":"'
                 + EscapeJsonString(PValue) + '"';
         End;
     Except
     End;
+
+    Result := ',"component_description":"' + EscapeJsonString(CompDesc) + '"'
+        + ',"description_parameter_present":' + PresentJson
+        + ',"parameters":{' + Body + '}';
 End;
 
 { Proj_GetComponentInfo - one-shot inspection of a single component.         }
@@ -1206,7 +1330,7 @@ Var
     Pin : IPin;
     I, J, K, DocCount : Integer;
     UsePhysical, WithPinNets, WithParameters : Boolean;
-    Data, PinList, ParamList, CompDesc : String;
+    Data, PinList, ParamList : String;
     FirstPin : Boolean;
     Found : Boolean;
 Begin
@@ -1287,20 +1411,18 @@ Begin
             { Parameter dict. Skipped when WithParameters is false, that   }
             { iterator is moderate cost but unnecessary for "look up the  }
             { footprint" / "look up the value" callers.                    }
-            CompDesc := '';
-            Try CompDesc := Comp.DM_Description; Except CompDesc := ''; End;
+            { Description and parameter fields, only when asked for: the  }
+            { DM_Description read and the sheet check live behind it.     }
             ParamList := '';
             If WithParameters Then
-                ParamList := ComponentParamsJson(Comp, CompDesc);
+                ParamList := ComponentParamFieldsJson(Comp, Doc.DM_FullPath);
 
             Data := '{"designator":"' + EscapeJsonString(Designator) + '"';
             Data := Data + ',"comment":"' + EscapeJsonString(Comp.DM_Comment) + '"';
-            Data := Data + ',"component_description":"' + EscapeJsonString(CompDesc) + '"';
             Data := Data + ',"footprint":"' + EscapeJsonString(Comp.DM_Footprint) + '"';
             Data := Data + ',"lib_ref":"' + EscapeJsonString(Comp.DM_LibraryReference) + '"';
             Data := Data + ',"sheet":"' + EscapeJsonString(Doc.DM_FileName) + '"';
-            If WithParameters Then
-                Data := Data + ',"parameters":{' + ParamList + '}';
+            Data := Data + ParamList;
             Data := Data + ',"pins":[' + PinList + ']}';
 
             Result := BuildSuccessResponse(RequestId, Data);
@@ -1338,7 +1460,7 @@ Var
     Pin : IPin;
     I, J, K, N, DocCount, SepPos : Integer;
     UsePhysical, WithPinNets, WithParameters, AlreadyDone : Boolean;
-    PinList, ParamList, CompEntry, ThisDesig, BodyJson, NotFoundJson, CompDesc : String;
+    PinList, ParamList, CompEntry, ThisDesig, BodyJson, NotFoundJson : String;
     FirstPin, FirstC, FirstNF : Boolean;
     Wanted, MatchedDesigs : TStringList;
     Remaining, EnvelopeData, ResponseStr : String;
@@ -1458,20 +1580,16 @@ Begin
                     PinList := PinList + '}';
                 End;
 
-                CompDesc := '';
-                Try CompDesc := Comp.DM_Description; Except CompDesc := ''; End;
                 ParamList := '';
                 If WithParameters Then
-                    ParamList := ComponentParamsJson(Comp, CompDesc);
+                    ParamList := ComponentParamFieldsJson(Comp, Doc.DM_FullPath);
 
                 CompEntry := '{"designator":"' + EscapeJsonString(ThisDesig) + '"';
                 CompEntry := CompEntry + ',"comment":"' + EscapeJsonString(Comp.DM_Comment) + '"';
-                CompEntry := CompEntry + ',"component_description":"' + EscapeJsonString(CompDesc) + '"';
                 CompEntry := CompEntry + ',"footprint":"' + EscapeJsonString(Comp.DM_Footprint) + '"';
                 CompEntry := CompEntry + ',"lib_ref":"' + EscapeJsonString(Comp.DM_LibraryReference) + '"';
                 CompEntry := CompEntry + ',"sheet":"' + EscapeJsonString(Doc.DM_FileName) + '"';
-                If WithParameters Then
-                    CompEntry := CompEntry + ',"parameters":{' + ParamList + '}';
+                CompEntry := CompEntry + ParamList;
                 CompEntry := CompEntry + ',"pins":[' + PinList + ']}';
 
                 If Not FirstC Then BodyJson := BodyJson + ',';

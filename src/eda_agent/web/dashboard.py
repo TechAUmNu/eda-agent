@@ -1343,6 +1343,13 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
         if not comps:
             return jsonify({"ok": False, "reason": "not-found"})
         comp = comps[0]
+        # The drawer's core field reads ``description``. Since
+        # 2026.10.10.01 the bridge reports the component's own
+        # description as ``component_description`` and keeps it out of
+        # ``parameters`` (where it used to masquerade as a Description
+        # parameter), so map it onto the key the drawer shows.
+        if not comp.get("description") and comp.get("component_description"):
+            comp["description"] = comp["component_description"]
         # Graft pins-with-nets from the snapshot BOM IF it is already
         # cached -- peek only, never trigger a fetch. A cold snapshot
         # would mean an 8-12s compile here; not worth it for a drawer.

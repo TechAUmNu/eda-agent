@@ -782,10 +782,12 @@ def register_project_tools(mcp):
                 True on large hierarchical projects.
 
         Returns:
-            Dictionary with designator, comment, component_description,
-            footprint, lib_ref, sheet, pins array (each with pin/name
-            and, when requested, net), and (when requested) parameters
-            dict, plus `_datasheet_guidance` + `_datasheet_parts`.
+            Dictionary with designator, comment, footprint, lib_ref,
+            sheet, pins array (each with pin/name and, when requested,
+            net), and, when ``with_parameters`` is True (the default),
+            ``component_description``, ``description_parameter_present``
+            and the ``parameters`` dict, plus `_datasheet_guidance` +
+            `_datasheet_parts`.
 
             ``parameters`` holds the part's REAL parameters only. The
             component's own description (the one the BOM and the
@@ -794,6 +796,16 @@ def register_project_tools(mcp):
             description when the part had no Description parameter and
             the parameter's value when it had one: same key, two
             meanings.
+
+            ``description_parameter_present`` says whether the part
+            carries a real parameter named Description: ``true`` (it is
+            in ``parameters``), ``false``, or ``null`` when that cannot
+            be told. ``null`` happens only when the one Description
+            entry has the same text as the component description (as
+            ``sch_set_components_parameters`` leaves them on purpose)
+            and the part's sheet is not open in the editor to check. The
+            entry is then KEPT in ``parameters``, and it may be the
+            component description's copy rather than a parameter.
         """
         bridge = get_bridge()
         params: dict[str, Any] = {"designator": designator}
@@ -873,10 +885,12 @@ def register_project_tools(mcp):
 
         Returns:
             Dict with components[], matched, requested, not_found[],
-            plus `_datasheet_guidance` + `_datasheet_parts`. Each
-            component carries ``component_description`` (its own
-            description) beside ``parameters`` (real parameters only),
-            as ``proj_get_component_info`` does.
+            plus `_datasheet_guidance` + `_datasheet_parts`. With
+            ``with_parameters`` each component carries
+            ``component_description`` (its own description) and
+            ``description_parameter_present`` beside ``parameters``
+            (real parameters only), as ``proj_get_component_info``
+            does.
         """
         bridge = get_bridge()
         cleaned = [str(d).strip() for d in (designators or []) if str(d).strip()]

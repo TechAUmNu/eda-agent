@@ -70,8 +70,9 @@ class MockComponent:
         self.lib_ref = lib_ref
         self.sheet = sheet
         #: Real parameters only. The component's own description is
-        #: ``description`` and is reported as component_description, as
-        #: Proj_GetComponentInfo does since 2026.10.10.01.
+        #: ``description`` and is reported as component_description, with
+        #: description_parameter_present, as Proj_GetComponentInfo does
+        #: since 2026.10.10.01.
         self.parameters = parameters or {}
         self.pins = pins or []
         self.description = description
@@ -1066,6 +1067,10 @@ class AltiumSimulator:
                             ',"footprint":"' + _escape_json_string(comp.footprint) + '"' +
                             ',"lib_ref":"' + _escape_json_string(comp.lib_ref) + '"' +
                             ',"sheet":"' + _escape_json_string(comp.sheet) + '"' +
+                            ',"description_parameter_present":' +
+                            ("true" if any(k.upper() == "DESCRIPTION"
+                                           for k in comp.parameters)
+                             else "false") +
                             ',"parameters":{' + ",".join(param_items) + '}' +
                             ',"pins":[' + ",".join(pin_items) + ']}')
                     return _build_success_response(rid, data)
