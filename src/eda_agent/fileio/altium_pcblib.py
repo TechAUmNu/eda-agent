@@ -85,6 +85,8 @@ import struct
 from pathlib import Path
 from typing import Any, Optional
 
+from eda_agent.units import MM_PER_MIL
+
 #: Pad top shape byte.
 _SHAPE = {1: "round", 2: "rectangular", 3: "octagonal"}
 _HOLE = {0: "round", 1: "square", 2: "slot"}
@@ -503,7 +505,7 @@ def footprint_height(params_text: str) -> dict[str, Any]:
     mils = _length_mils(raw)
     return {"height_raw": raw,
             "height_mils": mils,
-            "height_mm": None if mils is None else round(mils * 0.0254, 4)}
+            "height_mm": None if mils is None else round(mils * MM_PER_MIL, 4)}
 
 
 def _parameters_text(ole, storage: str) -> str:
