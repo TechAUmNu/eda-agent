@@ -486,6 +486,32 @@ def parse_footprint(data: bytes) -> dict[str, Any]:
     return out
 
 
+def footprint_height(params_text: str) -> dict[str, Any]:
+    """The footprint's HEIGHT from its Parameters string, mils and mm.
+
+    Altium stores it as a length with its unit, ``|HEIGHT=130.7087mil|``
+    (read from the carrier library 2026-10-10). ``height_raw`` is the
+    stored string and the numeric fields are null when there is none or
+    it cannot be read, so a missing height is never reported as 0.
+
+    WHY IT IS HERE: lib_set_footprint_height and the 3D height sweep
+    answer from Altium's memory, and heights were measured LOST on save
+    (2026-10-08) before the switch-after-write recipe. This is the only
+    read that proves a height reached the file.
+    """
+    raw = _props(params_text).get("HEIGHT")
+    mils = _length_mils(raw)
+    return {"height_raw": raw,
+            "height_mils": mils,
+            "height_mm": None if mils is None else round(mils * 0.0254, 4)}
+
+
+def _parameters_text(ole, storage: str) -> str:
+    """The latin-1 ``|KEY=VALUE|`` text of one storage's Parameters."""
+    raw = ole.openstream([storage, "Parameters"]).read()[4:]
+    return raw.split(b"\x00", 1)[0].decode("latin-1")
+
+
 def footprint_storages(ole) -> dict[str, str]:
     """``{footprint name: storage name}`` from each storage's Parameters."""
     names: dict[str, str] = {}
@@ -541,13 +567,17 @@ def read_pcblib(path: str | Path, footprint_name: str = "", offset: int = 0,
         for name in chosen:
             storage = storages[name]
             try:
+                height = footprint_height(_parameters_text(ole, storage))
+            except OSError:
+                height = footprint_height("")
+            try:
                 data = ole.openstream([storage, "Data"]).read()
             except OSError as exc:
                 footprints.append({"name": name, "storage": storage,
-                                   "complete": False,
+                                   **height, "complete": False,
                                    "parse_error": f"no Data stream: {exc}"})
                 continue
-            entry = {"name": name, "storage": storage}
+            entry = {"name": name, "storage": storage, **height}
             entry.update(parse_footprint(data))
             entry["counts"] = {k: len(entry[k]) for k in
                                ("pads", "tracks", "arcs", "vias", "fills",

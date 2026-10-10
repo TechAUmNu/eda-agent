@@ -8473,8 +8473,10 @@ def register_library_tools(mcp):
         next save, and a 3D body whose self-check passed was stored
         50,000 mil from its footprint. Only the file showed either. So
         after ``lib_delete_footprint_pads``,
-        ``lib_delete_footprint_primitives``, ``lib_modify_footprint_pads``
-        or ``lib_link_3d_model``, run ``lib_save_library`` and then this:
+        ``lib_delete_footprint_primitives``, ``lib_modify_footprint_pads``,
+        ``lib_link_3d_model``, ``lib_set_footprint_height`` or
+        ``lib_update_footprint_heights_from_3d``, run ``lib_save_library``
+        and then this:
         what it lists is what reached disk. No reload is needed, and it
         works with Altium closed.
 
@@ -8494,8 +8496,15 @@ def register_library_tools(mcp):
         Returns:
             ``{ok, library_path, total, units: "mils", frame, found?,
             closest?, offset?, count?, incomplete, warning?, footprints:
-            [{name, storage, complete, counts, pads, tracks, arcs, vias,
-            fills, texts, regions, bodies, other_records, parse_error?}]}``.
+            [{name, storage, height_raw, height_mils, height_mm, complete,
+            counts, pads, tracks, arcs, vias, fills, texts, regions,
+            bodies, other_records, parse_error?}]}``.
+
+            ``height_mils`` / ``height_mm`` are the footprint's HEIGHT as
+            the file stores it (its Parameters stream, ``height_raw``
+            being the stored string, e.g. ``130.7087mil``); null when the
+            file holds none. This is the proof a height set by
+            ``lib_set_footprint_height`` reached disk.
 
             ``complete`` is False when a footprint's records could not all
             be read: a record type whose layout is not known (the parse
