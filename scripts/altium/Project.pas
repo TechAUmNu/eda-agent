@@ -1132,6 +1132,53 @@ End;
 { Get full info for a single component (params + nets in one call)           }
 {..............................................................................}
 
+{ ComponentParamsJson - a compiled component's REAL parameters, as the body  }
+{ of a JSON object, and nothing else.                                         }
+{                                                                              }
+{ ONE KEY, TWO MEANINGS (live, 2026-10-10, bridge 2026.10.08.01): the DM      }
+{ parameter list carries a "Description" entry holding the COMPONENT's own    }
+{ description when the part has no Description parameter, and the            }
+{ parameter's value when it has one. parameters['Description'] therefore     }
+{ meant two different things, and a caller checking whether a part carries   }
+{ a Description parameter (the stamp tool's ModifyCompParamIfPresent case)   }
+{ could not tell. The component description now has its own key,            }
+{ component_description, from DM_Description, and parameters[] drops the ONE }
+{ entry named Description (any case) whose value equals it - the synthesised }
+{ copy. A real Description parameter with a different value stays. When the  }
+{ list holds two Description entries (the copy and a real one) the first     }
+{ equal one goes and the other stays. A real parameter whose value is        }
+{ identical to the component description is indistinguishable from the copy }
+{ here and is dropped; its text is still in component_description.           }
+{ Reads only its arguments (CompDesc is read by the caller).                  }
+Function ComponentParamsJson(Comp : IComponent; CompDesc : String) : String;
+Var
+    K : Integer;
+    PName, PValue : String;
+    FirstParam, SkippedCopy : Boolean;
+Begin
+    Result := '';
+    FirstParam := True;
+    SkippedCopy := False;
+    Try
+        For K := 0 To Comp.DM_ParameterCount - 1 Do
+        Begin
+            PName := Comp.DM_Parameters(K).DM_Name;
+            PValue := Comp.DM_Parameters(K).DM_Value;
+            If (Not SkippedCopy) And (UpperCase(PName) = 'DESCRIPTION')
+               And (PValue = CompDesc) Then
+            Begin
+                SkippedCopy := True;
+                Continue;
+            End;
+            If Not FirstParam Then Result := Result + ',';
+            FirstParam := False;
+            Result := Result + '"' + EscapeJsonString(PName) + '":"'
+                + EscapeJsonString(PValue) + '"';
+        End;
+    Except
+    End;
+End;
+
 { Proj_GetComponentInfo - one-shot inspection of a single component.         }
 {                                                                              }
 { Pin nets are the ONLY field that needs a project compile, and a stale-     }
@@ -1159,8 +1206,8 @@ Var
     Pin : IPin;
     I, J, K, DocCount : Integer;
     UsePhysical, WithPinNets, WithParameters : Boolean;
-    Data, PinList, ParamList : String;
-    FirstPin, FirstParam : Boolean;
+    Data, PinList, ParamList, CompDesc : String;
+    FirstPin : Boolean;
     Found : Boolean;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
@@ -1240,24 +1287,15 @@ Begin
             { Parameter dict. Skipped when WithParameters is false, that   }
             { iterator is moderate cost but unnecessary for "look up the  }
             { footprint" / "look up the value" callers.                    }
+            CompDesc := '';
+            Try CompDesc := Comp.DM_Description; Except CompDesc := ''; End;
             ParamList := '';
-            FirstParam := True;
             If WithParameters Then
-            Begin
-                Try
-                    For K := 0 To Comp.DM_ParameterCount - 1 Do
-                    Begin
-                        If Not FirstParam Then ParamList := ParamList + ',';
-                        FirstParam := False;
-                        ParamList := ParamList + '"' + EscapeJsonString(Comp.DM_Parameters(K).DM_Name) +
-                            '":"' + EscapeJsonString(Comp.DM_Parameters(K).DM_Value) + '"';
-                    End;
-                Except
-                End;
-            End;
+                ParamList := ComponentParamsJson(Comp, CompDesc);
 
             Data := '{"designator":"' + EscapeJsonString(Designator) + '"';
             Data := Data + ',"comment":"' + EscapeJsonString(Comp.DM_Comment) + '"';
+            Data := Data + ',"component_description":"' + EscapeJsonString(CompDesc) + '"';
             Data := Data + ',"footprint":"' + EscapeJsonString(Comp.DM_Footprint) + '"';
             Data := Data + ',"lib_ref":"' + EscapeJsonString(Comp.DM_LibraryReference) + '"';
             Data := Data + ',"sheet":"' + EscapeJsonString(Doc.DM_FileName) + '"';
@@ -1300,8 +1338,8 @@ Var
     Pin : IPin;
     I, J, K, N, DocCount, SepPos : Integer;
     UsePhysical, WithPinNets, WithParameters, AlreadyDone : Boolean;
-    PinList, ParamList, CompEntry, ThisDesig, BodyJson, NotFoundJson : String;
-    FirstPin, FirstParam, FirstC, FirstNF : Boolean;
+    PinList, ParamList, CompEntry, ThisDesig, BodyJson, NotFoundJson, CompDesc : String;
+    FirstPin, FirstC, FirstNF : Boolean;
     Wanted, MatchedDesigs : TStringList;
     Remaining, EnvelopeData, ResponseStr : String;
 Begin
@@ -1420,24 +1458,15 @@ Begin
                     PinList := PinList + '}';
                 End;
 
+                CompDesc := '';
+                Try CompDesc := Comp.DM_Description; Except CompDesc := ''; End;
                 ParamList := '';
-                FirstParam := True;
                 If WithParameters Then
-                Begin
-                    Try
-                        For K := 0 To Comp.DM_ParameterCount - 1 Do
-                        Begin
-                            If Not FirstParam Then ParamList := ParamList + ',';
-                            FirstParam := False;
-                            ParamList := ParamList + '"' + EscapeJsonString(Comp.DM_Parameters(K).DM_Name) +
-                                '":"' + EscapeJsonString(Comp.DM_Parameters(K).DM_Value) + '"';
-                        End;
-                    Except
-                    End;
-                End;
+                    ParamList := ComponentParamsJson(Comp, CompDesc);
 
                 CompEntry := '{"designator":"' + EscapeJsonString(ThisDesig) + '"';
                 CompEntry := CompEntry + ',"comment":"' + EscapeJsonString(Comp.DM_Comment) + '"';
+                CompEntry := CompEntry + ',"component_description":"' + EscapeJsonString(CompDesc) + '"';
                 CompEntry := CompEntry + ',"footprint":"' + EscapeJsonString(Comp.DM_Footprint) + '"';
                 CompEntry := CompEntry + ',"lib_ref":"' + EscapeJsonString(Comp.DM_LibraryReference) + '"';
                 CompEntry := CompEntry + ',"sheet":"' + EscapeJsonString(Doc.DM_FileName) + '"';

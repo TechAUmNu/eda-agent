@@ -62,14 +62,19 @@ class MockComponent:
         sheet: str = "",
         parameters: Optional[dict[str, str]] = None,
         pins: Optional[list[dict[str, str]]] = None,
+        description: str = "",
     ):
         self.designator = designator
         self.comment = comment
         self.footprint = footprint
         self.lib_ref = lib_ref
         self.sheet = sheet
+        #: Real parameters only. The component's own description is
+        #: ``description`` and is reported as component_description, as
+        #: Proj_GetComponentInfo does since 2026.10.10.01.
         self.parameters = parameters or {}
         self.pins = pins or []
+        self.description = description
 
 
 class MockPcbComponent:
@@ -1057,6 +1062,7 @@ class AltiumSimulator:
                                            '":"' + _escape_json_string(v) + '"')
                     data = ('{"designator":"' + _escape_json_string(comp.designator) + '"' +
                             ',"comment":"' + _escape_json_string(comp.comment) + '"' +
+                            ',"component_description":"' + _escape_json_string(comp.description) + '"' +
                             ',"footprint":"' + _escape_json_string(comp.footprint) + '"' +
                             ',"lib_ref":"' + _escape_json_string(comp.lib_ref) + '"' +
                             ',"sheet":"' + _escape_json_string(comp.sheet) + '"' +

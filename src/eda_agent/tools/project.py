@@ -782,10 +782,18 @@ def register_project_tools(mcp):
                 True on large hierarchical projects.
 
         Returns:
-            Dictionary with designator, comment, footprint, lib_ref,
-            sheet, pins array (each with pin/name and, when requested,
-            net), and (when requested) parameters dict, plus
-            `_datasheet_guidance` + `_datasheet_parts`.
+            Dictionary with designator, comment, component_description,
+            footprint, lib_ref, sheet, pins array (each with pin/name
+            and, when requested, net), and (when requested) parameters
+            dict, plus `_datasheet_guidance` + `_datasheet_parts`.
+
+            ``parameters`` holds the part's REAL parameters only. The
+            component's own description (the one the BOM and the
+            Properties panel read) is ``component_description``. Before
+            2026.10.10.01 ``parameters['Description']`` was that
+            description when the part had no Description parameter and
+            the parameter's value when it had one: same key, two
+            meanings.
         """
         bridge = get_bridge()
         params: dict[str, Any] = {"designator": designator}
@@ -865,7 +873,10 @@ def register_project_tools(mcp):
 
         Returns:
             Dict with components[], matched, requested, not_found[],
-            plus `_datasheet_guidance` + `_datasheet_parts`.
+            plus `_datasheet_guidance` + `_datasheet_parts`. Each
+            component carries ``component_description`` (its own
+            description) beside ``parameters`` (real parameters only),
+            as ``proj_get_component_info`` does.
         """
         bridge = get_bridge()
         cleaned = [str(d).strip() for d in (designators or []) if str(d).strip()]
