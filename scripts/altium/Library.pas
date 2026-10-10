@@ -10402,6 +10402,27 @@ End;
 { placement-collision rule for that footprint rather than relaxing it. The     }
 { reply says so when it is written, because "cleared the height" and "turned   }
 { off the check" are the same edit and only one of them sounds harmless.       }
+{                                                                              }
+{ THE WRITE MUST REACH THE SAVE (live, 2026-10-10, bridge 2026.10.08.01, the   }
+{ 3D-link pass on the carrier library). 55 footprints had their height set by  }
+{ this handler, each reply said changed:true, and after lib_save_library 51 of }
+{ the 55 HEIGHT values were gone from the file. The ones that survived were    }
+{ the ones that had been the CURRENT footprint; re-running with each footprint }
+{ made current again before the save kept every one. The library board holds  }
+{ the current footprint, and the save writes what it holds: a property set on }
+{ a footprint that is never current after the edit was not written. The old    }
+{ code set Height on whatever the walk found and restored the previous current }
+{ footprint, so only an edit to the already-current one could survive.         }
+{                                                                              }
+{ So the handler now does the measured recipe itself: the write is bracketed   }
+{ PCBM_BeginModify / PCBM_EndModify (as Lib_SetFootprintDescription brackets   }
+{ its write), READ BACK, the footprint is then made current (verified, the     }
+{ step that made the field values stick), the caller's current footprint is   }
+{ restored, and the library DOCUMENT is marked modified (MarkDocDirtyByPath),  }
+{ which the old code never did. The reply follows the house deferred-write     }
+{ fields: pending_save (an in-memory change a save will write), written_to_    }
+{ disk false, marked_modified as read back, and made_current_after_write so a  }
+{ caller can see when the recipe did not take.                                 }
 {..............................................................................}
 
 Function Lib_SetFootprintHeight(Params : String; RequestId : String) : String;
@@ -10409,9 +10430,10 @@ Var
     CurLib : IPCB_Library;
     LibIter : IPCB_LibraryIterator;
     Footprint, Target, SavedCurrent : IPCB_LibComponent;
-    FpWanted, HeightStr, FpName, Note : String;
+    FpWanted, HeightStr, FpName, Note, LibFile, SaveNote : String;
     HeightMM : Double;
-    OldH, NewH : TCoord;
+    OldH, NewH, GotH : TCoord;
+    Changed, MadeCurrent, Restored, Marked : Boolean;
 Begin
     FpWanted := Trim(ExtractJsonValue(Params, 'footprint_name'));
     HeightStr := Trim(ExtractJsonValue(Params, 'height_mm'));
@@ -10483,10 +10505,54 @@ Begin
     Try FpName := Target.Name; Except End;
     OldH := Target.Height;
     NewH := MMToCoord(HeightMM);
-    Target.Height := NewH;
+    PCBServer.PreProcess;
+    Try
+        Try
+            PCBServer.SendMessageToRobots(Target.I_ObjectAddress,
+                c_Broadcast, PCBM_BeginModify, c_NoEventData);
+        Except End;
+        Target.Height := NewH;
+        Try
+            PCBServer.SendMessageToRobots(Target.I_ObjectAddress,
+                c_Broadcast, PCBM_EndModify, c_NoEventData);
+        Except End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+    GotH := OldH;
+    Try GotH := Target.Height; Except End;
+    Changed := GotH <> OldH;
 
-    If SavedCurrent <> Nil Then CurLib.CurrentComponent := SavedCurrent;
+    { Make it current AFTER the write: the step that made the field values }
+    { reach the file. Then hand the caller's current footprint back.       }
+    MadeCurrent := LibMakeCurrentVerified(CurLib, Target);
+    Restored := True;
+    If (SavedCurrent <> Nil) And (SavedCurrent <> Target) Then
+        Restored := LibMakeCurrentVerified(CurLib, SavedCurrent);
     Try CurLib.Board.ViewManager_FullUpdate; Except End;
+
+    LibFile := '';
+    Try LibFile := CurLib.Board.FileName; Except End;
+    If Changed Then MarkDocDirtyByPath(LibFile);
+    Marked := DocIsModified(LibFile);
+
+    If Not Changed Then
+        SaveNote := 'Nothing changed in memory, so there is nothing to save.'
+    Else If Not MadeCurrent Then
+        SaveNote := 'The height is set in memory but the footprint could not '
+            + 'be made current after the write, and a height on a footprint '
+            + 'that is never current after the edit was measured lost on '
+            + 'save. Make it current (lib_set_current_footprint) before '
+            + 'lib_save_library, then read the height back from the file.'
+    Else If Not Marked Then
+        SaveNote := 'The height is set in memory but the library document '
+            + 'did not read back as modified, so a save may decline to '
+            + 'write it. Run lib_save_library with the library path and '
+            + 'check written_to_disk.'
+    Else
+        SaveNote := 'The library is modified in memory and NOT saved. Run '
+            + 'lib_save_library with the library path and check '
+            + 'written_to_disk in its reply.';
 
     Note := '';
     If NewH = 0 Then
@@ -10499,11 +10565,15 @@ Begin
             JsonStr('name', FpName) + ',' +
             JsonFloat('old_height_mm', CoordToMM(OldH)) + ',' +
             JsonFloat('new_height_mm', CoordToMM(NewH)) + ',' +
-            JsonBool('changed', OldH <> NewH) + ',' +
+            JsonFloat('read_back_height_mm', CoordToMM(GotH)) + ',' +
+            JsonBool('changed', Changed) + ',' +
+            JsonBool('made_current_after_write', MadeCurrent) + ',' +
+            JsonBool('current_restored', Restored) + ',' +
+            JsonBool('marked_modified', Marked) + ',' +
+            JsonBool('pending_save', Changed) + ',' +
+            JsonBool('written_to_disk', False) + ',' +
             JsonBool('saved', False) + ',' +
-            JsonStr('save_note',
-                'The library is modified in memory and NOT saved. Review the '
-                + 'change, then save it in Altium.') + ',' +
+            JsonStr('save_note', SaveNote) + ',' +
             JsonStr('note', Note)
         ));
 End;

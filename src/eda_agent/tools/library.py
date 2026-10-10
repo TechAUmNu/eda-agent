@@ -3777,6 +3777,13 @@ def register_library_tools(mcp):
         flagged against it however tall the real part is. The reply says
         so when zero is written.
 
+        THE WRITE NOW REACHES THE SAVE. Measured 2026-10-10: heights set
+        on footprints that were not the library's current one were lost
+        on ``lib_save_library`` (51 of 55), although every reply said
+        changed. The handler now makes the footprint current after the
+        write (the step that made them stick), puts your current
+        footprint back, and marks the library modified.
+
         Args:
             height_mm: the height in MILLIMETRES, not mils. Must be
                 non-negative.
@@ -3784,9 +3791,15 @@ def register_library_tools(mcp):
                 current component.
 
         Returns:
-            ``{name, old_height_mm, new_height_mm, changed, saved,
-            save_note, note}``. ``saved`` is always false: the library
-            is modified in memory and left for you to review and save.
+            ``{name, old_height_mm, new_height_mm, read_back_height_mm,
+            changed, made_current_after_write, current_restored,
+            marked_modified, pending_save, written_to_disk, saved,
+            save_note, note}``. ``changed`` is read back, not assumed.
+            ``pending_save`` true means an in-memory change a save will
+            write; ``written_to_disk`` and ``saved`` are always false.
+            Run ``lib_save_library`` with the library path and check its
+            ``written_to_disk``. If ``made_current_after_write`` is
+            false, ``save_note`` says how to keep the value.
         """
         try:
             height = float(height_mm)
