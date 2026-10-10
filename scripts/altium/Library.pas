@@ -10265,7 +10265,7 @@ Var
     GrIter : IPCB_GroupIterator;
     Body : IPCB_ComponentBody;
     Updated, Inspected, Lowered, NoModel : Integer;
-    Items, FpName, Mode, NoModelNames : String;
+    Items, FpName, Mode, NoModelNames, SaveNote : String;
     First, FirstNoModel, ShouldWrite : Boolean;
     OldH, NewH : TCoord;
 Begin
@@ -10369,6 +10369,23 @@ Begin
         Except End;
     End;
 
+    { UNSETTLED: these writes may not reach the save. lib_set_footprint_   }
+    { height lost 51 of 55 heights on save (2026-10-10) when it wrote      }
+    { Height on footprints it never switched to afterwards, which is what  }
+    { this sweep still does. Until RELEASE_VERIFICATION 37.2's sweep check  }
+    { settles it, the reply says so instead of implying the heights are    }
+    { ready to save.                                                       }
+    If Updated > 0 Then
+        SaveNote := 'UNCONFIRMED THAT THESE HEIGHTS REACH THE FILE. This sweep '
+            + 'writes Height on footprints without switching to each one '
+            + 'afterwards, and lib_set_footprint_height lost 51 of 55 such '
+            + 'writes on save (2026-10-10). After lib_save_library, read two '
+            + 'of the items back from the file (lib_read_pcblib_file); if '
+            + 'they are not there, set them with lib_set_footprint_height, '
+            + 'which runs the switch that kept them.'
+    Else
+        SaveNote := 'Nothing was written, so there is nothing to save.';
+
     Result := BuildSuccessResponse(RequestId,
         JsonObj(
             JsonStr('mode', Mode) + ',' +
@@ -10382,6 +10399,8 @@ Begin
                 + 'none was written. Their Height is whatever it already was, '
                 + 'and a 0 there leaves placement-collision DRC disabled for '
                 + 'that part.') + ',' +
+            JsonBool('heights_confirmed_on_save', False) + ',' +
+            JsonStr('save_note', SaveNote) + ',' +
             JsonRaw('items', '[' + Items + ']')
         ));
 End;
@@ -10404,25 +10423,35 @@ End;
 { off the check" are the same edit and only one of them sounds harmless.       }
 {                                                                              }
 { THE WRITE MUST REACH THE SAVE (live, 2026-10-10, bridge 2026.10.08.01, the   }
-{ 3D-link pass on the carrier library). 55 footprints had their height set by  }
-{ this handler, each reply said changed:true, and after lib_save_library 51 of }
-{ the 55 HEIGHT values were gone from the file. The ones that survived were    }
-{ the ones that had been the CURRENT footprint; re-running with each footprint }
-{ made current again before the save kept every one. The library board holds  }
-{ the current footprint, and the save writes what it holds: a property set on }
-{ a footprint that is never current after the edit was not written. The old    }
-{ code set Height on whatever the walk found and restored the previous current }
-{ footprint, so only an edit to the already-current one could survive.         }
+{ 3D-link pass on the carrier library). MEASURED: 55 footprints had their      }
+{ height set by this handler, each reply said changed:true, and after          }
+{ lib_save_library 51 of the 55 HEIGHT values were gone from the file;         }
+{ re-running with each footprint made current again before the save kept      }
+{ every one. NOT MEASURED: which four survived the first save was not          }
+{ recorded - probably the footprints that were current at some point after    }
+{ their write. The working hypothesis behind the recipe: the library board    }
+{ holds the current footprint and the save writes what it holds, so a         }
+{ property set on a footprint that is never switched to after the edit is not }
+{ written. The old code set Height on whatever the walk found and restored    }
+{ the previous current footprint, never switching to the edited one.          }
 {                                                                              }
-{ So the handler now does the measured recipe itself: the write is bracketed   }
-{ PCBM_BeginModify / PCBM_EndModify (as Lib_SetFootprintDescription brackets   }
-{ its write), READ BACK, the footprint is then made current (verified, the     }
-{ step that made the field values stick), the caller's current footprint is   }
-{ restored, and the library DOCUMENT is marked modified (MarkDocDirtyByPath),  }
-{ which the old code never did. The reply follows the house deferred-write     }
-{ fields: pending_save (an in-memory change a save will write), written_to_    }
-{ disk false, marked_modified as read back, and made_current_after_write so a  }
-{ caller can see when the recipe did not take.                                 }
+{ So the handler now does the measured recipe itself, on EVERY path: the      }
+{ write is bracketed PCBM_BeginModify / PCBM_EndModify (as                     }
+{ Lib_SetFootprintDescription brackets its write), then the library SWITCHES  }
+{ TO the footprint (verified): a footprint that was not current is made        }
+{ current and the caller's current one restored; one that was ALREADY current }
+{ (footprint_name empty, the default, or naming it) is parked on another      }
+{ footprint first (LibParkCurrentElsewhere) and switched back, because a      }
+{ make-current on the current footprint is a no-op and the recipe would never }
+{ happen. The height is read back AFTER the switches - if a switch reloads    }
+{ the footprint from its stored copy, a read before it would report a value   }
+{ already gone - and changed comes from that final read (the pre-switch read  }
+{ is reported too). The library DOCUMENT is marked modified                   }
+{ (MarkDocDirtyByPath), which the old code never did. Reply: pending_save is  }
+{ true only when the height changed AND the switch happened (a change without }
+{ the switch is the case measured lost on save), written_to_disk false,       }
+{ marked_modified as read back, made_current_after_write, and save_note says  }
+{ what to do when the recipe did not run.                                     }
 {..............................................................................}
 
 Function Lib_SetFootprintHeight(Params : String; RequestId : String) : String;
@@ -10432,8 +10461,8 @@ Var
     Footprint, Target, SavedCurrent : IPCB_LibComponent;
     FpWanted, HeightStr, FpName, Note, LibFile, SaveNote : String;
     HeightMM : Double;
-    OldH, NewH, GotH : TCoord;
-    Changed, MadeCurrent, Restored, Marked : Boolean;
+    OldH, NewH, GotH, GotBefore : TCoord;
+    Changed, MadeCurrent, Restored, Marked, WasCurrent, Parked, Pending : Boolean;
 Begin
     FpWanted := Trim(ExtractJsonValue(Params, 'footprint_name'));
     HeightStr := Trim(ExtractJsonValue(Params, 'height_mm'));
@@ -10519,31 +10548,60 @@ Begin
     Finally
         PCBServer.PostProcess;
     End;
+    GotBefore := OldH;
+    Try GotBefore := Target.Height; Except End;
+
+    { SWITCH TO the footprint AFTER the write: the step that made the field  }
+    { values reach the file. Already current: park elsewhere, switch back.   }
+    { Not current: make it current, then hand the caller's one back.         }
+    WasCurrent := SavedCurrent = Target;
+    Parked := False;
+    If WasCurrent Then
+    Begin
+        Parked := LibParkCurrentElsewhere(CurLib, Target);
+        Restored := LibMakeCurrentVerified(CurLib, Target);
+        MadeCurrent := Parked And Restored;
+    End
+    Else
+    Begin
+        MadeCurrent := LibMakeCurrentVerified(CurLib, Target);
+        Restored := True;
+        If SavedCurrent <> Nil Then
+            Restored := LibMakeCurrentVerified(CurLib, SavedCurrent);
+    End;
+    Try CurLib.Board.ViewManager_FullUpdate; Except End;
+
+    { The read that counts: after the switches. }
     GotH := OldH;
     Try GotH := Target.Height; Except End;
     Changed := GotH <> OldH;
-
-    { Make it current AFTER the write: the step that made the field values }
-    { reach the file. Then hand the caller's current footprint back.       }
-    MadeCurrent := LibMakeCurrentVerified(CurLib, Target);
-    Restored := True;
-    If (SavedCurrent <> Nil) And (SavedCurrent <> Target) Then
-        Restored := LibMakeCurrentVerified(CurLib, SavedCurrent);
-    Try CurLib.Board.ViewManager_FullUpdate; Except End;
+    Pending := Changed And MadeCurrent;
 
     LibFile := '';
     Try LibFile := CurLib.Board.FileName; Except End;
     If Changed Then MarkDocDirtyByPath(LibFile);
     Marked := DocIsModified(LibFile);
 
-    If Not Changed Then
+    If (Not Changed) And (GotBefore <> OldH) Then
+        SaveNote := 'The height read back as written straight after the write '
+            + 'but as the OLD value after the footprint switch, so the switch '
+            + 'discarded it. Nothing is pending; report this (the recipe '
+            + 'this handler runs does not hold on this Altium).'
+    Else If Not Changed Then
         SaveNote := 'Nothing changed in memory, so there is nothing to save.'
+    Else If WasCurrent And (Not Parked) Then
+        SaveNote := 'The footprint was already current and the library holds '
+            + 'no other footprint to switch away to, so the switch after the '
+            + 'write (the step that kept heights on save) could not run. '
+            + 'Whether the save keeps this height is unmeasured: run '
+            + 'lib_save_library, then read the height back from the file '
+            + '(lib_read_pcblib_file).'
     Else If Not MadeCurrent Then
-        SaveNote := 'The height is set in memory but the footprint could not '
-            + 'be made current after the write, and a height on a footprint '
-            + 'that is never current after the edit was measured lost on '
-            + 'save. Make it current (lib_set_current_footprint) before '
-            + 'lib_save_library, then read the height back from the file.'
+        SaveNote := 'The height is set in memory but the library could not '
+            + 'switch to the footprint after the write, and heights written '
+            + 'without that switch were measured lost on save. Make it '
+            + 'current (lib_set_current_footprint) before lib_save_library, '
+            + 'then read the height back from the file.'
     Else If Not Marked Then
         SaveNote := 'The height is set in memory but the library document '
             + 'did not read back as modified, so a save may decline to '
@@ -10566,11 +10624,14 @@ Begin
             JsonFloat('old_height_mm', CoordToMM(OldH)) + ',' +
             JsonFloat('new_height_mm', CoordToMM(NewH)) + ',' +
             JsonFloat('read_back_height_mm', CoordToMM(GotH)) + ',' +
+            JsonFloat('read_back_before_switch_mm', CoordToMM(GotBefore)) + ',' +
             JsonBool('changed', Changed) + ',' +
+            JsonBool('was_current', WasCurrent) + ',' +
+            JsonBool('parked_elsewhere_first', Parked) + ',' +
             JsonBool('made_current_after_write', MadeCurrent) + ',' +
             JsonBool('current_restored', Restored) + ',' +
             JsonBool('marked_modified', Marked) + ',' +
-            JsonBool('pending_save', Changed) + ',' +
+            JsonBool('pending_save', Pending) + ',' +
             JsonBool('written_to_disk', False) + ',' +
             JsonBool('saved', False) + ',' +
             JsonStr('save_note', SaveNote) + ',' +

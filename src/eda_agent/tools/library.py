@@ -3732,11 +3732,22 @@ def register_library_tools(mcp):
             back as ``without_model`` with their names.
           - Does NOT save the library; review the ``items[]`` diff and
             save in Altium.
+          - UNCONFIRMED THAT THE HEIGHTS REACH THE FILE. This sweep
+            writes Height without switching to each footprint after the
+            write, which is exactly how ``lib_set_footprint_height`` lost
+            51 of 55 heights on save (2026-10-10) before it gained that
+            switch. Until that is measured for the sweep, save, then read
+            two of the ``items`` back from the file
+            (``lib_read_pcblib_file``); if they are missing, set them
+            with ``lib_set_footprint_height``. The reply carries
+            ``heights_confirmed_on_save: false`` and a ``save_note``.
 
         Returns:
             Dict with ``mode``, ``inspected``, ``updated``, ``lowered``,
-            ``without_model``, ``without_model_names``, and ``items``
-            (``{name, old_height_mm, new_height_mm}`` per footprint).
+            ``without_model``, ``without_model_names``,
+            ``heights_confirmed_on_save`` (always false), ``save_note``
+            and ``items`` (``{name, old_height_mm, new_height_mm}`` per
+            footprint).
         """
         mode = (mode or "raise").strip().lower()
         if mode not in ("raise", "match"):
@@ -3777,12 +3788,16 @@ def register_library_tools(mcp):
         flagged against it however tall the real part is. The reply says
         so when zero is written.
 
-        THE WRITE NOW REACHES THE SAVE. Measured 2026-10-10: heights set
-        on footprints that were not the library's current one were lost
-        on ``lib_save_library`` (51 of 55), although every reply said
-        changed. The handler now makes the footprint current after the
-        write (the step that made them stick), puts your current
-        footprint back, and marks the library modified.
+        THE WRITE NOW REACHES THE SAVE. Measured 2026-10-10: 55 heights
+        set, every reply said changed, and after ``lib_save_library`` 51
+        of the 55 were not in the file; making each footprint current
+        again before the save kept all 55. The handler now switches the
+        library to the footprint after the write (the step that made
+        them stick) on every path: a footprint that was not current is
+        made current and yours is put back; one that was already current
+        (``footprint_name`` empty, or naming it) is parked on another
+        footprint and switched back. Then it reads the height back and
+        marks the library modified.
 
         Args:
             height_mm: the height in MILLIMETRES, not mils. Must be
@@ -3792,14 +3807,21 @@ def register_library_tools(mcp):
 
         Returns:
             ``{name, old_height_mm, new_height_mm, read_back_height_mm,
-            changed, made_current_after_write, current_restored,
-            marked_modified, pending_save, written_to_disk, saved,
-            save_note, note}``. ``changed`` is read back, not assumed.
-            ``pending_save`` true means an in-memory change a save will
-            write; ``written_to_disk`` and ``saved`` are always false.
-            Run ``lib_save_library`` with the library path and check its
-            ``written_to_disk``. If ``made_current_after_write`` is
-            false, ``save_note`` says how to keep the value.
+            read_back_before_switch_mm, changed, was_current,
+            parked_elsewhere_first, made_current_after_write,
+            current_restored, marked_modified, pending_save,
+            written_to_disk, saved, save_note, note}``.
+            ``read_back_height_mm`` and ``changed`` come from the read
+            AFTER the footprint switches, not before them and not from
+            what was asked. ``pending_save`` is true only when the height
+            changed AND the switch after the write happened, i.e. an
+            in-memory change made the way that was measured to survive a
+            save; a change without the switch (for instance the only
+            footprint in the library, which cannot be switched away from)
+            reads ``pending_save: false`` with a ``save_note`` saying the
+            save is unmeasured. ``written_to_disk`` and ``saved`` are
+            always false. Run ``lib_save_library`` with the library path
+            and check its ``written_to_disk``.
         """
         try:
             height = float(height_mm)

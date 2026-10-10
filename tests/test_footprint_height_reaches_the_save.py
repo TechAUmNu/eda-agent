@@ -5,23 +5,32 @@
 Field result, 2026-10-10, bridge 2026.10.08.01, the 3D-link pass on the
 multiviewer carrier library (55 footprints). Each ``lib_set_footprint_
 height`` reply said ``changed: true``. After ``lib_save_library``, 51 of
-the 55 HEIGHT values were NOT in the file. The four that survived had been
-the library's current footprint; re-running with every footprint made
-current again before the save kept all 55.
+the 55 HEIGHT values were NOT in the file; re-running with every
+footprint made current again before the save kept all 55. That is the
+measurement. Which four survived was not recorded: probably the
+footprints that were current at some point after their write.
 
 The handler set ``Target.Height`` on whatever the library walk found,
-then put the previous current footprint back, and never marked the
-library document modified. The library board holds the CURRENT footprint
-and the save writes what it holds, so only an edit to the footprint that
-was already current could reach the file, and the reply could not tell
-the two apart.
+then put the previous current footprint back, never switched to the
+edited footprint, and never marked the library document modified. The
+working hypothesis: the library board holds the CURRENT footprint and the
+save writes what it holds, so a footprint never switched to after its edit
+is not written.
 
-It now does the measured recipe itself: bracketed write, read back, make
-the footprint current AFTER the write (verified), restore the caller's
-current footprint, mark the library document modified, and reply with the
-house deferred-write fields (``pending_save``, ``written_to_disk``,
-``marked_modified``) plus ``made_current_after_write`` so a caller can see
-when the recipe did not take.
+It now does the measured recipe itself on EVERY path: bracketed write,
+then the library switches TO the footprint (verified). A footprint that
+was not current is made current and the caller's restored; one that was
+ALREADY current (the default, empty ``footprint_name``) is parked on
+another footprint and switched back, since making the current footprint
+current is a no-op and the recipe would silently never run. The height is
+read back AFTER the switches, so a switch that reloaded the stored copy
+could not hide behind a pre-switch read. ``pending_save`` is true only for
+a change made with the switch; ``made_current_after_write``,
+``was_current`` and ``parked_elsewhere_first`` say which path ran.
+
+The sweep ``lib_update_footprint_heights_from_3d`` writes the same way
+without the switch; until RELEASE_VERIFICATION 37.2 measures it, its
+reply says the heights are unconfirmed on save.
 
 The Pascal cannot run here; it is read comment-free, per function.
 """
@@ -109,13 +118,76 @@ def test_changed_comes_from_reading_the_height_back():
     assert "JsonBool('changed', Changed)" in body
 
 
+def test_the_read_that_counts_comes_after_the_switches():
+    """Review: the first version read the height back BEFORE switching
+    footprints. If a switch reloads the footprint from its stored copy,
+    that reply says changed:true with the new value while the value is
+    already gone. The reported height and `changed` come from a read
+    after every LibMakeCurrentVerified; the pre-switch read is reported
+    beside it."""
+    body = _body()
+    after = body[_write_at(body):]
+    last_switch = after.rindex("LibMakeCurrentVerified(")
+    read = after.index("GotH := Target.Height;")
+    assert read > last_switch, "the height is read back before the switches"
+    assert after.index("Changed := GotH <> OldH;") > read
+    assert after.index("GotBefore := Target.Height;") < \
+        after.index("LibMakeCurrentVerified(")
+    assert "JsonFloat('read_back_before_switch_mm', CoordToMM(GotBefore))" \
+        in body
+
+
+def test_an_already_current_footprint_is_switched_away_and_back():
+    """Review: with footprint_name empty (the default) the target IS the
+    current footprint, LibMakeCurrentVerified does nothing, and the
+    measured recipe (switch to the footprint after the write) never ran.
+    Now the current footprint is parked on another one first and switched
+    back, and made_current_after_write is true only when both happened."""
+    body = _body()
+    after = body[_write_at(body):]
+    assert "WasCurrent := SavedCurrent = Target;" in after
+    park = after.index("Parked := LibParkCurrentElsewhere(CurLib, Target);")
+    back = after.index("Restored := LibMakeCurrentVerified(CurLib, Target);")
+    assert after.index("If WasCurrent Then") < park < back
+    assert "MadeCurrent := Parked And Restored;" in after, (
+        "a make-current that was a no-op must not count as the switch")
+
+    text = _LIB.read_text(encoding="utf-8")
+    assert text.index("Function LibParkCurrentElsewhere(") < \
+        text.index("Function Lib_SetFootprintHeight("), (
+            "DelphiScript needs the callee declared first")
+
+
+def test_pending_save_needs_the_switch():
+    """A change without the switch is the case measured lost on save, so
+    it is not 'an in-memory change a save will write'."""
+    body = _body()
+    assert "Pending := Changed And MadeCurrent;" in body
+    assert "JsonBool('pending_save', Pending)" in body
+    assert "JsonBool('pending_save', Changed)" not in body
+
+
+def test_the_sweep_warns_that_its_heights_are_unconfirmed():
+    """lib_update_footprint_heights_from_3d writes Height on non-current
+    footprints and restores the current one: the pattern diagnosed above.
+    Until 37.2 measures it, the reply must not imply the heights are
+    ready to save."""
+    sweep = load(_LIB)["Lib_UpdateFootprintHeightsFrom3D"]
+    assert "JsonBool('heights_confirmed_on_save', False)" in sweep
+    assert "JsonStr('save_note', SaveNote)" in sweep
+    assert "UNCONFIRMED THAT THESE HEIGHTS REACH THE FILE" in sweep
+    assert "lib_read_pcblib_file" in sweep
+
+
 def test_the_reply_carries_the_deferred_write_fields():
     body = _body()
-    for field in ("JsonBool('pending_save', Changed)",
+    for field in ("JsonBool('pending_save', Pending)",
                   "JsonBool('written_to_disk', False)",
                   "JsonBool('marked_modified', Marked)",
                   "JsonBool('made_current_after_write', MadeCurrent)",
                   "JsonBool('current_restored', Restored)",
+                  "JsonBool('was_current', WasCurrent)",
+                  "JsonBool('parked_elsewhere_first', Parked)",
                   "JsonFloat('read_back_height_mm', CoordToMM(GotH))",
                   "JsonBool('saved', False)"):
         assert field in body, field
@@ -127,6 +199,8 @@ def test_a_recipe_that_did_not_take_is_said_in_the_save_note():
     body = _body()
     assert "Else If Not MadeCurrent Then" in body
     assert "Else If Not Marked Then" in body
+    assert "Else If WasCurrent And (Not Parked) Then" in body, (
+        "a lone footprint that cannot be switched away from must say so")
 
 
 def test_the_tool_docstring_names_the_new_fields(monkeypatch):
@@ -144,8 +218,14 @@ def test_the_tool_docstring_names_the_new_fields(monkeypatch):
     library_module.register_library_tools(DummyMcp())
     doc = inspect.getdoc(captured["lib_set_footprint_height"]) or ""
     for field in ("pending_save", "written_to_disk",
-                  "made_current_after_write", "lib_save_library"):
+                  "made_current_after_write", "lib_save_library",
+                  "read_back_before_switch_mm", "was_current",
+                  "parked_elsewhere_first"):
         assert field in doc, field
+    sweep_doc = inspect.getdoc(
+        captured["lib_update_footprint_heights_from_3d"]) or ""
+    assert "heights_confirmed_on_save" in sweep_doc
+    assert "UNCONFIRMED" in sweep_doc
 
     sent = []
 
