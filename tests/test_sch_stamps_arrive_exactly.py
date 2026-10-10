@@ -438,11 +438,14 @@ def test_a_shown_new_parameter_is_offset_and_turned_with_the_part():
     Comp.Location at orientation 0: two shown parameters drew on top of
     each other and on the body, and stayed horizontal on a part turned
     90/270. Hidden ones (the default) are unaffected. A shown one now goes
-    one 100 mil row per parameter already shown, away from the Comment,
-    and takes the part's orientation."""
+    one 100 mil row per parameter already shown, away from the Comment.
+    (Which way it turns and steps, and which parameters count, were
+    corrected live on 2026-10-10: tests/test_shown_param_rows_follow_the_
+    comment.py.)"""
     ex = load(_ALTIUM / "Generic.pas")["SetCompParamTextEx"]
     search = ex[:ex.index("If Found <> Nil Then")]
-    assert "If Not Param.IsHidden Then Inc(ShownCount);" in search, (
+    assert re.search(r"If \(Not Param\.IsHidden\)[^;]*Inc\(ShownCount\);",
+                     search), (
         "the offset must count the parameters already shown on the part")
 
     create = _create_branch()
@@ -450,7 +453,6 @@ def test_a_shown_new_parameter_is_offset_and_turned_with_the_part():
     add = create.index("Comp.AddSchObject(NewParam)")
     shown = create[show:add]
     for needle in ("NewParam.ShowName := False;",
-                   "Ori := Comp.Orientation;",
                    "CompLoc := Comp.Comment.Location;",
                    "MilsToCoord(100 * (ShownCount + 1))",
                    "NewParam.Location := CompLoc;",

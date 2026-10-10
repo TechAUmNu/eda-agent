@@ -8360,10 +8360,28 @@ End;
 { A SHOWN one shows its value, not its name, and must not land on the symbol  }
 { origin: two shown parameters there draw on top of each other and on the     }
 { body. It goes one 100 mil row per parameter already shown on the part away   }
-{ from the Comment label (below it on an upright part, beside it on one turned }
-{ 90/270, where the text runs vertically), turned with the part.               }
-{ Designator and Comment are sub-objects, not iterator children, so ShownCount }
-{ counts only the visible PARAMETERS, the ones this would otherwise overlap.  }
+{ from the Comment label, and stacks the way the COMMENT reads, not the way    }
+{ the part is turned.                                                          }
+{                                                                              }
+{ LIVE 2026-10-10 (bridge 2026.10.08.01, RELEASE_VERIFICATION 36.7, AD        }
+{ 26.10.1.5) found two defects in the first version of this:                  }
+{  * The rows landed ONE ROW TOO FAR. The eParameter iterator DOES return the  }
+{    component's visible Comment parameter (obj_query lists Name=Comment as   }
+{    an eParameter on every part), so it was counted as a shown parameter    }
+{    although it is the label the rows are measured FROM. An earlier comment }
+{    here said Designator and Comment were not iterator children; for the    }
+{    Comment that is wrong. Both are now skipped by NAME, so ShownCount      }
+{    counts only the OTHER visible parameters, the ones a new row would      }
+{    otherwise overlap.                                                       }
+{  * On a part turned 90 (Orientation 1) whose Comment is horizontal          }
+{    (Orientation 0), the new rows took the PART's orientation and stepped    }
+{    along X, so their vertical text ran across the Comment. They now take    }
+{    the COMMENT label's orientation and step perpendicular to its text:     }
+{    Comment orientation 0/2 steps -Y (rows below it), 1/3 steps +X (columns  }
+{    beside it). The part's orientation is only the fallback when the        }
+{    Comment cannot be read.                                                  }
+{ A HIDDEN created parameter (the default) is untouched by either: it sits on }
+{ the component at the factory orientation, as before.                        }
 Function SetCompParamTextEx(Comp : ISch_Component; ParamName, ParamValue : String;
                             ShowNew : Boolean) : Boolean;
 Var
@@ -8388,7 +8406,10 @@ Begin
                 Break;
             End;
             Try
-                If Not Param.IsHidden Then Inc(ShownCount);
+                If (Not Param.IsHidden)
+                   And (UpperCase(Param.Name) <> 'COMMENT')
+                   And (UpperCase(Param.Name) <> 'DESIGNATOR') Then
+                    Inc(ShownCount);
             Except End;
             Param := Iter.NextSchObject;
         End;
@@ -8419,6 +8440,7 @@ Begin
                 NewParam.ShowName := False;
                 Ori := 0;
                 Try Ori := Comp.Orientation; Except End;
+                Try Ori := Comp.Comment.Orientation; Except End;
                 Try
                     CompLoc := Comp.Comment.Location;
                     If (Ori = 1) Or (Ori = 3) Then
