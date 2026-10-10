@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.10.10.01';
+    SCRIPT_VERSION = '2026.10.11.01';
 
     // How far a linked 3D body's box may sit from its footprint's pads (or
     // origin, with no pads) before lib_link_3d_model reports placement_ok
@@ -98,6 +98,33 @@ Var
     SaveSkipCleanSheets : Boolean;
     SaveSkipped : Integer;
     SaveSkippedPaths : String;
+    { THE BRIDGE'S OWN RECORD OF WHAT IT EDITED, because the modified flag
+      cannot be the only witness. MEASURED 2026-10-10 (AD 26.10.1.5, bridge
+      2026.10.10.01): after lib_set_footprint_height and after obj_modify
+      on a free scratch sheet, the document read Modified False while its
+      tab showed '*', so app_save_all's default (libraries) and
+      only_modified (sheets) would have left real edits unwritten.
+      MarkDocDirty appends every path it is asked to mark (as DocPathKey,
+      pipe-separated); SaveOneDocByDocRef writes a recorded document even
+      when its flag reads clean, and forgets it once its file got newer.
+      SaveBridgeRecordPaths / SaveBridgeRecordUnwritten report, per pass,
+      what was written only because of the record and what was attempted
+      that way without the file moving. }
+    BridgeEditedPaths : String;
+    SaveBridgeRecordPaths : String;
+    SaveBridgeRecordUnwritten : String;
+    { What the LAST MarkDocDirty call found, for the reply that claims
+      marked_modified (MarkOutcomeJson in Utils.pas renders it: this unit
+      builds before EscapeJsonString exists). MarkLastFocused is -1 when the
+      focused document is not the one marked, else 0/1 for its flag. }
+    MarkLastPath : String;
+    MarkLastFile : String;
+    FindDocVia : String;
+    MarkLastVia : String;
+    MarkLastFound : Boolean;
+    MarkLastModified : Boolean;
+    MarkLastFocused : Integer;
+    MarkLastError : String;
     LastCompiledProject : IProject;
 
     { Silent cast-failure counter, incremented every time a defensive       }
@@ -392,49 +419,355 @@ Begin
 End;
 
 {..............................................................................}
-{ Mark one document dirty by path. IT DOES NOT WRITE.                          }
+{ Mark one document dirty by path, and SAY WHETHER IT TOOK. IT DOES NOT WRITE. }
 {                                                                              }
 { Deferred save is deliberate: marking is cheap, and app_save_all flushes at   }
 { a checkpoint. The hazard is the NAME. Called SaveDocByPath it produced a     }
 { comment in Generic.pas claiming it wrote to disk, and three tool docstrings  }
 { promising the caller a save. A caller who needs bytes on disk must call      }
 { app_save_all or proj_save.                                                   }
+{                                                                              }
+{ THE SILENT MARK, MEASURED 2026-10-10 (AD 26.10.1.5, bridge 2026.10.10.01).   }
+{ After lib_set_footprint_height the library read Modified False on all three }
+{ writes while its tab showed '*'; lib_save_library then reported             }
+{ was_modified false; after obj_modify on a free scratch SchDoc the active    }
+{ document read modified:false 14 s later with '*' in the title bar. Both     }
+{ were FREE documents under a Temp path. The old procedure did               }
+{ GetDocumentByPath, exited silently on Nil and swallowed SetModified, so    }
+{ nothing could tell a mark that took from one that never found its          }
+{ document. And for a free document the paths handlers pass are not always   }
+{ the one GetDocumentByPath wants: DM_FullPath and ISch_Document.            }
+{ DocumentName both return a BARE NAME for a free document (measured, see    }
+{ ResolveLoadedDocPath), and ProcessActiveDoc passes DocumentName.           }
+{                                                                              }
+{ So the lookup is FindOpenServerDoc (exact path, then every project and the }
+{ free documents compared case- and separator-insensitively, a bare name     }
+{ only when it is unambiguous, then the FOCUSED view's own document), the    }
+{ mark is written to the document found AND to the focused document when it  }
+{ is the same file (the object whose tab shows '*'), and MarkDocDirty        }
+{ returns the flag READ BACK. What it found is left in the MarkLast* globals }
+{ for MarkOutcomeJson (Utils.pas), which every reply that claims             }
+{ marked_modified carries. Every path asked for is also put on the bridge's  }
+{ own record (BridgeEditedPaths), which app_save_all writes even when the    }
+{ flag reads clean: the flag is a witness, not the only one.                 }
+{                                                                              }
+{ MarkDocDirtyByPath stays a procedure (eighty call sites call it as a       }
+{ statement) and wraps MarkDocDirty.                                          }
 {..............................................................................}
+
+Function LooksAbsolutePath(P : String) : Boolean;
+Begin
+    Result := (Copy(P, 2, 1) = ':') Or (Copy(P, 1, 2) = '\\');
+End;
+
+{ One spelling per file: trimmed, forward slashes turned back, upper case. }
+Function DocPathKey(P : String) : String;
+Begin
+    Result := UpperCase(Trim(StringReplace(P, '/', '\', -1)));
+End;
+
+Function DocNameKey(P : String) : String;
+Begin
+    Result := UpperCase(ExtractFileName(Trim(StringReplace(P, '/', '\', -1))));
+End;
+
+{ Do two spellings name the same file? The same key, or - when either side   }
+{ is only a bare name, which is what a free document reports - the same      }
+{ file name.                                                                  }
+Function DocPathsMatch(A : String; B : String) : Boolean;
+Begin
+    Result := False;
+    If (Trim(A) = '') Or (Trim(B) = '') Then Exit;
+    If DocPathKey(A) = DocPathKey(B) Then
+    Begin
+        Result := True;
+        Exit;
+    End;
+    If (Not LooksAbsolutePath(Trim(A))) Or (Not LooksAbsolutePath(Trim(B))) Then
+        Result := DocNameKey(A) = DocNameKey(B);
+End;
+
+Function ServerDocFileName(Doc : IServerDocument) : String;
+Begin
+    Result := '';
+    If Doc = Nil Then Exit;
+    Try Result := Doc.FileName; Except Result := ''; End;
+End;
+
+{ The document behind the focused view: the object whose tab shows '*'. }
+Function FocusedServerDoc(Dummy : Integer) : IServerDocument;
+Var
+    View : IServerDocumentView;
+Begin
+    Result := Nil;
+    Try
+        View := Client.GetCurrentView;
+        If View <> Nil Then Result := View.OwnerDocument;
+    Except
+        Result := Nil;
+    End;
+End;
+
+{ Find the open IServerDocument for a path however the caller spelled it.    }
+{ FindDocVia says which route answered: path (the exact lookup every handler }
+{ used), walk (a project member or free document whose path matches by key), }
+{ walk_name (a bare name matching exactly one open file), focused (the       }
+{ focused view's document), ambiguous_name (a bare name matching several     }
+{ open files - refused rather than guessed) or none.                          }
+Function FindOpenServerDoc(FilePath : String) : IServerDocument;
+Var
+    Workspace : IWorkspace;
+    Project : IProject;
+    Doc : IDocument;
+    Cand, NameHit, Focused : IServerDocument;
+    I, J, NameHits, ProjCount : Integer;
+    Full, Want, HitKey, CandKey : String;
+Begin
+    Result := Nil;
+    FindDocVia := 'none';
+    If Trim(FilePath) = '' Then Exit;
+
+    Try Result := Client.GetDocumentByPath(FilePath); Except Result := Nil; End;
+    If Result <> Nil Then
+    Begin
+        FindDocVia := 'path';
+        Exit;
+    End;
+
+    Want := DocPathKey(FilePath);
+    NameHit := Nil;
+    NameHits := 0;
+    HitKey := '';
+    Workspace := Nil;
+    Try Workspace := GetWorkspace; Except Workspace := Nil; End;
+    ProjCount := 0;
+    If Workspace <> Nil Then
+    Begin
+        Try ProjCount := Workspace.DM_ProjectCount; Except ProjCount := 0; End;
+    End;
+    { I = -1 is the synthetic project that holds the free documents. }
+    If Workspace <> Nil Then
+    Begin
+        For I := -1 To ProjCount - 1 Do
+        Begin
+            Project := Nil;
+            Try
+                If I < 0 Then Project := Workspace.DM_FreeDocumentsProject
+                Else Project := Workspace.DM_Projects(I);
+            Except
+                Project := Nil;
+            End;
+            If Project = Nil Then Continue;
+            For J := 0 To Project.DM_LogicalDocumentCount - 1 Do
+            Begin
+                Doc := Nil;
+                Try Doc := Project.DM_LogicalDocuments(J); Except Doc := Nil; End;
+                If Doc = Nil Then Continue;
+                Full := '';
+                Try Full := Doc.DM_FullPath; Except Full := ''; End;
+                If Not DocPathsMatch(Full, FilePath) Then Continue;
+                Cand := Nil;
+                Try Cand := Client.GetDocumentByPath(Full); Except Cand := Nil; End;
+                If Cand = Nil Then Continue;
+                CandKey := DocPathKey(ServerDocFileName(Cand));
+                If (DocPathKey(Full) = Want) Or (CandKey = Want) Then
+                Begin
+                    Result := Cand;
+                    FindDocVia := 'walk';
+                    Exit;
+                End;
+                If CandKey = '' Then CandKey := DocPathKey(Full);
+                If CandKey <> HitKey Then
+                Begin
+                    NameHits := NameHits + 1;
+                    If NameHit = Nil Then
+                    Begin
+                        NameHit := Cand;
+                        HitKey := CandKey;
+                    End;
+                End;
+            End;
+        End;
+    End;
+
+    If NameHits = 1 Then
+    Begin
+        Result := NameHit;
+        FindDocVia := 'walk_name';
+        Exit;
+    End;
+
+    Focused := FocusedServerDoc(0);
+    If (Focused <> Nil) And DocPathsMatch(ServerDocFileName(Focused), FilePath) Then
+    Begin
+        Result := Focused;
+        FindDocVia := 'focused';
+        Exit;
+    End;
+
+    If NameHits > 1 Then FindDocVia := 'ambiguous_name';
+End;
+
+{ The bridge's record of what it edited. Keys are DocPathKey, pipe-wrapped   }
+{ so a key cannot match part of a longer path. A bare name is recorded as    }
+{ such and matches any path with that file name.                             }
+Function BridgeEditRecorded(FilePath : String) : Boolean;
+Var
+    List : String;
+Begin
+    Result := False;
+    If Trim(FilePath) = '' Then Exit;
+    List := '|' + BridgeEditedPaths + '|';
+    If Pos('|' + DocPathKey(FilePath) + '|', List) > 0 Then
+        Result := True
+    Else If Pos('|' + DocNameKey(FilePath) + '|', List) > 0 Then
+        Result := True;
+End;
+
+Procedure RecordBridgeEdit(FilePath : String);
+Var
+    Key : String;
+Begin
+    Key := DocPathKey(FilePath);
+    If Key = '' Then Exit;
+    If Pos('|' + Key + '|', '|' + BridgeEditedPaths + '|') > 0 Then Exit;
+    If BridgeEditedPaths <> '' Then BridgeEditedPaths := BridgeEditedPaths + '|';
+    BridgeEditedPaths := BridgeEditedPaths + Key;
+End;
+
+{ Drop a path (and a bare-name entry for the same file) once it is on disk. }
+Procedure ForgetBridgeEdit(FilePath : String);
+Var
+    List : String;
+Begin
+    If Trim(FilePath) = '' Then Exit;
+    List := '|' + BridgeEditedPaths + '|';
+    List := StringReplace(List, '|' + DocPathKey(FilePath) + '|', '|', -1);
+    List := StringReplace(List, '|' + DocNameKey(FilePath) + '|', '|', -1);
+    If Copy(List, 1, 1) = '|' Then List := Copy(List, 2, Length(List) - 1);
+    If Copy(List, Length(List), 1) = '|' Then List := Copy(List, 1, Length(List) - 1);
+    BridgeEditedPaths := List;
+End;
+
+Function MarkDocDirty(FilePath : String) : Boolean;
+Var
+    ServerDoc, Focused : IServerDocument;
+    DiskName, FocusedName : String;
+    FocusedMod : Boolean;
+Begin
+    Result := False;
+    MarkLastPath := FilePath;
+    MarkLastFile := '';
+    MarkLastVia := 'none';
+    MarkLastFound := False;
+    MarkLastModified := False;
+    MarkLastFocused := -1;
+    MarkLastError := '';
+    If Trim(FilePath) = '' Then
+    Begin
+        MarkLastError := 'no path was given, so no document could be marked';
+        Exit;
+    End;
+    RecordBridgeEdit(FilePath);
+
+    ServerDoc := FindOpenServerDoc(FilePath);
+    MarkLastVia := FindDocVia;
+    DiskName := '';
+    If ServerDoc <> Nil Then
+    Begin
+        MarkLastFound := True;
+        DiskName := ServerDocFileName(ServerDoc);
+        MarkLastFile := DiskName;
+        RecordBridgeEdit(DiskName);
+        Try
+            ServerDoc.SetModified(True);
+        Except
+            MarkLastError := 'SetModified raised on the document found';
+        End;
+        Try
+            MarkLastModified := ServerDoc.Modified;
+        Except
+            MarkLastModified := False;
+            If MarkLastError = '' Then MarkLastError := 'the modified flag could not be read';
+        End;
+    End;
+
+    { The focused document, when it is this file: the object the tab's '*'  }
+    { belongs to. Marked too, and read, whether or not the lookup found it. }
+    Focused := FocusedServerDoc(0);
+    FocusedName := ServerDocFileName(Focused);
+    If (Focused <> Nil) And (DocPathsMatch(FocusedName, FilePath)
+        Or DocPathsMatch(FocusedName, DiskName)) Then
+    Begin
+        Try Focused.SetModified(True); Except End;
+        FocusedMod := False;
+        Try FocusedMod := Focused.Modified; Except FocusedMod := False; End;
+        If FocusedMod Then MarkLastFocused := 1 Else MarkLastFocused := 0;
+        If Not MarkLastFound Then
+        Begin
+            MarkLastFound := True;
+            MarkLastVia := 'focused';
+            MarkLastFile := FocusedName;
+            RecordBridgeEdit(FocusedName);
+        End;
+        If FocusedMod Then MarkLastModified := True;
+    End;
+
+    If Not MarkLastFound Then
+        MarkLastError := 'no open document matches this path ('
+            + MarkLastVia + '); nothing was marked'
+    Else If (Not MarkLastModified) And (MarkLastError = '') Then
+        MarkLastError := 'the document was found and marked but its modified '
+            + 'flag reads False afterwards';
+    Result := MarkLastModified;
+End;
 
 Procedure MarkDocDirtyByPath(FilePath : String);
 Var
-    ServerDoc : IServerDocument;
+    Ignored : Boolean;
 Begin
-    If FilePath = '' Then Exit;
-    ServerDoc := Client.GetDocumentByPath(FilePath);
-    If ServerDoc = Nil Then Exit;
-    Try ServerDoc.SetModified(True); Except End;
+    Ignored := MarkDocDirty(FilePath);
 End;
 
 {..............................................................................}
-{ Read that same flag back. The counterpart to MarkDocDirtyByPath, and the     }
-{ one definition of "unsaved" for every handler that reports it.               }
+{ Read that same flag back. The counterpart to MarkDocDirty, and the one       }
+{ definition of "unsaved" for every handler that reports it.                   }
 {                                                                              }
 { A path with no resident IServerDocument reports False: a document that is    }
 { not open in the editor holds no unsaved edits. Treat a True as reliable and  }
 { a False as a floor, not a clean bill. App_SaveAll records that Modified does }
 { not always propagate from ProcessControl, which is why that handler measures }
 { file timestamps instead of trusting this.                                    }
+{                                                                              }
+{ It finds the document the way MarkDocDirty does (FindOpenServerDoc) and also }
+{ reads the focused document when that is the same file: reading a different  }
+{ object from the one the mark wrote is one way a mark could look lost.        }
 {..............................................................................}
 
 Function DocIsModified(FilePath : String) : Boolean;
 Var
-    ServerDoc : IServerDocument;
+    ServerDoc, Focused : IServerDocument;
 Begin
     Result := False;
-    If FilePath = '' Then Exit;
-    ServerDoc := Nil;
-    Try
-        ServerDoc := Client.GetDocumentByPath(FilePath);
-        If ServerDoc <> Nil Then
+    If Trim(FilePath) = '' Then Exit;
+    ServerDoc := FindOpenServerDoc(FilePath);
+    If ServerDoc <> Nil Then
+    Begin
+        Try
             If ServerDoc.Modified Then Result := True;
-    Except
-        Result := False;
+        Except
+            Result := False;
+        End;
+    End;
+    If Result Then Exit;
+    Focused := FocusedServerDoc(0);
+    If (Focused <> Nil) And DocPathsMatch(ServerDocFileName(Focused), FilePath) Then
+    Begin
+        Try
+            If Focused.Modified Then Result := True;
+        Except
+            Result := False;
+        End;
     End;
 End;
 
@@ -648,8 +981,9 @@ End;
 Procedure SaveOneDocByDocRef(Doc : IDocument);
 Var
     ServerDoc : IServerDocument;
-    WasModified, IsLib, Skip : Boolean;
-    Ext : String;
+    WasModified, IsLib, Skip, InRecord, ByRecord, Moved : Boolean;
+    Ext, DiskPath : String;
+    AgeBefore, AgeAfter : Integer;
 Begin
     If Doc = Nil Then Exit;
     Try
@@ -675,9 +1009,10 @@ Begin
         { A modified read is trusted; an unreadable flag counts as modified,  }
         { so doubt always writes. The cost is the edit paths whose flag does  }
         { not propagate (lib_add_footprint_tracks, lib_modify_footprint_pads  }
-        { have read modified:false): a skipped library loses those edits      }
-        { unless lib_save_library writes it. That is the trade, and it is     }
-        { the caller's to make.                                               }
+        { have read modified:false): a skipped library lost those edits       }
+        { unless lib_save_library wrote it. Since 2026-10-11 a document the   }
+        { bridge itself marked is on BridgeEditedPaths and is written anyway  }
+        { (below), so the trade only bites edits made outside MarkDocDirty.   }
         If ServerDoc <> Nil Then
         Begin
             WasModified := False;
@@ -685,11 +1020,27 @@ Begin
             Ext := '';
             Try Ext := UpperCase(ExtractFileExt(Doc.DM_FullPath)); Except Ext := ''; End;
             IsLib := (Ext = '.SCHLIB') Or (Ext = '.PCBLIB');
+            { THE BRIDGE'S RECORD OVERRIDES A CLEAN READ. MEASURED 2026-10-10: }
+            { documents this bridge had just edited read Modified False with   }
+            { '*' on their tabs, so the skip below would have dropped those    }
+            { edits. A document MarkDocDirty was asked to mark is written       }
+            { whatever its flag says, and reported in written_by_bridge_record. }
+            { Documents nobody edited are still left alone: the record holds    }
+            { only what this bridge touched, which keeps the 2026-10-06 fix.    }
+            DiskPath := ServerDocFileName(ServerDoc);
+            If Not LooksAbsolutePath(DiskPath) Then DiskPath := Doc.DM_FullPath;
+            InRecord := BridgeEditRecorded(Doc.DM_FullPath) Or BridgeEditRecorded(DiskPath);
+            ByRecord := False;
             Skip := False;
             If Not WasModified Then
             Begin
                 If IsLib Then Skip := SaveSkipCleanLibs
                 Else Skip := SaveSkipCleanSheets;
+                If Skip And InRecord Then
+                Begin
+                    Skip := False;
+                    ByRecord := True;
+                End;
             End;
             { ONE ENTRY PER FILE. A library open in two projects, or in a     }
             { project and as a free document, is reached once per walk, and   }
@@ -707,8 +1058,41 @@ Begin
             Else
             Begin
                 SaveAttempts := SaveAttempts + 1;
+                AgeBefore := -1;
+                Try AgeBefore := FileAge(DiskPath); Except AgeBefore := -1; End;
                 Try ServerDoc.SetModified(True); Except End;
                 Try ServerDoc.DoFileSave(''); Except End;
+                If InRecord Then
+                Begin
+                    { On disk only if the FILE moved; then the record lets go. }
+                    AgeAfter := -1;
+                    Try AgeAfter := FileAge(DiskPath); Except AgeAfter := -1; End;
+                    Moved := (AgeAfter <> -1) And (AgeAfter <> AgeBefore);
+                    If Moved Then
+                    Begin
+                        ForgetBridgeEdit(Doc.DM_FullPath);
+                        ForgetBridgeEdit(DiskPath);
+                    End;
+                    If ByRecord Then
+                    Begin
+                        If Moved Then
+                        Begin
+                            If Pos('|' + DocPathKey(DiskPath) + '|', '|' + DocPathKey(SaveBridgeRecordPaths) + '|') = 0 Then
+                            Begin
+                                If SaveBridgeRecordPaths <> '' Then SaveBridgeRecordPaths := SaveBridgeRecordPaths + '|';
+                                SaveBridgeRecordPaths := SaveBridgeRecordPaths + DiskPath;
+                            End;
+                        End
+                        Else
+                        Begin
+                            If Pos('|' + DocPathKey(DiskPath) + '|', '|' + DocPathKey(SaveBridgeRecordUnwritten) + '|') = 0 Then
+                            Begin
+                                If SaveBridgeRecordUnwritten <> '' Then SaveBridgeRecordUnwritten := SaveBridgeRecordUnwritten + '|';
+                                SaveBridgeRecordUnwritten := SaveBridgeRecordUnwritten + DiskPath;
+                            End;
+                        End;
+                    End;
+                End;
             End;
         End;
     Except End;
@@ -791,11 +1175,6 @@ End;
 {                                                                             }
 { Returns '' when no absolute path can be found, so a caller can REFUSE       }
 { rather than proceed with a string that will quietly do nothing.             }
-Function LooksAbsolutePath(P : String) : Boolean;
-Begin
-    Result := (Copy(P, 2, 1) = ':') Or (Copy(P, 1, 2) = '\\');
-End;
-
 Function MatchDocPathInProject(Project : IProject; Wanted : String) : String;
 Var
     J : Integer;
@@ -901,21 +1280,38 @@ End;
 { or it did not, and that answer does not depend on any Altium flag.           }
 {..............................................................................}
 
+{ THE FREE DOCUMENTS COUNT TOO (2026-10-11). This walked DM_Projects only,   }
+{ while the save pass also writes the synthetic free-documents project. A     }
+{ free document the pass wrote was never aged, so documents_written left it   }
+{ out, and a pass that wrote ONLY free documents (the 2026-10-10 field case:  }
+{ a scratch sheet and a library opened under a Temp path) would have read     }
+{ "not one got newer on disk". A free document's DM_FullPath can be a bare    }
+{ name, so its path is taken from the open document itself; one file listed   }
+{ by two projects is aged once.                                               }
 Function WorkspaceDocPaths(Dummy : Integer) : String;
 Var
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
-    I, J : Integer;
-    Path : String;
+    Found : IServerDocument;
+    I, J, ProjCount : Integer;
+    Path, Keys, Disk : String;
 Begin
     Result := '';
+    Keys := '';
     Workspace := GetWorkspace;
     If Workspace = Nil Then Exit;
-    For I := 0 To Workspace.DM_ProjectCount - 1 Do
+    ProjCount := 0;
+    Try ProjCount := Workspace.DM_ProjectCount; Except ProjCount := 0; End;
+    For I := -1 To ProjCount - 1 Do
     Begin
         Project := Nil;
-        Try Project := Workspace.DM_Projects(I); Except End;
+        Try
+            If I < 0 Then Project := Workspace.DM_FreeDocumentsProject
+            Else Project := Workspace.DM_Projects(I);
+        Except
+            Project := Nil;
+        End;
         If Project = Nil Then Continue;
         For J := 0 To Project.DM_LogicalDocumentCount - 1 Do
         Begin
@@ -924,11 +1320,18 @@ Begin
             If Doc = Nil Then Continue;
             Path := '';
             Try Path := Doc.DM_FullPath; Except End;
-            If Path <> '' Then
+            If (Path <> '') And (Not LooksAbsolutePath(Path)) Then
             Begin
-                If Result <> '' Then Result := Result + '|';
-                Result := Result + Path;
+                Found := FindOpenServerDoc(Path);
+                Disk := ServerDocFileName(Found);
+                If LooksAbsolutePath(Disk) Then Path := Disk;
             End;
+            If Path = '' Then Continue;
+            If Pos('|' + DocPathKey(Path) + '|', '|' + Keys + '|') > 0 Then Continue;
+            If Keys <> '' Then Keys := Keys + '|';
+            Keys := Keys + DocPathKey(Path);
+            If Result <> '' Then Result := Result + '|';
+            Result := Result + Path;
         End;
     End;
 End;

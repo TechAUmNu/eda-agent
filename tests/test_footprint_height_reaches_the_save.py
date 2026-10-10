@@ -99,11 +99,15 @@ def test_the_library_document_is_marked_and_read_back():
     write = _write_at(body)
     after = body[write:]
     assert "LibFile := CurLib.Board.FileName;" in after
-    assert "If Changed Then MarkDocDirtyByPath(LibFile);" in after, (
+    # Since 2026.10.11.01 the mark returns its own read-back (the
+    # 2026-10-10 field run read marked_modified false while the tab showed
+    # '*', and the old mark could not say whether it found the document).
+    assert "Marked := MarkDocDirty(LibFile);" in after, (
         "nothing marked the library modified, so a save could decline it")
-    assert "Marked := DocIsModified(LibFile);" in after
-    assert after.index("MarkDocDirtyByPath(LibFile)") < \
-        after.index("DocIsModified(LibFile)")
+    assert after.index("If Changed Then") < \
+        after.index("Marked := MarkDocDirty(LibFile);")
+    assert "Marked := DocIsModified(LibFile);" in after, (
+        "an unchanged height still reports the flag as read")
 
 
 def test_changed_comes_from_reading_the_height_back():

@@ -128,7 +128,8 @@ def test_the_new_writers_say_the_save_is_deferred(pas):
     for name in ("Lib_ModifyFootprintPads", "Lib_DeleteFootprintPads",
                  "Lib_SetFootprintDescription"):
         assert "JsonBool('written_to_disk', False)" in pas[name], name
-        assert "MarkDocDirtyByPath(" in pas[name], name
+        assert ("MarkDocDirtyByPath(" in pas[name]
+                or "MarkDocDirty(" in pas[name]), name
 
 
 # ------------------------------------------------------------------ Python

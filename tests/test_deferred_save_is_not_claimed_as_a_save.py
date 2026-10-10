@@ -68,12 +68,18 @@ def test_it_still_only_marks():
     """
     main = _decommented((SCRIPTS / "Main.pas").read_text(
         encoding="utf-8", errors="replace"))
-    start = main.index("Procedure MarkDocDirtyByPath")
+    # MarkDocDirty does the work (and reads the flag back since
+    # 2026.10.11.01); MarkDocDirtyByPath is the statement-form wrapper.
+    start = main.index("Function MarkDocDirty(")
     body = main[start:main.index("\nEnd;", start)]
     assert "SetModified" in body
     assert "DoFileSave" not in body, (
-        "MarkDocDirtyByPath now writes, so it is misnamed. Either rename "
+        "MarkDocDirty now writes, so it is misnamed. Either rename "
         "it or move the write out")
+    start = main.index("Procedure MarkDocDirtyByPath")
+    wrapper = main[start:main.index("\nEnd;", start)]
+    assert "MarkDocDirty(FilePath)" in wrapper
+    assert "DoFileSave" not in wrapper
 
 
 @pytest.mark.parametrize("tool", ["lib_delete_footprint", "lib_rename_footprint"])
@@ -136,4 +142,4 @@ def test_the_object_helpers_do_not_claim_a_save():
         assert "Saved := True" not in body, f"{name} still calls a marked document saved"
         assert '"saved":false' in body, f"{name} must answer saved:false for a deferred write"
         assert '"pending_save":' in body and '"written_to_disk":false' in body
-        assert "MarkDocDirtyByPath(DocPath)" in body
+        assert "MarkDocDirty(DocPath)" in body

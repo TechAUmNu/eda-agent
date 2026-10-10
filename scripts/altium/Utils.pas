@@ -558,6 +558,90 @@ Begin
     Result := '[' + Body + ']';
 End;
 
+{ A pipe-separated path list (Main.pas cannot build JSON: it builds before  }
+{ EscapeJsonString exists) as a JSON array of strings.                      }
+Function PipeListToJsonArray(List : String) : String;
+Var
+    Remaining, One : String;
+    P : Integer;
+Begin
+    Result := '';
+    Remaining := List;
+    While Remaining <> '' Do
+    Begin
+        P := Pos('|', Remaining);
+        If P > 0 Then
+        Begin
+            One := Copy(Remaining, 1, P - 1);
+            Remaining := Copy(Remaining, P + 1, Length(Remaining) - P);
+        End
+        Else
+        Begin
+            One := Remaining;
+            Remaining := '';
+        End;
+        If One <> '' Then
+        Begin
+            If Result <> '' Then Result := Result + ',';
+            Result := Result + '"' + EscapeJsonString(One) + '"';
+        End;
+    End;
+    Result := '[' + Result + ']';
+End;
+
+{..............................................................................}
+{ What the last MarkDocDirty found, for every reply that claims               }
+{ marked_modified. MEASURED 2026-10-10: marked_modified was a constant True   }
+{ on obj_modify while the document read modified:false, because the mark     }
+{ exited silently when its lookup missed. This says which document was found }
+{ (via: path | walk | walk_name | focused | ambiguous_name | none), whether  }
+{ its flag reads modified afterwards, the focused document's own flag when   }
+{ it is the same file (null when it is not), whether app_save_all will write }
+{ it from the bridge's record regardless, and why the mark did not take.     }
+{..............................................................................}
+Function MarkOutcomeJson(Dummy : Integer) : String;
+Var
+    FocusedJson : String;
+Begin
+    If MarkLastFocused < 0 Then FocusedJson := 'null'
+    Else If MarkLastFocused = 1 Then FocusedJson := 'true'
+    Else FocusedJson := 'false';
+    Result := '{"path":"' + EscapeJsonString(MarkLastPath) + '"'
+        + ',"file_name":"' + EscapeJsonString(MarkLastFile) + '"'
+        + ',"found":' + BoolToJsonStr(MarkLastFound)
+        + ',"via":"' + EscapeJsonString(MarkLastVia) + '"'
+        + ',"modified_read":' + BoolToJsonStr(MarkLastModified)
+        + ',"focused_modified_read":' + FocusedJson
+        + ',"recorded_for_save_all":' + BoolToJsonStr(BridgeEditRecorded(MarkLastPath))
+        + ',"problem":"' + EscapeJsonString(MarkLastError) + '"}';
+End;
+
+{ A marked_modified value lifted out of a reply ('true' / 'false'), as JSON; }
+{ null when the reply carried none (a board or project scope).             }
+Function MarkedOpJson(V : String) : String;
+Begin
+    If (V = 'true') Or (V = 'false') Then Result := V
+    Else Result := 'null';
+End;
+
+{ The save route to name when the flag did not register. Empty when it did. }
+Function MarkSaveHint(Marked : Boolean; IsLibrary : Boolean) : String;
+Begin
+    Result := '';
+    If Marked Then Exit;
+    If IsLibrary Then
+        Result := 'The library did not read back as modified (see mark). '
+            + 'Save it with lib_save_library and the library path, and check '
+            + 'file_age_changed; app_save_all also writes it from the '
+            + 'bridge''s own record (written_by_bridge_record in its reply).'
+    Else
+        Result := 'The document did not read back as modified (see mark). '
+            + 'Save with app_save_all WITHOUT only_modified, and check that '
+            + 'documents_written moved; the bridge''s own record makes '
+            + 'app_save_all write it even so (written_by_bridge_record). For '
+            + 'a library use lib_save_library.';
+End;
+
 {..............................................................................}
 { Pin electrical-type <-> string converters. Used for JSON output of sch    }
 { geometry, and for parsing JSON pin specs when creating symbols. Keeps the }

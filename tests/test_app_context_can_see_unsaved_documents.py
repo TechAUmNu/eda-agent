@@ -133,7 +133,12 @@ def test_dirtiness_is_read_through_one_helper():
     main = load(_MAIN, minimum=50)
     assert "DocIsModified" in main, "DocIsModified is gone from Main.pas"
     helper = main["DocIsModified"]
-    assert "Client.GetDocumentByPath" in helper
+    # The lookup is the one MarkDocDirty uses (FindOpenServerDoc, which
+    # starts with Client.GetDocumentByPath), so the read cannot consult a
+    # different object from the one the mark wrote.
+    assert "FindOpenServerDoc(FilePath)" in helper
+    assert "Client.GetDocumentByPath" in main["FindOpenServerDoc"]
+    assert "FindOpenServerDoc(FilePath)" in main["MarkDocDirty"]
     assert "Modified" in helper
 
     body = load(_APPLICATION, minimum=12)["App_GetOpenDocuments"]

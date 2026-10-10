@@ -627,7 +627,21 @@ def register_generic_tools(mcp):
             filter: Pipe-separated property=value conditions (AND logic)
 
         Returns:
-            Dictionary with "matched" count and "sheets_processed"
+            Dictionary with "matched" count and "sheets_processed".
+            A sheet edit MARKS the document and does not write it
+            (``saved: false``, ``pending_save``, ``written_to_disk:
+            false``). ``marked_modified`` is the document's modified flag
+            READ BACK after the mark (it was a constant true until
+            2026-10-10, when it said true for a sheet that read
+            unmodified), ``mark`` says which open document the mark found
+            (``found``, ``via``, ``modified_read``,
+            ``focused_modified_read``, ``recorded_for_save_all``,
+            ``problem``), and ``save_hint`` appears when the flag did not
+            register: save with ``app_save_all`` WITHOUT ``only_modified``
+            (it also writes the document from the bridge's own record), or
+            ``lib_save_library`` for a library. Project scope reports
+            ``sheets_marked`` (flags that read back) and
+            ``marks_not_read_back``.
 
         Example - rename a net across all sheets (one value fits all matches):
             obj_modify(
@@ -964,7 +978,12 @@ def register_generic_tools(mcp):
             total_matched, and a per-operation `results` list. Each result
             row carries its own `matched` count plus a `note` -- an op that
             matched nothing reports note="no_objects_matched" instead of
-            being silently counted as successful.
+            being silently counted as successful. Each row also carries the
+            op's `marked_modified` (the sheet's modified flag read back;
+            null for board and project scopes), and
+            `ops_mark_not_read_back` counts the rows where it read false,
+            with a `save_hint` (app_save_all without only_modified, or
+            lib_save_library) whenever that count is non-zero.
 
         Example, edit pins across THREE different library symbols in ONE call:
             obj_batch_modify(operations=[

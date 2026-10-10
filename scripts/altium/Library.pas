@@ -10463,6 +10463,7 @@ Var
     HeightMM : Double;
     OldH, NewH, GotH, GotBefore : TCoord;
     Changed, MadeCurrent, Restored, Marked, WasCurrent, Parked, Pending : Boolean;
+    MarkJson : String;
 Begin
     FpWanted := Trim(ExtractJsonValue(Params, 'footprint_name'));
     HeightStr := Trim(ExtractJsonValue(Params, 'height_mm'));
@@ -10579,8 +10580,18 @@ Begin
 
     LibFile := '';
     Try LibFile := CurLib.Board.FileName; Except End;
-    If Changed Then MarkDocDirtyByPath(LibFile);
-    Marked := DocIsModified(LibFile);
+    { Marked is what MarkDocDirty READ BACK, and mark says what it found.  }
+    { MEASURED 2026-10-10: marked_modified read false on all three writes  }
+    { while the library tab showed '*' - the old mark could not say        }
+    { whether it had found the document at all.                            }
+    MarkJson := 'null';
+    If Changed Then
+    Begin
+        Marked := MarkDocDirty(LibFile);
+        MarkJson := MarkOutcomeJson(0);
+    End
+    Else
+        Marked := DocIsModified(LibFile);
 
     If (Not Changed) And (GotBefore <> OldH) Then
         SaveNote := 'The height read back as written straight after the write '
@@ -10604,9 +10615,8 @@ Begin
             + 'then read the height back from the file.'
     Else If Not Marked Then
         SaveNote := 'The height is set in memory but the library document '
-            + 'did not read back as modified, so a save may decline to '
-            + 'write it. Run lib_save_library with the library path and '
-            + 'check written_to_disk.'
+            + 'did not read back as modified (mark says what was found). '
+            + MarkSaveHint(False, True)
     Else
         SaveNote := 'The library is modified in memory and NOT saved. Run '
             + 'lib_save_library with the library path and check '
@@ -10631,6 +10641,7 @@ Begin
             JsonBool('made_current_after_write', MadeCurrent) + ',' +
             JsonBool('current_restored', Restored) + ',' +
             JsonBool('marked_modified', Marked) + ',' +
+            JsonRaw('mark', MarkJson) + ',' +
             JsonBool('pending_save', Pending) + ',' +
             JsonBool('written_to_disk', False) + ',' +
             JsonBool('saved', False) + ',' +
@@ -11957,7 +11968,7 @@ Var
     LibPath : String;
     ServerDoc : IServerDocument;
     AgeBefore, AgeAfter : Integer;
-    WasModified, StillModified, ExistsAfter : Boolean;
+    WasModified, StillModified, ExistsAfter, BridgeEdited : Boolean;
 Begin
     LibPath := ExtractJsonValue(Params, 'library_path');
     If LibPath = '' Then
@@ -11978,6 +11989,11 @@ Begin
 
     WasModified := False;
     Try WasModified := ServerDoc.Modified; Except WasModified := False; End;
+    { was_modified is the flag, which read false after real height edits  }
+    { (2026-10-10). bridge_edited says whether THIS bridge marked the file }
+    { since it was last written, which the flag cannot be trusted to say. }
+    BridgeEdited := BridgeEditRecorded(LibPath)
+        Or BridgeEditRecorded(ServerDocFileName(ServerDoc));
     AgeBefore := -1;
     Try AgeBefore := FileAge(LibPath); Except AgeBefore := -1; End;
 
@@ -11989,10 +12005,16 @@ Begin
     StillModified := False;
     Try StillModified := ServerDoc.Modified; Except StillModified := False; End;
     ExistsAfter := FileExists(LibPath);
+    If (AgeAfter <> -1) And (AgeAfter <> AgeBefore) Then
+    Begin
+        ForgetBridgeEdit(LibPath);
+        ForgetBridgeEdit(ServerDocFileName(ServerDoc));
+    End;
 
     Result := BuildSuccessResponse(RequestId,
         '{"library_path":"' + EscapeJsonString(LibPath) + '"'
         + ',"was_modified":' + BoolToJsonStr(WasModified)
+        + ',"bridge_edited":' + BoolToJsonStr(BridgeEdited)
         + ',"still_modified":' + BoolToJsonStr(StillModified)
         + ',"file_exists":' + BoolToJsonStr(ExistsAfter)
         + ',"file_age_before":' + IntToStr(AgeBefore)
@@ -14303,6 +14325,7 @@ Var
     WantLayer, MatchLayer : TLayer;
     IncludePads, Found, FromBoard, MadeCurrent : Boolean;
     TargetWasCurrent, MarkedModified, ParkWanted, Parked, CurrentDuring : Boolean;
+    MarkJson : String;
     Removed, I, Examined, PrimOid, SameRun, RemoveCalls, DoubleListed : Integer;
     StillListed, BoardRemoved, BoardStill : Integer;
     BoardStillJson : String;
@@ -14656,12 +14679,21 @@ Begin
         BoardStillJson := '0';
 
     MarkedModified := False;
+    MarkJson := 'null';
     If (Removed > 0) Or (BoardRemoved > 0) Then
     Begin
         Try PcbLib.Board.ViewManager_FullUpdate; Except End;
-        MarkDocDirtyByPath(LibPath);
-        MarkDocDirtyByPath(PcbLib.Board.FileName);
-        MarkedModified := DocIsModified(LibPath) Or DocIsModified(PcbLib.Board.FileName);
+        { Both paths are marked, as before: the board's own file name and   }
+        { the caller's library_path. MarkedModified is what the marks READ  }
+        { BACK, and mark reports the board's mark unless only the           }
+        { library_path one took.                                            }
+        MarkedModified := MarkDocDirty(PcbLib.Board.FileName);
+        MarkJson := MarkOutcomeJson(0);
+        If MarkDocDirty(LibPath) And (Not MarkedModified) Then
+        Begin
+            MarkedModified := True;
+            MarkJson := MarkOutcomeJson(0);
+        End;
     End;
 
     NoteStr := 'Removed in memory; lib_save_library writes it. Proof it '
@@ -14687,6 +14719,7 @@ Begin
         + '"parked_elsewhere":' + BoolToJsonStr(Parked) + ','
         + '"target_current_during_removal":' + BoolToJsonStr(CurrentDuring) + ','
         + '"marked_modified":' + BoolToJsonStr(MarkedModified) + ','
+        + '"mark":' + MarkJson + ','
         + '"examined":' + IntToStr(Examined) + ','
         + '"layers":[' + RemovedJson + '],'
         + '"pads_included":' + BoolToJsonStr(IncludePads) + ','
@@ -15617,6 +15650,7 @@ Var
     BoardStill : Integer;
     BoardStillJson : String;
     Found, TakeAll, FromBoard, MadeCurrent, TargetWasCurrent, MarkedModified : Boolean;
+    MarkJson : String;
     ParkWanted, Parked, CurrentDuring : Boolean;
 Begin
     LibPath := ExtractJsonValue(Params, 'library_path');
@@ -15695,6 +15729,7 @@ Begin
     BoardRemoved := 0;
     BoardStill := 0;
     MarkedModified := False;
+    MarkJson := 'null';
     ResultsJson := '';
     RefusedJson := '';
     Entries := '';
@@ -15919,9 +15954,17 @@ Begin
     If (Removed > 0) Or (BoardRemoved > 0) Then
     Begin
         Try PcbLib.Board.ViewManager_FullUpdate; Except End;
-        MarkDocDirtyByPath(LibPath);
-        MarkDocDirtyByPath(PcbLib.Board.FileName);
-        MarkedModified := DocIsModified(LibPath) Or DocIsModified(PcbLib.Board.FileName);
+        { Both paths are marked, as before: the board's own file name and   }
+        { the caller's library_path. MarkedModified is what the marks READ  }
+        { BACK, and mark reports the board's mark unless only the           }
+        { library_path one took.                                            }
+        MarkedModified := MarkDocDirty(PcbLib.Board.FileName);
+        MarkJson := MarkOutcomeJson(0);
+        If MarkDocDirty(LibPath) And (Not MarkedModified) Then
+        Begin
+            MarkedModified := True;
+            MarkJson := MarkOutcomeJson(0);
+        End;
     End;
 
     Result := BuildSuccessResponse(RequestId, JsonObj(
@@ -15940,6 +15983,7 @@ Begin
         + JsonInt('double_listed', DoubleListed) + ','
         + JsonRaw('board_removal', BoardJson) + ','
         + JsonBool('marked_modified', MarkedModified) + ','
+        + JsonRaw('mark', MarkJson) + ','
         + JsonBool('written_to_disk', False) + ','
         + JsonBool('pending_save', Removed > 0) + ','
         + JsonStr('note', 'Removed in memory and the library marked dirty. '

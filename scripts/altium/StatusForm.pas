@@ -1522,6 +1522,19 @@ Begin
     { never be what decides whether a document is skipped.                 }
     SaveSkipCleanLibs := False;
     SaveSkipCleanSheets := False;
+    { The bridge's record of the documents it edited starts empty, never   }
+    { as an uninitialised value that Pos would have to make sense of.      }
+    BridgeEditedPaths := '';
+    SaveBridgeRecordPaths := '';
+    SaveBridgeRecordUnwritten := '';
+    MarkLastPath := '';
+    MarkLastFile := '';
+    FindDocVia := 'none';
+    MarkLastVia := 'none';
+    MarkLastFound := False;
+    MarkLastModified := False;
+    MarkLastFocused := -1;
+    MarkLastError := '';
 
     StatusStartTick := GetTickCount;
     StatusRequestCount := 0;

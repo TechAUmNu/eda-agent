@@ -588,9 +588,10 @@ def test_the_delete_marks_the_library_by_its_own_path_too(lib, name):
     flag back.
     """
     body = lib[name]
-    assert "MarkDocDirtyByPath(PcbLib.Board.FileName)" in body
-    assert "MarkDocDirtyByPath(LibPath)" in body
-    assert "DocIsModified(PcbLib.Board.FileName)" in body
+    # Both paths are still marked; since 2026.10.11.01 the flag comes from
+    # the marks' own read-back rather than a separate DocIsModified.
+    assert "MarkedModified := MarkDocDirty(PcbLib.Board.FileName);" in body
+    assert "If MarkDocDirty(LibPath) And (Not MarkedModified) Then" in body
 
 
 def test_the_board_count_is_read_only(lib):

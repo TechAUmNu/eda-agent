@@ -3809,8 +3809,18 @@ def register_library_tools(mcp):
             ``{name, old_height_mm, new_height_mm, read_back_height_mm,
             read_back_before_switch_mm, changed, was_current,
             parked_elsewhere_first, made_current_after_write,
-            current_restored, marked_modified, pending_save,
+            current_restored, marked_modified, mark, pending_save,
             written_to_disk, saved, save_note, note}``.
+            ``marked_modified`` is the library's modified flag READ BACK
+            after the mark, and ``mark`` says which open document the mark
+            found (``found``, ``via``, ``modified_read``,
+            ``focused_modified_read``, ``problem``); on 2026-10-10 the
+            flag read false on every write while the tab showed '*'. When
+            it does not register, ``save_note`` names lib_save_library,
+            and ``app_save_all`` writes the library anyway from the
+            bridge's own record (``written_by_bridge_record``). Prove the
+            height reached the file with ``lib_read_pcblib_file``
+            (``height_mm``).
             ``read_back_height_mm`` and ``changed`` come from the read
             AFTER the footprint switches, not before them and not from
             what was asked. ``pending_save`` is true only when the height
@@ -7666,8 +7676,11 @@ def register_library_tools(mcp):
 
         Returns:
             ``{ok, written_to_disk, mtime_changed, was_modified,
-            still_modified, file_age_before, file_age_after,
-            library_path}``, plus ``reason`` whenever ``ok`` is false
+            bridge_edited, still_modified, file_age_before,
+            file_age_after, library_path}``. ``was_modified`` is Altium's
+            flag, which has read false after real edits (2026-10-10);
+            ``bridge_edited`` says whether a bridge edit marked this file
+            since it was last written, plus ``reason`` whenever ``ok`` is false
             (the house refusal shape; ``code`` and ``details`` when the
             save command itself was refused).
         """

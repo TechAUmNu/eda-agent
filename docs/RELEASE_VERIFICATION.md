@@ -1,4 +1,4 @@
-# Release verification: 2026.10.10.01
+# Release verification: 2026.10.11.01
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by the linter (and by FPC where a section says so) but **not
@@ -68,6 +68,7 @@ works elsewhere cannot be an undeclared identifier:
 | 37, an already-current footprint switched away and back | `LibParkCurrentElsewhere` (LibraryIterator walk + `CurrentComponent`) | yes, `Lib_DeleteFootprintPrimitives` and `Lib_DeleteFootprintPads` (their park-current option) | low: shipped members; new is running it on the DEFAULT path (`footprint_name` empty) of a height write (37.2b) |
 | 37, component_description | `ComponentParamFieldsJson`, which READS DM_Description on IComponent (a read, so the property column names the new routine that makes it) | no, nowhere: shipped code reads DM_Description only on IProjectVariant | HIGH: an unknown member stops the bridge loop on the first component-info call. Read only with with_parameters (the default, so the orchestrator's and the dashboard's calls reach it); run 37.6 FIRST |
 | 37, does the part carry a Description parameter | `SchDescriptionParamState`, which reads DM_LogicalDesignator, then GetSchDocumentByPath and the eParameter walk | no, nowhere as a routine; every member it reads is shipped (DM_LogicalDesignator in the Generic.pas sheet snapshot, the walk and name test in ModifyCompParamIfPresent) | low; reached only when the part has exactly one Description entry equal to its component description |
+| 38, the dirty mark also on the focused document | `SetModified` on the focused view's owner document (Client.GetCurrentView, then OwnerDocument, both read by GetPCBBoardAnywhere already) | yes, `SaveOneDocByDocRef` (on every document it writes) | low: shipped members; new is marking and reading the focused document when it is the marked file, and the save pass writing a document the bridge recorded although its flag reads clean |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -283,7 +284,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.10.01`, `version_match` =
+Expect `altium_script_version` = `2026.10.11.01`, `version_match` =
 `true`, and `mcp_server_version` = `0.6.1`.
 
 Those are two different versions and they fail differently.
@@ -2042,7 +2043,7 @@ sheets, `A`, `B` and `STUBS`, all saved and loaded, plus one open
 library `<lib>` (a scratch copy) that has not been edited. Confirm
 `app_ping` answers after each call.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.10.01`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.01`.
 
 2. **The default save-all leaves an unedited library alone.** Note
    `<lib>`'s mtime. `app_save_all` with no arguments. Expect
@@ -2210,7 +2211,7 @@ compile is what is new.
 Work on the live project only if the .PrjPcb is committed (the check is a
 `git diff`), or on a copy. Focus some other sheet `A` first.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.10.01`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.01`.
 
 2. **A default add writes the project.** Note the .PrjPcb's mtime and two
    SchDoc mtimes. `proj_add_sheet name=ZZ33`. Expect `success: true,
@@ -2295,7 +2296,7 @@ confirm it) and write the project only for a sheet that is on disk.
 
 Focus some other sheet `A` of the focused project first.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.10.01`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.01`.
 
 2. **The add still takes the document save.** `proj_add_sheet name=ZZ35`:
    as step 33's step 2, plus `project_save_route: document_save`.
@@ -2368,7 +2369,7 @@ after `MarkDocDirtyByPath`. They now answer `saved: false` with
 `marked_modified`, `pending_save` and `written_to_disk: false` (the fields
 `lib_delete_footprint` already uses). No Altium call changed; only the reply.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.10.01`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.01`.
 2. **The reply is honest.** Focus a sheet, `obj_modify` a net label to its
    own current text. Expect `saved: false, marked_modified: true,
    pending_save: true, written_to_disk: false`, and the sheet's mtime
@@ -2387,7 +2388,7 @@ libraries skipped.
 
 ---
 
-## 36. Parameter stamps arrive exactly, Description is the component's, new parameters hidden (run live 2026-10-10 on the 2026-10-08 build, results at the end; step 7 FIXED since, re-verify)
+## 36. Parameter stamps arrive exactly, Description is the component's, new parameters hidden (run live 2026-10-10: steps 1-6 and 8-10 on the 2026-10-08 build, step 7 re-verified on the 2026-10-10 build; all PASS)
 
 Field reports 2026-10-08 (carrier project, the bridge build of 2026-10-07), all on
 `sch_set_components_parameters`: a `;` in an MPN or Description arrived as
@@ -2417,15 +2418,15 @@ refusal is no longer reported as a stale script. Empty values are reported in
 `skipped_empty`; control characters other than tab/CR/LF are refused.
 
 **Run live 2026-10-10 on the 2026-10-08 build: every step passed except 7**
-(results at the end of this section). Step 7's two defects are fixed in this
-build (`SetCompParamTextEx`, see "Fixed after the live run" below), so step 7
-must be re-run after the deploy; the other steps need not be. Independent of
+(results at the end of this section). Step 7's two defects were fixed in the
+2026-10-10 build (`SetCompParamTextEx`, see "Fixed after the live run"
+below), and step 7 was re-run live on it the same day: PASS. Independent of
 the version check, the reply echoes `value_encoding: "pct1"`
 only from the new handler, and every sender reports its absence (the tool as
 a `warning`, the plan paths as a note), so step 2 below detects a stale
 script by itself.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.10.01`
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.01`
    (the 2026-10-08 build is the one the results below were measured on),
    `version_match` true.
 2. **Exact values.** On a scratch sheet with a placed part (say `R1`) that has
@@ -2509,7 +2510,7 @@ placement only (hidden creation, the default, was correct):
   the part's orientation (vertical text) and stepped along X, so they ran over
   the Comment text.
 
-### Fixed after the live run (this build; re-verify step 7)
+### Fixed after the live run (the 2026-10-10 build)
 
 `SetCompParamTextEx` skips parameters named Comment and Designator (any case)
 when counting shown rows, and a shown created parameter takes the COMMENT
@@ -2523,11 +2524,32 @@ factory-justified row). Hidden creation is unchanged. Offline proof:
 guard from the source on the live iterator contents and reproduces the
 2026-10-08 build's misplacement exactly ((1200, 2000) vertical where
 (1000, 1900) horizontal was wanted); it fails on that build and passes on
-this one. **Re-run step 7 after the deploy.**
+this one. Re-run live on the 2026-10-10 build: PASS (below).
+
+### Step 7 re-verified live 2026-10-10 (the 2026-10-10 build): PASS
+
+Altium 26.10.1.5, a free scratch sheet holding R1 (upright), R2 (carrying a
+Description parameter shown by hand) and R3 (rotated 90). `app_ping` matched
+before, during and after.
+
+* **R1 upright:** Comment at (1100,2860), Orientation 0, Justification 0. ZZ
+  Shown at (1100,2760) and ZZ Shown2 at (1100,2660), exactly 100 and 200 mil
+  below it, both Orientation 0 / Justification 0, value only (screenshot), not
+  on the origin and not on each other.
+* **R3 rotated, Comment horizontal and set to Center by hand first:** Comment
+  at (4040,3100) Justification 4; the rows at (4040,3000) and (4040,2900),
+  Orientation 0 (the Comment's, not the part's 1), Justification 4. Step -Y.
+* **R2 with one OTHER shown parameter:** the new row lands 200 mil below the
+  Comment; the Comment and Designator were not counted (defect (a) fixed).
+* **Persisted:** after a save the sheet's records match the in-memory
+  positions, carry no `IsHidden=T`, and R3's rows carry `Justification=4`.
+* The bridge answered `app_ping` afterwards. `ShowName` reads empty through
+  `obj_query` (not listed as unreadable), so "value only" rests on the
+  screenshot and the saved records.
 
 ---
 
-## 37. Heights that reach the save, a discard that does not deny itself, the component description under its own key (UNVERIFIED-LIVE)
+## 37. Heights that reach the save, a discard that does not deny itself, the component description under its own key (run live 2026-10-10 on the 2026-10-10 build, results at the end; `marked_modified` fixed since, see section 38)
 
 Three more gaps found on 2026-10-10 with the 2026-10-08 build, by the 3D-link
 agent and the live checker on the multiviewer carrier:
@@ -2585,10 +2607,13 @@ agent and the live checker on the multiviewer carrier:
   reaches `DM_Description`. The dashboard's component drawer, which reads
   `description`, now takes `component_description`.
 
-**Not run live.** SCRIPT_VERSION is `2026.10.10.01` for these and for the
-step 36.7 fix. Run 37.6 FIRST: it is the step that can stop the loop.
+**Run live 2026-10-10 on the 2026-10-10 build** (results at the end of this
+section): the heights reach the file and the discard reply holds, but
+`marked_modified` read false on every height write, fixed in this build
+(section 38). On any re-run, run 37.6 FIRST: it is the step that can stop
+the loop.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.10.01`,
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.01`,
    `version_match` true.
 2. **Heights survive the save.** On a COPY of a .PcbLib with at least three
    footprints, focus footprint A, then `lib_set_footprint_height` on B and C
@@ -2599,8 +2624,12 @@ step 36.7 fix. Run 37.6 FIRST: it is the step that can stop the loop.
    `current_restored: true`, `marked_modified: true`, `pending_save: true`,
    `written_to_disk: false`, and the current footprint is still A.
    `lib_save_library` on that path: `written_to_disk: true`. Then
-   `lib_read_pcblib_file` (or close and reopen the library and
-   `lib_get_footprints`): B and C carry 7.11 and 7.22 mm. This is the field
+   `lib_read_pcblib_file` (it reports each footprint's `height_mm` from the
+   file since this build; or close and reopen the library and
+   `lib_get_footprints`): B and C carry 7.11 and 7.22 mm. On the
+   2026-10-10 build `marked_modified` read FALSE here while the tab showed
+   `*` (results below); this build reports the read-back with a `mark`
+   object, re-verified in section 38. This is the field
    case; on the 2026-10-08 build B and C came back with their old heights.
    If the loop stops on the first call, `PCBM_BeginModify` on a library
    footprint is the suspect (it is shipped in `Lib_SetFootprintDescription`,
@@ -2671,6 +2700,149 @@ step 36.7 fix. Run 37.6 FIRST: it is the step that can stop the loop.
    default component-info call (the orchestrator's, the dashboard drawer's)
    would hit it. Run this step before anything else that needs component
    info.
+
+### Results 2026-10-10 (the 2026-10-10 build)
+
+Run on Altium 26.10.1.5 against a free scratch sheet and a byte copy of the
+carrier library opened as its own (free) document; the carrier files were
+checked untouched (mtime and sha256) before and after. `app_ping` matched
+throughout and the bridge answered every call. Reviewed and corrected after
+the run; the table is the corrected one.
+
+| Step | Result | What was read |
+|---|---|---|
+| 1 version | PASS | the 2026-10-10 build, `version_match` true |
+| 6 single, carrier part U105 (no Description parameter, sheet open) | PASS | `component_description` = the component description, `description_parameter_present: false`, no `Description` key; the bridge stayed up (the first `DM_Description` read on a compiled `IComponent` is safe on AD 26.10.1.5) |
+| 6 batch (U105, R129, C127) and scratch R1 / R2 | PASS | R2 (parameter `old` differing from its description): single and batch agree, `parameters['Description']` = `old`, `component_description` = the component's, present `true`; `DM_Description` does NOT read the parameter, so the two-entry rule is sound |
+| 6b after a stamp, sheet open | PARTIAL | the stamp reply was exactly as specified (`properties_set 1`, `parameters_modified 1`, `description_parameters_also_set` R2, `value_encoding pct1`); the read-back was done only through `proj_get_component_info_many` - the SINGLE handler was not exercised after the stamp |
+| 6b sheet CLOSED | NOT RUN | needs a project: closing a free document drops it from Free Documents, and no scratch project was in scope |
+| 6c `with_parameters=false` | PASS on U105 | neither `component_description` nor `parameters` in the reply. Run on U105, not on R2 as written |
+| 2 heights on non-current B, C | heights PERSIST; `marked_modified` FAIL | every other field as specified (`changed`, read-backs 7.11 / 7.22, `was_current false`, `made_current_after_write`, `current_restored`, `pending_save`, `written_to_disk false`); A stayed current. **`marked_modified: false` on both, where true is required**, while the tab showed `carrier_copy.PcbLib *`. `lib_save_library`: `written_to_disk: true`, `was_modified: false`. The FILE (each footprint's Parameters `HEIGHT`, read with olefile because `lib_read_pcblib_file` had no height field): B 279.9213 mil = 7.11 mm, C 284.252 mil = 7.22 mm |
+| 2b default path, A current, 7.33 | heights PERSIST; `marked_modified` FAIL | `was_current`, `parked_elsewhere_first`, `made_current_after_write`, `current_restored`, `pending_save` all true; `marked_modified: false`; file A = 288.5827 mil = 7.33 mm; A current again |
+| 2, the sweep (`mode=match`) | writes PERSIST, with a caveat | inspected 108, updated 37; after `lib_save_library` all 37 reported items carry their new height in the file, non-current footprints included. Caveat: the library was not freshly opened (A, B, C had been switched to earlier), so `heights_confirmed_on_save: false` stays until a run on a freshly opened copy |
+| 3 same value | PASS | `changed: false`, `pending_save: false`, "nothing to save"; no `*` afterwards |
+| 4 discard reply | PASS | sheet saved, R1 moved by hand (title bar `*`, API `modified:false`), then `discard_changes=true`: `closed true`, **`discarded: null`**, `discard_requested true`, `modified_read false`, `file_unchanged_on_disk true`; sha256 and mtime unchanged, the move gone on reopen. The `null` with a modified title bar is the floor read this reply was rebuilt for |
+| 4b `proj_delete_sheet` discard | NOT RUN | needs a scratch project copy |
+| 5 close without discard | PASS | `discarded false`, `discard_requested false`, `modified_read false`, `file_unchanged_on_disk true` (the sheet and the library copy) |
+
+What it showed beyond the steps: `IServerDocument.Modified` read FALSE on
+documents whose tab showed `*`, for the bridge's height writes AND for a move
+made by hand (step 4). With `app_save_all`'s default (skip a library that
+reads unmodified) those heights would have been left unwritten. The same was
+seen after `obj_modify` on a free scratch sheet: the reply said
+`marked_modified: true` (a constant) and the active document read
+`modified: false` fourteen seconds later with `*` on the title bar. Fixed in
+this build: section 38.
+
+---
+
+## 38. A dirty mark that says whether it took, and a save-all that writes what the bridge edited (UNVERIFIED-LIVE)
+
+Found by section 37's live run (2026-10-10, the 2026-10-10 build): the
+library's modified flag read false after every `lib_set_footprint_height`
+while its tab showed `*`, `lib_save_library` reported `was_modified: false`,
+and `obj_modify` on a free scratch sheet answered `marked_modified: true` (a
+constant) while the sheet read `modified: false`. Both documents were FREE
+documents under a Temp path. `MarkDocDirtyByPath` looked the document up with
+`Client.GetDocumentByPath`, exited silently when that returned Nil and
+swallowed a failing `SetModified`; a free document's `DocumentName` /
+`DM_FullPath` is a bare name, which is what `obj_modify` passed.
+
+Now (Main.pas, Utils.pas, Generic.pas, Library.pas, Application.pas):
+
+* `MarkDocDirty` (wrapped by `MarkDocDirtyByPath`) RETURNS the flag read back
+  after the mark. Its lookup, `FindOpenServerDoc`, tries the exact path, then
+  every project and the free documents compared case- and slash-insensitively
+  (a bare name only when it matches exactly one open file), then the FOCUSED
+  view's own document. It also marks and reads the focused document when that
+  is the same file (the object whose tab shows `*`). `DocIsModified` uses the
+  same lookup, so the read cannot consult a different object from the one the
+  mark wrote.
+* Every reply that claims `marked_modified` carries `mark`: `{path,
+  file_name, found, via (path | walk | walk_name | focused | ambiguous_name
+  | none), modified_read, focused_modified_read (null when the focused
+  document is another file), recorded_for_save_all, problem}`.
+* `obj_modify` reports the read-back (no longer a constant), `pending_save`
+  follows the edit, and a `save_hint` (app_save_all WITHOUT only_modified,
+  or lib_save_library) appears when the flag did not register. Project scope
+  counts `sheets_marked` only for flags that read back and lists the rest in
+  `marks_not_read_back`. `obj_batch_modify` rows carry each op's
+  `marked_modified`, plus `ops_mark_not_read_back` and a `save_hint`.
+  `lib_set_footprint_height` and the two footprint delete handlers carry
+  `mark`.
+* THE BRIDGE'S OWN RECORD. Every path a bridge edit marks goes on
+  `BridgeEditedPaths`. `app_save_all` writes a recorded document even when
+  its flag reads clean (default libraries and `only_modified` sheets
+  included), lists it in `written_by_bridge_record` when its file got newer
+  (`bridge_record_not_written` and a `bridge_record_warning` when it did not)
+  and drops it from the record once it is on disk; `bridge_record_pending` is
+  what the record still holds. Documents nobody edited are still left alone.
+  `lib_save_library` reports `bridge_edited` and also clears the record on a
+  write; a close clears it too.
+* `documents_seen` / `documents_written` now include free documents (the
+  timestamp check walked project members only).
+* `lib_read_pcblib_file` reports each footprint's `height_raw`,
+  `height_mils` and `height_mm` from the file (Python, offline).
+
+**Not run live.** SCRIPT_VERSION is `2026.10.11.01`. Use scratch copies only:
+a scratch sheet opened as a free document, a scratch PROJECT copy with at
+least one sheet, and a byte copy of a .PcbLib opened on its own.
+
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.01`,
+   `version_match` true.
+2. **Read-back on a FREE document.** On the free scratch sheet (focused),
+   `obj_modify` one property (say a part's `Location.X`). Expect
+   `marked_modified: true`, `pending_save: true`, NO `save_hint`, and `mark`
+   with `found: true`, `modified_read: true`, `recorded_for_save_all: true`,
+   `problem` empty; record `mark.via` and `mark.focused_modified_read`.
+   `app_get_active_document` then reads `modified: true`. Then
+   `lib_set_footprint_height` on a non-current footprint of the free library
+   copy: `marked_modified: true`, `mark.found: true`.
+   IF `marked_modified` IS STILL FALSE, record the whole `mark`: `found:
+   false` means the lookup missed (`via` says how far it got); `found: true`
+   with `modified_read: false` and `focused_modified_read: true` means the
+   path lookup reaches a different object from the focused tab; both false
+   means `IServerDocument.Modified` does not reflect `SetModified` on this
+   Altium at all. Either way the reply now SAYS so (`save_hint`), and step 4
+   is the safety net.
+3. **Read-back on a PROJECT document.** In the scratch project copy, the same
+   `obj_modify` with `scope` `doc:<sheet path>` while ANOTHER document is
+   focused: `marked_modified: true`, `mark.found: true`, `mark.via: path`,
+   `mark.focused_modified_read: null`. With `scope` `project`:
+   `sheets_marked` = `sheets_processed`, `marks_not_read_back: []`. One
+   `obj_batch_modify` op on that sheet: its row reads `marked_modified:
+   true`, `ops_mark_not_read_back: 0`, no `save_hint`.
+4. **app_save_all writes a bridge-edited document whose flag reads clean.**
+   Needs an edit whose `marked_modified` reads FALSE: step 2's height write
+   if it still does, else `lib_add_footprint_tracks` or
+   `lib_modify_footprint_pads` (both read `modified:false` on earlier builds).
+   If no bridge edit reads false on this build, record that and skip: the
+   record path is then unreachable in practice. Otherwise, after such an edit
+   on the library copy: `app_save_all` with NO arguments. Expect the copy NOT
+   in `libraries_skipped`, listed in `written_by_bridge_record`, absent from
+   `bridge_record_pending`, its mtime NEWER, and `lib_read_pcblib_file` on it
+   showing the new `height_mm`. Then `app_save_all` again with nothing
+   edited: the copy is back in `libraries_skipped` and its mtime does not
+   move (the record let go). For a sheet: the same with `only_modified=true`
+   after a sheet edit that reads `marked_modified: false`; the sheet is
+   listed in `written_by_bridge_record`.
+5. **lib_save_library says what the flag cannot.** After a bridge edit on the
+   library copy, `lib_save_library`: `bridge_edited: true`,
+   `written_to_disk: true`. A second call straight after: `bridge_edited:
+   false`.
+6. **A pass that writes only free documents counts them.** With only the
+   free scratch sheet edited, `app_save_all`: `documents_written` at least 1
+   and `saved: true` (before this build such a pass could read "not one got
+   newer on disk").
+7. **Nothing unedited is written.** Then, with nothing edited,
+   `app_save_all only_modified=true`: `documents_attempted: 0`,
+   `written_by_bridge_record: []`, `bridge_record_pending: []`, no mtime
+   moves.
+8. **The file reader shows heights (offline, VERIFIED 2026-10-11).**
+   `lib_read_pcblib_file` on the carrier library, footprint
+   `ADM6-60-01_5-L-4-2-A-TR`: `height_raw` `130.7087mil`, `height_mils`
+   130.7087, `height_mm` 3.32; every one of its 108 footprints reports a
+   height. Needs no Altium.
 
 ---
 

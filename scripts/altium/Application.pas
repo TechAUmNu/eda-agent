@@ -319,6 +319,13 @@ Begin
     Client.CloseDocument(ServerDoc);
     Again := Nil;
     Try Again := Client.GetDocumentByPath(FilePath); Except Again := Nil; End;
+    { A closed document holds no edits for a later save-all to write, and   }
+    { one reopened clean must not be rewritten from a stale record.          }
+    If Again = Nil Then
+    Begin
+        ForgetBridgeEdit(FilePath);
+        ForgetBridgeEdit(DiskPath);
+    End;
     AgeAfter := -1;
     Try AgeAfter := FileAge(DiskPath); Except AgeAfter := -1; End;
 
@@ -731,6 +738,8 @@ Begin
         SaveAttempts := 0;
         SaveSkipped := 0;
         SaveSkippedPaths := '';
+        SaveBridgeRecordPaths := '';
+        SaveBridgeRecordUnwritten := '';
         SaveSkipCleanLibs := Not IncludeLibs;
         SaveSkipCleanSheets := OnlyModified;
         SaveAllDirty(0);
@@ -777,11 +786,28 @@ Begin
         { on disk, and a path mixed in among skipped sheets is easy to miss.   }
         { So the libraries get their own key, and a warning rides on EVERY     }
         { branch below whenever one was skipped.                               }
+        { WRITTEN FROM THE BRIDGE'S OWN RECORD. A document this bridge  }
+        { marked whose flag read clean, which the policy would have left }
+        { alone (2026-10-10: a library and a scratch sheet read          }
+        { Modified False with '*' on their tabs). Listed when its file   }
+        { got newer; bridge_record_not_written when it was written to    }
+        { and its file did not move. bridge_record_pending counts what   }
+        { the record still holds after the pass.                          }
         Policy := ',"include_libraries":' + BoolToJsonStr(IncludeLibs)
             + ',"only_modified":' + BoolToJsonStr(OnlyModified)
             + ',"documents_skipped":' + IntToStr(SaveSkipped)
             + ',"skipped_unmodified":[' + SkippedJson + ']'
-            + ',"libraries_skipped":[' + LibSkippedJson + ']';
+            + ',"libraries_skipped":[' + LibSkippedJson + ']'
+            + ',"written_by_bridge_record":' + PipeListToJsonArray(SaveBridgeRecordPaths)
+            + ',"bridge_record_not_written":' + PipeListToJsonArray(SaveBridgeRecordUnwritten)
+            + ',"bridge_record_pending":' + PipeListToJsonArray(BridgeEditedPaths);
+        If SaveBridgeRecordUnwritten <> '' Then
+            Policy := Policy + ',"bridge_record_warning":"a document this '
+                + 'bridge edited read unmodified, was written from the '
+                + 'record, and its file did NOT get newer (see '
+                + 'bridge_record_not_written). Its edit may not be on disk: '
+                + 'save a library with lib_save_library, a sheet with '
+                + 'proj_save, and check the file."';
         If LibSkipped > 0 Then
             Policy := Policy + ',"warning":"' + IntToStr(LibSkipped)
                 + ' library file(s) read unmodified and were NOT written '

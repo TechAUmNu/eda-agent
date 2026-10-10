@@ -426,6 +426,19 @@ def register_application_tools(mcp):
         library sits behind ``saved:true`` and ``still_dirty:0`` in the
         usual case, which is exactly where an unflagged edit would hide.
 
+        WHAT THIS BRIDGE EDITED IS WRITTEN WHATEVER ITS FLAG SAYS. MEASURED
+        2026-10-10: after ``lib_set_footprint_height`` and after
+        ``obj_modify`` on a free scratch sheet, the document read modified
+        false while its tab showed '*', so the default (libraries) and
+        ``only_modified`` (sheets) would have left those edits unwritten.
+        Every document a bridge edit marks goes on the bridge's own record;
+        this call writes a recorded document even when its flag reads
+        clean, lists it in ``written_by_bridge_record`` when its file got
+        newer (``bridge_record_not_written`` plus a
+        ``bridge_record_warning`` when it did not), and drops it from the
+        record once it is on disk. Documents nobody edited are still left
+        alone. ``bridge_record_pending`` is what the record still holds.
+
         Args:
             include_libraries: also write .SchLib / .PcbLib documents that
                 read unmodified (the pre-2026-10-06 behaviour). Default
@@ -441,9 +454,12 @@ def register_application_tools(mcp):
             ``still_dirty``, ``include_libraries``, ``only_modified``,
             ``documents_skipped``, ``skipped_unmodified`` (paths, one entry
             per file), ``libraries_skipped`` (the library paths among them)
-            with a ``warning`` whenever that is non-empty, and a
-            ``reason`` / ``note`` when documents remain unsaved or nothing
-            was written.
+            with a ``warning`` whenever that is non-empty,
+            ``written_by_bridge_record`` / ``bridge_record_not_written`` /
+            ``bridge_record_pending`` (see above), and a ``reason`` /
+            ``note`` when documents remain unsaved or nothing was written.
+            Free documents (open outside any project) are counted in
+            ``documents_seen`` and ``documents_written`` too.
         """
         params: dict[str, Any] = {}
         if include_libraries:

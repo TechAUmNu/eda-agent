@@ -1604,9 +1604,10 @@ Var
     SchDoc : ISch_Document;
     ServerDoc : IServerDocument;
     I, TotalMatched, SheetsProcessed, SheetsMarked : Integer;
-    FilePath, JsonItems : String;
+    FilePath, JsonItems, MarkMissedJson : String;
     IsMutating : Boolean;
 Begin
+    MarkMissedJson := '';
     Workspace := GetWorkspace;
     If Workspace = Nil Then
     Begin
@@ -1661,8 +1662,14 @@ Begin
             // SetModified + DoFileSave and wrote straight to disk, which
             // was never true and is how three tool docstrings came to
             // promise a save that never happened.
-            MarkDocDirtyByPath(FilePath);
-            Inc(SheetsMarked);
+            { Counted as marked only when the flag reads back modified; the }
+            { rest are named so a clean read is never mistaken for a mark.  }
+            If MarkDocDirty(FilePath) Then Inc(SheetsMarked)
+            Else
+            Begin
+                If MarkMissedJson <> '' Then MarkMissedJson := MarkMissedJson + ',';
+                MarkMissedJson := MarkMissedJson + MarkOutcomeJson(0);
+            End;
         End;
 
         Inc(SheetsProcessed);
@@ -1682,6 +1689,7 @@ Begin
               documents were only marked dirty; app_save_all is what
               writes them. }
             ',"sheets_marked":' + IntToStr(SheetsMarked)
+            + ',"marks_not_read_back":[' + MarkMissedJson + ']'
             + ModifyOutcomeJson(0) + '}');
 End;
 
@@ -1696,7 +1704,7 @@ Var
     SchDoc : ISch_Document;
     ServerDoc : IServerDocument;
     TotalMatched : Integer;
-    JsonItems, DocPath, MarkedStr : String;
+    JsonItems, DocPath, MarkedStr, MarkJson, HintJson : String;
     IsMutating, Marked : Boolean;
 Begin
     SchDoc := SchServer.GetCurrentSchDocument;
@@ -1713,11 +1721,21 @@ Begin
 
     IsMutating := (Mode = 'modify') Or (Mode = 'delete') Or (Mode = 'create');
     Marked := False;
+    MarkJson := 'null';
+    HintJson := '';
     If IsMutating Then
     Begin
         Try SchDoc.GraphicallyInvalidate; Except End;
-        MarkDocDirtyByPath(DocPath);
-        Marked := True;
+        { marked_modified IS THE FLAG READ BACK, not a constant. MEASURED   }
+        { 2026-10-10: this said true after an obj_modify on a free scratch  }
+        { sheet that read modified:false 14 s later with '*' on its title   }
+        { bar. The mark had exited silently on a lookup miss (a free sheet's }
+        { DocumentName is a bare name). mark says what was found; save_hint  }
+        { names the route that still writes it when the flag did not take.  }
+        Marked := MarkDocDirty(DocPath);
+        MarkJson := MarkOutcomeJson(0);
+        If Not Marked Then
+            HintJson := ',"save_hint":"' + EscapeJsonString(MarkSaveHint(False, False)) + '"';
     End;
 
     If Mode = 'query' Then
@@ -1736,12 +1754,15 @@ Begin
         { (MarkDocDirtyByPath), as the project-scope path already says with   }
         { sheets_marked; Lib_DeleteFootprint's pending_save/written_to_disk    }
         { are the house fields for a deferred write.                           }
+        { pending_save: the edit is in memory and not on disk whether or   }
+        { not the flag registered, so it follows the mutation, not Marked.  }
         If Marked Then MarkedStr := 'true' Else MarkedStr := 'false';
         Result := BuildSuccessResponse(RequestId,
             '{"matched":' + IntToStr(TotalMatched) + ',"saved":false'
             + ',"marked_modified":' + MarkedStr
-            + ',"pending_save":' + MarkedStr
+            + ',"pending_save":' + BoolToJsonStr(IsMutating)
             + ',"written_to_disk":false'
+            + ',"mark":' + MarkJson + HintJson
             + ModifyOutcomeJson(0) + '}');
     End;
 End;
@@ -1757,7 +1778,7 @@ Var
     SchDoc : ISch_Document;
     ServerDoc : IServerDocument;
     TotalMatched : Integer;
-    JsonItems, MarkedStr : String;
+    JsonItems, MarkedStr, MarkJson, HintJson : String;
     IsMutating, Marked : Boolean;
 Begin
 
@@ -1780,11 +1801,21 @@ Begin
 
     IsMutating := (Mode = 'modify') Or (Mode = 'delete') Or (Mode = 'create');
     Marked := False;
+    MarkJson := 'null';
+    HintJson := '';
     If IsMutating Then
     Begin
         Try SchDoc.GraphicallyInvalidate; Except End;
-        MarkDocDirtyByPath(DocPath);
-        Marked := True;
+        { marked_modified IS THE FLAG READ BACK, not a constant. MEASURED   }
+        { 2026-10-10: this said true after an obj_modify on a free scratch  }
+        { sheet that read modified:false 14 s later with '*' on its title   }
+        { bar. The mark had exited silently on a lookup miss (a free sheet's }
+        { DocumentName is a bare name). mark says what was found; save_hint  }
+        { names the route that still writes it when the flag did not take.  }
+        Marked := MarkDocDirty(DocPath);
+        MarkJson := MarkOutcomeJson(0);
+        If Not Marked Then
+            HintJson := ',"save_hint":"' + EscapeJsonString(MarkSaveHint(False, False)) + '"';
     End;
 
     If Mode = 'query' Then
@@ -1803,12 +1834,15 @@ Begin
         { (MarkDocDirtyByPath), as the project-scope path already says with   }
         { sheets_marked; Lib_DeleteFootprint's pending_save/written_to_disk    }
         { are the house fields for a deferred write.                           }
+        { pending_save: the edit is in memory and not on disk whether or   }
+        { not the flag registered, so it follows the mutation, not Marked.  }
         If Marked Then MarkedStr := 'true' Else MarkedStr := 'false';
         Result := BuildSuccessResponse(RequestId,
             '{"matched":' + IntToStr(TotalMatched) + ',"saved":false'
             + ',"marked_modified":' + MarkedStr
-            + ',"pending_save":' + MarkedStr
+            + ',"pending_save":' + BoolToJsonStr(IsMutating)
             + ',"written_to_disk":false'
+            + ',"mark":' + MarkJson + HintJson
             + ModifyOutcomeJson(0) + '}');
     End;
 End;
@@ -2534,7 +2568,8 @@ End;
 
 Function Gen_BatchModify(Params : String; RequestId : String) : String;
 Var
-    Operations, OpStr, Remaining, OpResult, Note : String;
+    Operations, OpStr, Remaining, OpResult, Note, MarkedOp, HintJson : String;
+    MarksUnread : Integer;
     Scope, ObjTypeStr, FilterStr, SetStr : String;
     ScopeType, ScopePath : String;
     ObjTypeInt, PipePos : Integer;
@@ -2552,6 +2587,7 @@ Begin
     TotalMatched := 0;
     OpCount := 0;
     OpSkipped := 0;
+    MarksUnread := 0;
     ResultJson := '';
     ResultsJson := '';
     Remaining := Operations;
@@ -2568,6 +2604,7 @@ Begin
         FilterStr := '';
         SetStr := '';
         Note := '';
+        MarkedOp := '';
 
         If UseTilde Then
         Begin
@@ -2606,6 +2643,7 @@ Begin
         { to skip is RECORDED, never silently swallowed: silent-drop is     }
         { what made the original bug invisible.                             }
         OpMatched := 0;
+        MarkedOp := '';
         ObjTypeInt := -1;
         ScopeType := '';
         ScopePath := '';
@@ -2662,6 +2700,11 @@ Begin
                 OpResult := ProcessActiveDoc(ObjTypeInt, FilterStr, '', SetStr, 'modify', RequestId, 0);
 
             OpMatched := StrToIntDef(ExtractJsonValue(OpResult, 'matched'), 0);
+            { The op's own read-back of the dirty flag (sheet scopes only;  }
+            { '' where the helper reports none). It was dropped here, so a   }
+            { batch could not show a mark that did not take (2026-10-10).    }
+            MarkedOp := ExtractJsonValue(OpResult, 'marked_modified');
+            If MarkedOp = 'false' Then Inc(MarksUnread);
             TotalMatched := TotalMatched + OpMatched;
             If Pos('"success":false', OpResult) > 0 Then
             Begin
@@ -2682,8 +2725,13 @@ Begin
             '{"object_type":"' + EscapeJsonString(ObjTypeStr) + '"' +
             ',"filter":"' + EscapeJsonString(FilterStr) + '"' +
             ',"matched":' + IntToStr(OpMatched) +
+            ',"marked_modified":' + MarkedOpJson(MarkedOp) +
             ',"note":"' + EscapeJsonString(Note) + '"}';
     End;
+
+    HintJson := '';
+    If MarksUnread > 0 Then
+        HintJson := ',"save_hint":"' + EscapeJsonString(MarkSaveHint(False, False)) + '"';
 
     { Surface unknown / failed property writes so they stop being silent. }
     ResultJson :=
@@ -2691,6 +2739,7 @@ Begin
         ',"operations_skipped":' + IntToStr(OpSkipped) +
         ',"total_matched":' + IntToStr(TotalMatched) +
         ',"results":[' + ResultsJson + ']' +
+        ',"ops_mark_not_read_back":' + IntToStr(MarksUnread) + HintJson +
         ',"properties":' + RenderPropertyDiagJson(0) + '}';
     Result := BuildSuccessResponse(RequestId, ResultJson);
 End;
