@@ -116,3 +116,54 @@ def test_the_tool_docstring_explains_the_three_values():
     for word in ("null", "modified_read", "file_unchanged_on_disk",
                  "discard_requested"):
         assert word in doc, word
+
+
+# ------------------------------------------------- the sheet delete, same field
+
+_GEN = Path(__file__).resolve().parents[1] / "scripts" / "altium" / \
+    "Generic.pas"
+
+
+def _delete_discarded(discard: bool, loaded: bool, closed: bool,
+                      modified_read: bool):
+    """``discarded`` from Gen_DeleteSheet, from its source. Review: after
+    the fix above the sheet delete still replied ``Discard And
+    WasModified``, the same false built from a floor, so one field name
+    carried two meanings across two tools."""
+    body = load(_GEN)["Gen_DeleteSheet"]
+    if "BoolToJsonStr(Discard And WasModified)" in body:
+        return discard and modified_read
+    m = re.search(
+        r"If \(Not DiscardRan\) Or \(Not Closed\) Then DiscardedJson := "
+        r"'(\w+)'\s*Else If WasModified Then DiscardedJson := '(\w+)'\s*"
+        r"Else DiscardedJson := '(\w+)';", body)
+    assert m, "the discarded decision is not in a shape this test reads"
+    ran = discard and loaded          # DiscardRan is set beside SetModified
+    if not ran or not closed:
+        word = m.group(1)
+    else:
+        word = m.group(2) if modified_read else m.group(3)
+    return {"true": True, "false": False, "null": None}[word]
+
+
+def test_the_sheet_delete_uses_the_same_three_values():
+    assert _delete_discarded(True, True, True, False) is None
+    assert _delete_discarded(True, True, True, True) is True
+    assert _delete_discarded(False, True, True, False) is False
+    # Nothing loaded, or the named document not the one closed: nothing
+    # was discarded, whatever was asked.
+    assert _delete_discarded(True, False, True, False) is False
+    assert _delete_discarded(True, True, False, True) is False
+
+
+def test_the_sheet_delete_sets_its_flag_beside_the_clear():
+    body = load(_GEN)["Gen_DeleteSheet"]
+    assert re.search(
+        r"If Discard Then\s*Begin\s*Try ServerDoc\.SetModified\(False\); "
+        r"Except End;\s*DiscardRan := True;\s*End;", body)
+    assert body.index("DiscardRan := False;") < \
+        body.index("DiscardRan := True;")
+    for field in ('"discarded":\' + DiscardedJson',
+                  '"discard_requested":\' + BoolToJsonStr(Discard)',
+                  '"modified_read":\' + BoolToJsonStr(WasModified)'):
+        assert field in body, field

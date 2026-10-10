@@ -1129,8 +1129,10 @@ def register_generic_tools(mcp):
         has it (its visibility and position are left alone), otherwise
         CREATED, hidden and placed on the component, not at the sheet
         origin. Pass ``visible=True`` to show the parameters this call
-        creates (value only, not name), stacked 100 mil apart beside the
-        part's Comment and turned with the part.
+        creates (value only, not name), stacked 100 mil apart away from
+        the part's Comment label (below a horizontal Comment, beside a
+        vertical one) and turned and justified like the Comment; only
+        other shown parameters add rows.
 
         An empty value (``""`` or ``None``) writes nothing: a parameter
         cannot be CLEARED by this tool. Such keys are reported in
@@ -1524,7 +1526,13 @@ def register_generic_tools(mcp):
         Returns:
             ``success`` plus one read-back per step: ``removed`` /
             ``still_member`` (membership re-read), ``was_loaded`` /
-            ``closed`` (looked up again after the close),
+            ``closed`` (looked up again after the close), ``discarded``
+            / ``discard_requested`` / ``modified_read`` (as
+            ``app_close_document``: ``discarded`` is ``true`` when the
+            sheet read modified and its edits were thrown away, ``null``
+            when ``discard`` closed a sheet whose modified read said clean,
+            a floor that can miss editor edits, and ``false`` when nothing
+            was discarded),
             ``previously_focused`` / ``previously_focused_still_open`` (the
             document that had the focus, which must still be loaded),
             ``project_saved`` / ``project_save_route`` (``document_save``,

@@ -24,7 +24,11 @@ things were wrong on the live sheet:
     (Comment 0/2 -> step -Y, 1/3 -> step +X), so they stack like the
     Comment does.
 
-A hidden created parameter (the default) is not touched by either change.
+A review of that fix added: the shown row also copies the Comment's
+Justification, since the 100 mil step clears the Comment only when both
+labels share orientation AND justification.
+
+A hidden created parameter (the default) is not touched by any of this.
 
 The Pascal cannot run here. The counting condition is lifted out of the
 comment-free source and EVALUATED on the iterator contents the live sheet
@@ -155,6 +159,18 @@ def test_rows_step_perpendicular_to_the_comment_text():
         shown)
 
 
+def test_a_shown_row_takes_the_comment_justification():
+    """Review of the 36.7 fix: the orientation alone is not enough. A 100
+    mil step clears the Comment only when both labels share orientation
+    AND justification; a TopLeft- or Center-justified Comment (common
+    after a rotate or auto-position) overlaps a factory-justified row. So
+    the shown row copies the Comment's Justification too, guarded like
+    every other optional write, and only on the shown path."""
+    shown = _shown_block()
+    line = "Try NewParam.Justification := Comp.Comment.Justification; "         "Except End;"
+    assert line in shown, "the shown row must take the Comment's justification"
+    assert shown.index("NewParam.Orientation := Ori;") < shown.index(line)
+
 def test_the_field_case_now_stacks_under_the_comment():
     """Part at Orientation 1, Comment at Orientation 0, located (1000,
     2000) mils, nothing else shown. The rows must go to (1000, 1900),
@@ -184,4 +200,5 @@ def test_a_hidden_created_parameter_is_untouched():
     create = ex[ex.index("Else", start):]
     hidden = create[:create.index("If ShowNew Then")]
     assert "Orientation" not in hidden and "Comment" not in hidden
+    assert "Justification" not in hidden
     assert "NewParam.IsHidden := Not ShowNew;" in hidden

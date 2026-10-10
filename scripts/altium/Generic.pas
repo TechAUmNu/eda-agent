@@ -3456,11 +3456,11 @@ Var
     ServerDoc, Again : IServerDocument;
     I, SchCount, AgeBefore, AgeAfter : Integer;
     Found, FoundOther, Discard, SaveProject, DeleteIt : Boolean;
-    WasLoaded, WasModified, StillMember, Closed, NameMatches : Boolean;
+    WasLoaded, WasModified, StillMember, Closed, NameMatches, DiscardRan : Boolean;
     FocusedStillOpen, ProjectSaved, ListedOnDisk, FileStillOnDisk, Deleted : Boolean;
     Success, FileChecked, WasFocusedProject : Boolean;
     FileState : Integer;
-    ListedJson, SaveRoute : String;
+    ListedJson, SaveRoute, DiscardedJson : String;
 Begin
     FilePath := ExtractJsonValue(Params, 'file_path');
     ProjectPath := ExtractJsonValue(Params, 'project_path');
@@ -3587,6 +3587,7 @@ Begin
     { process that acts on whatever is focused. The FileName check is the    }
     { guarantee that the document closed is the one asked for.               }
     Closed := True;
+    DiscardRan := False;
     Why := '';
     ServerDoc := Nil;
     Try ServerDoc := Client.GetDocumentByPath(MemberPath); Except ServerDoc := Nil; End;
@@ -3604,7 +3605,10 @@ Begin
         Else
         Begin
             If Discard Then
+            Begin
                 Try ServerDoc.SetModified(False); Except End;
+                DiscardRan := True;
+            End;
             Try Client.CloseDocument(ServerDoc); Except End;
             Again := Nil;
             Try Again := Client.GetDocumentByPath(MemberPath); Except Again := Nil; End;
@@ -3686,12 +3690,21 @@ Begin
     { and gone", which is the claim an unread file cannot support.          }
     If FileChecked Then ListedJson := BoolToJsonStr(ListedOnDisk)
     Else ListedJson := 'null';
+    { discarded follows App_CloseDocument (2026-10-10): the modified read  }
+    { is a floor, so a discard over a CLEAN read is unknown (null), not    }
+    { false. false = nothing was discarded: discard not asked, the sheet   }
+    { was not loaded, or the named document was not the one closed.       }
+    If (Not DiscardRan) Or (Not Closed) Then DiscardedJson := 'false'
+    Else If WasModified Then DiscardedJson := 'true'
+    Else DiscardedJson := 'null';
     Data := '{"success":' + BoolToJsonStr(Success)
         + ',"removed":true,"still_member":false'
         + ',"file_path":"' + EscapeJsonString(MemberPath) + '"'
         + ',"was_loaded":' + BoolToJsonStr(WasLoaded)
         + ',"closed":' + BoolToJsonStr(Closed)
-        + ',"discarded":' + BoolToJsonStr(Discard And WasModified)
+        + ',"discarded":' + DiscardedJson
+        + ',"discard_requested":' + BoolToJsonStr(Discard)
+        + ',"modified_read":' + BoolToJsonStr(WasModified)
         + ',"previously_focused":"' + EscapeJsonString(FocusedBefore) + '"'
         + ',"previously_focused_still_open":' + BoolToJsonStr(FocusedStillOpen)
         + ',"project_path":"' + EscapeJsonString(ProjFile) + '"'
@@ -8379,7 +8392,11 @@ End;
 {    the COMMENT label's orientation and step perpendicular to its text:     }
 {    Comment orientation 0/2 steps -Y (rows below it), 1/3 steps +X (columns  }
 {    beside it). The part's orientation is only the fallback when the        }
-{    Comment cannot be read.                                                  }
+{    Comment cannot be read. It also copies the Comment's Justification     }
+{    (review): a 100 mil step clears the Comment only when both labels have  }
+{    the same orientation AND the same justification, and a Comment that is  }
+{    TopLeft or Center justified (common after a rotate or auto-position)    }
+{    would otherwise still overlap a factory-justified row.                  }
 { A HIDDEN created parameter (the default) is untouched by either: it sits on }
 { the component at the factory orientation, as before.                        }
 Function SetCompParamTextEx(Comp : ISch_Component; ParamName, ParamValue : String;
@@ -8450,6 +8467,7 @@ Begin
                     NewParam.Location := CompLoc;
                 Except End;
                 Try NewParam.Orientation := Ori; Except End;
+                Try NewParam.Justification := Comp.Comment.Justification; Except End;
             End;
             Comp.AddSchObject(NewParam);
             SchRegisterObject(Comp, NewParam);
