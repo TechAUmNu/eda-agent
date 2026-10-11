@@ -86,7 +86,7 @@ Var
     I, StartPos : Integer;
     Dots, Digits, Exponents : Integer;
     IntSig, FracZeros, ExpSig, ExpVal, Mag : Integer;
-    SeenFrac : Boolean;
+    SeenFrac, ExpNeg : Boolean;
     Ch : String;
 Begin
     S := Trim(S);
@@ -104,6 +104,7 @@ Begin
     SeenFrac := False;   { a non-zero digit after '.' has been seen }
     ExpSig := 0;
     ExpVal := 0;
+    ExpNeg := False;
     For I := StartPos To Length(S) Do
     Begin
         Ch := Copy(S, I, 1);
@@ -150,6 +151,16 @@ Begin
             End;
             If (Ch < '0') Or (Ch > '9') Then Exit;
         End
+        Else If ((Ch = '-') Or (Ch = '+')) And (I > StartPos)
+            And ((Copy(S, I - 1, 1) = 'e') Or (Copy(S, I - 1, 1) = 'E')) Then
+        Begin
+            { The exponent's own sign. The 'e' branch above has already
+              checked that a digit follows it. Before 2026-10-11 the loop
+              exited here, so '1e-05' (Python's json form for a small
+              float) and '1e+5' were refused and the caller's Default
+              silently replaced the value. }
+            If Ch = '-' Then ExpNeg := True;
+        End
         Else
             Exit;                          { anything else is not a number }
     End;
@@ -162,9 +173,12 @@ Begin
       Every value that parsed before still does, except an order-308 value
       (1e308 .. 1.79e308) and an exponent of a million or more that a
       million-digit fraction would have pulled back into range.
-      The exponent is never negative here: the loop above meets the sign
-      after 'e' as a non-number and exits, so a signed exponent is refused
-      already. Allowing one needs an underflow rule for this too. }
+      A negative exponent gets the mirror rule: a non-zero value of order
+      -308 or below (under the smallest normal Double, 2.2e-308) is
+      refused rather than handed to StrToFloat, whose underflow behaviour
+      is unmeasured in this engine; the caller's Default stands, as for
+      any refused value. A zero mantissa (0e-999) is still zero. }
+    If ExpNeg Then ExpVal := -ExpVal;
     If IntSig > 0 Then
         Mag := IntSig - 1 + ExpVal
     Else If SeenFrac Then
@@ -172,6 +186,7 @@ Begin
     Else
         Mag := 0;                          { the mantissa is zero }
     If Mag > 307 Then Exit;
+    If ((IntSig > 0) Or SeenFrac) And (Mag < -307) Then Exit;
     Result := Digits > 0;
 End;
 

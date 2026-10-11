@@ -263,6 +263,44 @@ def test_nothing_accepted_overflows():
             assert _converts(s), s
 
 
+# A SIGNED exponent (2026-10-11). Python's json writes small floats as
+# '1e-05'; the loop used to meet the sign after 'e' as a non-number and exit,
+# so the caller's Default silently replaced the value.
+@pytest.mark.parametrize("s", [
+    "1e-05", "1e-5", "1E+5", "-1.5e-03", "+2.5E-307", "1e+307", "0e-999",
+    "0.0e-5", "0." + "0" * 5 + "1e-300", "12.5e-2"])
+def test_a_signed_exponent_is_accepted(s):
+    assert _converts(s)
+    assert _is_float()(s) is True, s
+
+
+@pytest.mark.parametrize("s", [
+    "1e-", "1e+", "1e-+5", "1e--5", "1e5-", "1-5", "-e5", "1e-5.5", "e-5",
+    "1e-5e2"])
+def test_a_misplaced_sign_is_still_refused(s):
+    assert _is_float()(s) is False, s
+
+
+@pytest.mark.parametrize("s", ["1e-308", "1e-400", "5e-324", "0.01e-306",
+                               "1e-1000000"])
+def test_an_underflowing_value_is_refused(s):
+    """Order -308 or below (under the smallest normal Double) is refused,
+    the mirror of the order-308 overflow ceiling: StrToFloat's underflow
+    behaviour in this engine is unmeasured, so the Default stands."""
+    assert _is_float()(s) is False, s
+
+
+def test_nothing_accepted_with_signs_overflows_or_underflows():
+    f = _is_float()
+    rnd = random.Random(29)
+    alpha = "0123456789.eE+-"
+    for _ in range(20000):
+        s = "".join(rnd.choice(alpha) for _ in range(rnd.randint(1, 9)))
+        if f(s):
+            v = float(s)
+            assert abs(v) != float("inf"), s
+            assert v == 0.0 or abs(v) >= 1e-307, s
+
 # ---------------------------------------------------------------------------
 # 6. Layer classes
 # ---------------------------------------------------------------------------
