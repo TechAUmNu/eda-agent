@@ -273,7 +273,7 @@ def _resolve(client):
 
 
 @pytest.mark.parametrize("path", [r"C:\nope.PcbDoc", r"C:\x\sheet.SchDoc",
-                                  r"C:\x\lib.PcbLib", r"\\srv\gone.PcbDoc"])
+                                  r"C:\x\gone.PcbLib", r"\\srv\gone.PcbDoc"])
 def test_resolve_pcb_board_falls_back_without_opening_what_cannot_be_a_board(
         path):
     client = _Client(on_disk={r"C:\x\sheet.SchDoc", r"C:\x\lib.PcbLib"})

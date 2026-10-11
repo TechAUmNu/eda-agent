@@ -1369,10 +1369,17 @@ End;
 { open (GetDocumentByPath answers, which covers an unsaved new document that }
 { has no file yet) or one on disk. '' is never present.                      }
 Function DocumentPresent(Path : String) : Boolean;
+Var
+    Doc : IServerDocument;
 Begin
     Result := False;
     If Trim(Path) = '' Then Exit;
-    If Client.GetDocumentByPath(Path) <> Nil Then
+    { Fault-only backstop (not counted), as every other lookup in this unit: }
+    { this runs in front of OpenDocument calls that used to sit inside a     }
+    { Try, so a lookup that raised on an odd path must not escape them now.  }
+    Doc := Nil;
+    Try Doc := Client.GetDocumentByPath(Path); Except Doc := Nil; End;
+    If Doc <> Nil Then
         Result := True
     Else
         Result := FileExists(Path);
@@ -1420,6 +1427,7 @@ Var
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
+    SrvDoc : IServerDocument;
     Kind, Path : String;
     P, I : Integer;
 Begin
@@ -1439,7 +1447,9 @@ Begin
             Path := '';
             Try Path := Doc.DM_FullPath; Except End;
             If Path = '' Then Continue;
-            If Client.GetDocumentByPath(Path) <> Nil Then
+            SrvDoc := Nil;
+            Try SrvDoc := Client.GetDocumentByPath(Path); Except SrvDoc := Nil; End;
+            If SrvDoc <> Nil Then
             Begin
                 Result := True;
                 Exit;
@@ -1489,6 +1499,29 @@ Begin
         If (Kind <> '') And (UpperCase(Kind) <> 'PCBLIB') Then Exit;
     End;
     Result := PcbEditorDocOpen(0);
+End;
+
+{ PcbLibMayBeCurrent for a handler that was given (or defaulted to) LibPath. }
+{ Also True when a .PcbLib is OPEN AT LibPath (GetDocumentByPath answers),   }
+{ whatever the DM focus says: an open PcbLib is a PCB-server document, so   }
+{ the server is loaded and naming PCBServer cannot raise. That covers a DM  }
+{ focus left STALE (not Nil) by a programmatic CloseObject / OpenObject -   }
+{ the lib_reload_library case, RELEASE_VERIFICATION probe P32 - which      }
+{ PcbLibMayBeCurrent alone would refuse although the lookup works today.   }
+{ Never stricter than PcbLibMayBeCurrent, so swapping it in can only keep  }
+{ a call that works today. LibPath '' (or not a .PcbLib) adds nothing.     }
+Function PcbLibMayBeCurrentAt(LibPath : String) : Boolean;
+Var
+    SrvDoc : IServerDocument;
+Begin
+    Result := True;
+    If UpperCase(ExtractFileExt(Trim(LibPath))) = '.PCBLIB' Then
+    Begin
+        SrvDoc := Nil;
+        Try SrvDoc := Client.GetDocumentByPath(LibPath); Except SrvDoc := Nil; End;
+        If SrvDoc <> Nil Then Exit;
+    End;
+    Result := PcbLibMayBeCurrent(0);
 End;
 
 {..............................................................................}
@@ -1614,6 +1647,7 @@ End;
 Function ResolvePCBBoard(Path : String) : IPCB_Board;
 Var
     ServerDoc : IServerDocument;
+    Ext : String;
 Begin
     Result := Nil;
     If Path = '' Then
@@ -1621,20 +1655,22 @@ Begin
         Result := GetPCBBoardAnywhere(0);
         Exit;
     End;
-    { CHECK FIRST, then open. A board_path that names no PCB document (a    }
-    { .SchDoc, a .PcbLib) or an absolute path that is neither open nor on   }
-    { disk takes the fallback below without calling OpenDocument: the call  }
-    { raised on such a path (a modal before the Except) or handed back a    }
-    { non-PCB document, after which reading PCBServer could be the          }
+    { CHECK FIRST, then open. A board_path that names no PCB-server         }
+    { document (a .SchDoc, a .txt) or an absolute path that is neither open }
+    { nor on disk takes the fallback below without calling OpenDocument:    }
+    { the call raised on such a path (a modal before the Except) or handed  }
+    { back a non-PCB document, after which reading PCBServer could be the   }
     { uncatchable 'Undeclared identifier' GetPCBBoardAnywhere describes.    }
     { CONSERVATIVE: the skip is the same GetPCBBoardAnywhere(0) a Nil       }
-    { ServerDoc takes, and a bare .PcbDoc name is not judged (it keeps      }
-    { today's attempt), so only an open that could not have produced a     }
-    { board is skipped.                                                     }
-    If (Not PcbPathOpenable(Path)) And
-       (LooksAbsolutePath(Path) Or
-        ((UpperCase(ExtractFileExt(Trim(Path))) <> '.PCBDOC') And
-         (UpperCase(ExtractFileExt(Trim(Path))) <> '.PCB'))) Then
+    { ServerDoc takes, and a bare name is not judged (it keeps today's      }
+    { attempt), so only an open that could not have produced a board is    }
+    { skipped. A .PcbLib is a PCB-SERVER document: opening it loads the     }
+    { server and GetCurrentPCBBoard answers the library's board, so it      }
+    { keeps today's open - skipping it would silently target a DIFFERENT    }
+    { open board.                                                           }
+    Ext := UpperCase(ExtractFileExt(Trim(Path)));
+    If ((Ext <> '.PCBDOC') And (Ext <> '.PCB') And (Ext <> '.PCBLIB')) Or
+       (LooksAbsolutePath(Path) And (Not DocumentPresent(Path))) Then
     Begin
         Result := GetPCBBoardAnywhere(0);
         Exit;
@@ -3324,28 +3360,31 @@ Begin
     { cannot raise. A hand-edited 600000.0, 1e6 or 3000000000 used to raise  }
     { inside a Try, and the raise is a modal before the Except; such a value }
     { now leaves the compiled-in default, exactly what the empty Except did. }
+    { Each Try stays as a fault-only backstop (not counted): should CfgIntOk }
+    { ever admit something this engine's StrToInt rejects, the default stays }
+    { and the exception never escapes into StartMCPPump.                     }
     ConfigPath := WorkspaceDir + CONFIG_FILE;
     If Not FileExists(ConfigPath) Then Exit;
     Content := ReadFileContent(ConfigPath);
     If Content = '' Then Exit;
 
     V := ExtractJsonValue(Content, 'poll_interval_active_ms');
-    If CfgIntOk(V) Then Begin N := StrToInt(V); If N > 0 Then PollIntervalActiveMs := N; End;
+    If CfgIntOk(V) Then Try N := StrToInt(V); If N > 0 Then PollIntervalActiveMs := N; Except End;
 
     V := ExtractJsonValue(Content, 'poll_interval_idle_ms');
-    If CfgIntOk(V) Then Begin N := StrToInt(V); If N > 0 Then PollIntervalIdleMs := N; End;
+    If CfgIntOk(V) Then Try N := StrToInt(V); If N > 0 Then PollIntervalIdleMs := N; Except End;
 
     V := ExtractJsonValue(Content, 'idle_threshold');
-    If CfgIntOk(V) Then Begin N := StrToInt(V); If N > 0 Then IdleThreshold := N; End;
+    If CfgIntOk(V) Then Try N := StrToInt(V); If N > 0 Then IdleThreshold := N; Except End;
 
     V := ExtractJsonValue(Content, 'auto_shutdown_ms');
-    If CfgIntOk(V) Then Begin N := StrToInt(V); If N >= 0 Then AutoShutdownMs := N; End;
+    If CfgIntOk(V) Then Try N := StrToInt(V); If N >= 0 Then AutoShutdownMs := N; Except End;
 
     V := ExtractJsonValue(Content, 'yield_iterations');
-    If CfgIntOk(V) Then Begin N := StrToInt(V); If N > 0 Then YieldIterations := N; End;
+    If CfgIntOk(V) Then Try N := StrToInt(V); If N > 0 Then YieldIterations := N; Except End;
 
     V := ExtractJsonValue(Content, 'yield_every_n_active');
-    If CfgIntOk(V) Then Begin N := StrToInt(V); If N > 0 Then YieldEveryNActive := N; End;
+    If CfgIntOk(V) Then Try N := StrToInt(V); If N > 0 Then YieldEveryNActive := N; Except End;
 End;
 
 {..............................................................................}

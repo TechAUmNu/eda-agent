@@ -146,7 +146,7 @@ def test_the_libreference_setter_notes_the_rename():
 
 def test_place_3d_body_refuses_an_unloadable_format_before_preprocess():
     body = strip_comments(_bodies("PCB.pas")["PCB_Place3DBody"])
-    guard = body.find("If Not Model3DExtLoadable(ModelPath) Then")
+    guard = body.find("If Not Model3DExtMayLoad(ModelPath) Then")
     pre = body.find("PCBServer.PreProcess")
     factory = body.find("ModelFactory_FromFilename")
     assert guard != -1, "no format check"
@@ -163,13 +163,13 @@ def test_place_3d_body_refuses_an_unloadable_format_before_preprocess():
 
 
 def test_model_formats_the_guard_admits():
-    ns = build(_bodies("Library.pas"), ["Model3DExtLoadable"],
+    ns = build(_bodies("Library.pas"), ["Model3DExtMayLoad"],
                {"ExtractFileExt": lambda s: Path(s).suffix})
-    ok = ns["Model3DExtLoadable"]
+    ok = ns["Model3DExtMayLoad"]
     for good in (r"C:\m\a.step", r"C:\m\a.STP", r"C:\m\a.x_t", r"C:\m\a.X_B",
-                 r"C:\m\a.SLDPRT"):
+                 r"C:\m\a.SLDPRT", r"C:\m\a.wrl"):
         assert ok(good), good
-    for bad in (r"C:\m\a.txt", r"C:\m\a.wrl", r"C:\m\a", ""):
+    for bad in (r"C:\m\a.txt", r"C:\m\a", ""):
         assert not ok(bad), bad
 
 
@@ -265,7 +265,8 @@ _PCBLIB_LOOKUPS = [
 def test_pcblib_lookup_is_not_named_when_it_answers_nil_anyway(
         routine, params, msg, focus, open_kinds):
     ns = _pcblib_ns(focus, open_kinds)
-    build(_bodies("Main.pas"), ["PcbEditorDocOpen", "PcbLibMayBeCurrent"], ns)
+    build(_bodies("Main.pas"), ["PcbEditorDocOpen", "PcbLibMayBeCurrent",
+                                "PcbLibMayBeCurrentAt"], ns)
     build(_bodies("Library.pas"), [routine], ns)
     assert ns[routine](params, "r") == ("ERR", "NO_PCBLIB", msg)
 
@@ -302,7 +303,8 @@ def test_pcblib_lookup_still_asked_when_a_library_may_be_current(
     ns["PCBServer"] = server = _PcbServer()
     ns["BuildSuccessResponse"] = lambda r, d: ("OK", d)
     ns["EscapeJsonString"] = lambda s: s
-    build(_bodies("Main.pas"), ["PcbEditorDocOpen", "PcbLibMayBeCurrent"], ns)
+    build(_bodies("Main.pas"), ["PcbEditorDocOpen", "PcbLibMayBeCurrent",
+                                "PcbLibMayBeCurrentAt"], ns)
     build(_bodies("Library.pas"), [routine], ns)
     try:
         ns[routine](params, "r")

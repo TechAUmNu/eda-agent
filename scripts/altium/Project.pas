@@ -3979,11 +3979,14 @@ Begin
     { Copy the file to the project directory (skip if same location) }
     If UpperCase(SourcePath) <> UpperCase(DestPath) Then
     Begin
-        { CONSERVATIVE GUARD (live probe pending). A copy into a folder that }
-        { does not exist cannot succeed, so refusing it first loses nothing  }
-        { that works today: it gives the COPY_FAILED reply the raise led to, }
-        { without the modal. A project with no folder of its own (bare path) }
-        { passes, exactly as before.                                         }
+        { GUARD (live probe P31 pending). A copy into a folder that does not }
+        { exist cannot succeed. If CopyFile RAISES on it (the modal), this   }
+        { refusal is that Except's COPY_FAILED without the dialog. If it     }
+        { instead returns False quietly, today's reply was a SUCCESS that    }
+        { added a file that is not there - so the outcome check after the   }
+        { copy makes both behaviours answer COPY_FAILED, and this refusal is }
+        { the same reply either way. A project with no folder of its own    }
+        { (bare path) passes, exactly as before.                             }
         If Not TargetDirExists(DestPath) Then
         Begin
             Result := BuildErrorResponse(RequestId, 'COPY_FAILED', 'Failed to copy file to project directory');
@@ -3997,6 +4000,14 @@ Begin
             CopyFile(SourcePath, DestPath, False);
         Except
             RecordCaughtException('Proj_ImportDocument:CopyFile');
+            Result := BuildErrorResponse(RequestId, 'COPY_FAILED', 'Failed to copy file to project directory');
+            Exit;
+        End;
+        { Checked by its OUTCOME: a copy that returned False without raising }
+        { left nothing at DestPath, and adding that to the project was a     }
+        { broken success. Same reply as the raise.                           }
+        If Not FileExists(DestPath) Then
+        Begin
             Result := BuildErrorResponse(RequestId, 'COPY_FAILED', 'Failed to copy file to project directory');
             Exit;
         End;

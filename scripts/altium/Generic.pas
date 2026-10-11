@@ -8079,36 +8079,69 @@ Begin
             RecordCaughtException('Gen_GetConstraintGroups:DM_ConstraintGroupCount');
         End;
 
+    { COUNTED, every member read below. GroupCount was 0 on every call    }
+    { before the DM-twin fix, so none of these reads had ever run: a       }
+    { misnamed member would pop a modal per group or constraint, and each  }
+    { Except records which (RELEASE_VERIFICATION 39.4 probe P19). The      }
+    { replies are unchanged: each Except leaves what the empty one did.    }
     Json := '';
     For I := 0 To GroupCount - 1 Do
     Begin
         Group := Nil;
-        Try Group := Doc.DM_ConstraintGroups(I); Except End;
+        Try
+            Group := Doc.DM_ConstraintGroups(I);
+        Except
+            RecordCaughtException('Gen_GetConstraintGroups:DM_ConstraintGroups');
+        End;
         If Group = Nil Then Continue;
 
         ConsCount := 0;
-        Try ConsCount := Group.DM_ConstraintCount; Except End;
+        Try
+            ConsCount := Group.DM_ConstraintCount;
+        Except
+            RecordCaughtException('Gen_GetConstraintGroups:DM_ConstraintCount');
+        End;
 
         ConsJson := '';
         FirstC := True;
         For J := 0 To ConsCount - 1 Do
         Begin
             Cons := Nil;
-            Try Cons := Group.DM_Constraints(J); Except End;
+            Try
+                Cons := Group.DM_Constraints(J);
+            Except
+                RecordCaughtException('Gen_GetConstraintGroups:DM_Constraints');
+            End;
             If Cons = Nil Then Continue;
             If Not FirstC Then ConsJson := ConsJson + ',';
             FirstC := False;
             ConsJson := ConsJson + '{"kind":"';
-            Try ConsJson := ConsJson + EscapeJsonString(Cons.DM_Kind); Except End;
+            Try
+                ConsJson := ConsJson + EscapeJsonString(Cons.DM_Kind);
+            Except
+                RecordCaughtException('Gen_GetConstraintGroups:DM_Kind');
+            End;
             ConsJson := ConsJson + '","data":"';
-            Try ConsJson := ConsJson + EscapeJsonString(Cons.DM_Data); Except End;
+            Try
+                ConsJson := ConsJson + EscapeJsonString(Cons.DM_Data);
+            Except
+                RecordCaughtException('Gen_GetConstraintGroups:DM_Data');
+            End;
             ConsJson := ConsJson + '"}';
         End;
 
         GroupJson := '{"target_kind":"';
-        Try GroupJson := GroupJson + EscapeJsonString(Group.DM_TargetKindString); Except End;
+        Try
+            GroupJson := GroupJson + EscapeJsonString(Group.DM_TargetKindString);
+        Except
+            RecordCaughtException('Gen_GetConstraintGroups:DM_TargetKindString');
+        End;
         GroupJson := GroupJson + '","target_id":"';
-        Try GroupJson := GroupJson + EscapeJsonString(Group.DM_TargetId); Except End;
+        Try
+            GroupJson := GroupJson + EscapeJsonString(Group.DM_TargetId);
+        Except
+            RecordCaughtException('Gen_GetConstraintGroups:DM_TargetId');
+        End;
         GroupJson := GroupJson + '","constraint_count":' + IntToStr(ConsCount);
         GroupJson := GroupJson + ',"constraints":[' + ConsJson + ']}';
 

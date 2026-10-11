@@ -4814,13 +4814,13 @@ Begin
     Body := Nil;
     Model := Nil;
 
-    { A format the loader cannot read gets the Model = Nil reply BEFORE the  }
-    { transaction opens, instead of risking a raise inside it (a factory    }
-    { that raises on a file it cannot parse is a modal, then INTERNAL_ERROR }
-    { from the dispatcher). Model3DExtLoadable (Library.pas) is the list    }
-    { Lib_Link3DModel uses: STEP, Parasolid, SolidWorks part, the formats   }
-    { Altium's 3D body takes. Release run probe P7 confirms it.             }
-    If Not Model3DExtLoadable(ModelPath) Then
+    { A file that is certainly not a model gets the Model = Nil reply       }
+    { BEFORE the transaction opens. Model3DExtMayLoad (Library.pas) is a    }
+    { DENY-list (no extension, text, document, data and image formats), so  }
+    { every other format still reaches the loader exactly as before: which  }
+    { formats it takes is release probe P7. The reply text is the factory's }
+    { own Nil reply, word for word, which is what such a file got today.    }
+    If Not Model3DExtMayLoad(ModelPath) Then
     Begin
         Result := BuildErrorResponse(RequestId, 'MODEL_LOAD_FAILED',
             'Could not load a 3D model from ' + ModelPath
@@ -4842,7 +4842,17 @@ Begin
 
         If Failure = '' Then
         Begin
-            Model := Body.ModelFactory_FromFilename(ModelPath, False);
+            { Counted, not guarded: whether the loader raises on a format  }
+            { it cannot read (rather than answering Nil) is probe P7. A     }
+            { raise (a modal, then INTERNAL_ERROR before) is now the        }
+            { Model = Nil reply below, and counted.                         }
+            Model := Nil;
+            Try
+                Model := Body.ModelFactory_FromFilename(ModelPath, False);
+            Except
+                RecordCaughtException('PCB_Place3DBody:ModelFactory_FromFilename');
+                Model := Nil;
+            End;
             If Model = Nil Then
             Begin
                 FailCode := 'MODEL_LOAD_FAILED';

@@ -1023,10 +1023,12 @@ It must be `FILE_NOT_FOUND`. Then
     pcb_place_3d_body  model_path <an existing .txt file>
 
 must be `MODEL_LOAD_FAILED`, with no dialog and `caught_exceptions`
-unchanged: the extension is refused (`Model3DExtLoadable`: STEP,
-Parasolid, SolidWorks part) BEFORE `ModelFactory_FromFilename` or the PCB
-transaction is reached, with the reply the factory's Nil branch gives.
-Whether that list is complete is section 39.4 probe P7.
+unchanged: the extension is refused (`Model3DExtMayLoad`, a DENY-list of
+formats that are certainly not a model: no extension, `.txt`, `.pdf`,
+`.csv`, `.json`, `.png`, `.jpg`) BEFORE `ModelFactory_FromFilename` or the
+PCB transaction is reached, with the reply the factory's Nil branch gives.
+Every other extension still reaches the loader as before; whether it
+raises on one it cannot read is section 39.4 probe P7.
 They are separated on purpose: the path is checked before anything is
 created, because `ModelFactory_FromFilename` on a missing file returns
 Nil and leaves an orphan body behind.
@@ -3072,8 +3074,9 @@ What carries the count (all new in this build):
 
 Right after `StartMCPServer`: `caught_exceptions` = `0`, `last_caught` =
 null, `cast_errors` = `0`. `app_get_status`: `in_flight` is empty (or
-holds only the ping itself) and `last_caught` is null on a fresh
-`activity.log`.
+holds only the ping itself) and `last_caught` is null: it reads only rows
+after the newest `_session_start`, so a catch from an earlier pump session
+in the same `activity.log` is not reported.
 
 ### 39.2 Read the counters around EVERY section
 
@@ -3098,7 +3101,9 @@ Each must answer with no dialog and leave `caught_exceptions` unchanged.
    `board_path` = `C:\nope.PcbDoc`, then with the absolute path of an
    existing `.SchDoc`. Each takes the same fallback a failed open always
    took (it does NOT refuse: a bad `board_path` still lands on whichever
-   board the fallback finds, so use a scratch board).
+   board the fallback finds, so use a scratch board). An EXISTING absolute
+   `.PcbLib` as `board_path` is still opened, as before (a PcbLib is a
+   PCB-server document); a missing one takes the fallback.
 3. **A project that lists a board missing on disk.** Copy a scratch
    project without its `.PcbDoc`, open it, focus a sheet, run
    `app_get_preferences`: `"pcb": null` (or another open board).
@@ -3112,6 +3117,17 @@ Each must answer with no dialog and leave `caught_exceptions` unchanged.
    `poll_interval_active_ms` to `600000.0` in the workspace
    `mcp_config.json`, start it again: no dialog, the default polling
    speed. Put the file back.
+7. **A focused SchLib, no PCB document this session.** Restart Altium,
+   open ONLY a SchLib and focus it. With NO library path:
+   `lib_add_footprint_pad`, `lib_copy_footprint source_name=X new_name=Y`,
+   `lib_get_footprints`, `lib_delete_footprint footprint_name=X`,
+   `lib_get_footprint_bodies`, `lib_link_3d_model model_path=<an existing
+   .step>`. Each answers `NO_PCBLIB` (its own message, unchanged) with
+   no dialog:
+   these named `PCBServer` with only a SchLib focused, the uncatchable
+   modal (`ResolveLibFootprint`, `FocusPcbLibForEdit`, `Lib_CopyFootprint`
+   and the fifteen handlers that default the path to the focused
+   document now ask `PcbLibMayBeCurrentAt` first).
 
 The conversion guards (`StrToIntDef`, `StrToFloatDef`, `LoadMCPConfig`)
 are executed offline against the real source by
@@ -3135,7 +3151,7 @@ No conservative pre-check exists for these, so the `Try` stays and its
 | P5 | `ReadMechKind:Kind` | Only on a build below AD19: `pcb_get_mech_layer_names` | kinds read -1 and nothing is counted (the read is gated off below 19) |
 | P6 | `App_CreateDocument:DoFileSave`, `App_CreateDocument:SaveObject` | 39.3 item 5, and the same with a folder that exists but is read-only | 0 confirms the folder test is the whole story; a count means a save raises in an existing folder |
 | P6b | `ResolvePCBBoard:OpenDocument`, `GetPCBBoardAnywhere:OpenDocument` | A 0-byte file renamed `scratch.PcbDoc`: pass it as `pcb_place_components` `board_path`, then list it in a scratch project and run `app_get_preferences` with a sheet focused | These are the residual opens of a board that IS on disk; 0 = Altium answers Nil for a broken file, 1 = it raises (a genuine fault, now counted rather than silent) |
-| P7 | (none: a guard's completeness) `Model3DExtLoadable` in `pcb_place_3d_body` and `lib_link_3d_model` | In Altium's own Place 3D Body dialog, try a `.wrl`, an `.igs` and an `.stl` model | Any that Altium loads must be ADDED to `Model3DExtLoadable` (the bridge now refuses it with `MODEL_LOAD_FAILED` before the call); none = the list is complete |
+| P7 | `Lib_Link3DModel:ModelFactory_FromFilename`, `PCB_Place3DBody:ModelFactory_FromFilename` | `pcb_place_3d_body` and `lib_link_3d_model` with a `.wrl`, an `.igs` and an `.stl` model, then with a renamed `.dat` file | `Model3DExtMayLoad` is a DENY-list (only no extension, `.txt`, `.pdf`, `.csv`, `.json`, `.png`, `.jpg` are refused before the call), so each of these reaches the loader exactly as before. 0 = the loader answers (a model or `MODEL_LOAD_FAILED` via Nil); 1 = it raises on that format, now `MODEL_LOAD_FAILED` after the dialog - add the extension to the deny-list only if Altium never loads it |
 
 The rows below are the per-file stages' sites (Library, Generic, PCB,
 Project), filled in at integration. A `<prop>` / `<id>` in a `where` is
@@ -3155,7 +3171,7 @@ row itself names the pair that popped.
 | P16 | `Gen_HighlightNet:Selection:<id>`, `Gen_ClearHighlights:Selection:<id>`, `SetSchProperty:Selection:<id>` | `obj_select` on ePin, eSheetEntry and eParameter; `obj_highlight_net` on a net that reaches a sheet entry; `obj_clear_highlights` on a sheet with parts | A row names a type without `Selection`: skip it in the loops (and in `Gen_CopyObjects`, which sets Selection with no Try) |
 | P17 | `SetSchProperty:IsMirrored:<id>` | `obj_modify set='IsMirrored=false'` on eLabel, eNetLabel, eParameter, eNoERC, eLine, eImage, eTextFrame | A row adds that type to `SchObjectLacksIsMirrored` |
 | P18 | `Gen_WriteProjectFile:DM_ProjectFullPath`, `Gen_AddSheet:DM_ProjectFullPath`, `Gen_DeleteSheet:DM_ProjectFullPath`, `Gen_DeleteSheet:FocusedProjectFullPath` | With ONLY free documents open: `proj_add_sheet`, `proj_delete_sheet` with no `project_path`, and a sheet delete that refocuses | 0 = fault-only (expected). If `proj_add_sheet` builds its path from the text `Free Documents`, that is a separate correctness bug |
-| P19 | `Gen_GetConstraintGroups:DM_ConstraintGroupCount` | `sch_get_constraint_groups` on a sheet, then on a sheet that has constraint groups | No dialog (it used to raise on EVERY call: an ISch_Document has no DM_ members); on the second sheet the group and constraint reads answer |
+| P19 | `Gen_GetConstraintGroups:DM_ConstraintGroupCount`, `Gen_GetConstraintGroups:DM_ConstraintGroups`, `Gen_GetConstraintGroups:DM_ConstraintCount`, `Gen_GetConstraintGroups:DM_Constraints`, `Gen_GetConstraintGroups:DM_Kind`, `Gen_GetConstraintGroups:DM_Data`, `Gen_GetConstraintGroups:DM_TargetKindString`, `Gen_GetConstraintGroups:DM_TargetId` | `sch_get_constraint_groups` on a sheet, then on a sheet that has constraint groups | No dialog (it used to raise on EVERY call: an ISch_Document has no DM_ members). On the second sheet the group and constraint reads had NEVER run before this build: 0 = they answer; each row names a member `IConstraintGroup` / `IConstraint` lacks (one dialog per group or constraint), to drop from the read |
 | P20 | `Gen_PlaceHarnessConnector:HarnessType` | `sch_place_harness_connector` with `harness_type` set | 1 = the member does not exist; drop the write |
 | P21 | `Gen_PlaceCrossSheetConnector:Side` | `sch_place_cross_sheet_connector` with `side=left`, then `side=right` | 1 = the member does not exist; drop the write |
 | P22 | `ProcessSchDocObjects:owner-remove` | `obj_delete object_type=eSheetEntry` with a filter matching one entry on a hierarchical sheet | 0 and the entry gone = removal through the owning symbol works; 1 = the owner refused and the document-level fallback ran |
@@ -3167,8 +3183,8 @@ row itself names the pair that popped.
 | P28 | `GetPCBProperty:<prop>` | `obj_query object_type=eConnectionObject props=IsRedundant,Mode` | A row: delete that branch and drop the name from `IsKnownPCBProperty` / `KnownPCBPropertyList` |
 | P29 | `SetPCBProperty:<prop>` | `obj_modify` on a scratch region, `set='Kind=board_cutout'` | `SetPCBProperty:Kind` = the region Kind write is not scriptable: drop the write branch, keep the read |
 | P30 | `Proj_Create:ForceDirectories`, `Proj_Create:Rewrite` | `proj_create` over an existing READ-ONLY project stub in an existing folder | `Proj_Create:Rewrite` = the residual fault (read-only or locked stub) the folder and name checks cannot see; `ForceDirectories` should never count |
-| P31 | `Proj_ImportDocument:CopyFile` | With a project focused, `proj_import_document` with a `source_path` outside the project folder | A count + dialog = `CopyFile` is not in the binding: copy in Python (`shutil.copy2`) and check `FileExists` in Pascal. No count but no file at `dest_path` while the reply says success = it returns False: add a `FileExists(DestPath)` check |
-| P32 | (none: `PcbLibMayBeCurrent`) | Right after `app_create_document kind=PCBLIB`, with no other step between: `lib_create_footprint`, `lib_add_footprint_pad`, then `pcb_renumber_pads` | Both act on the new library. `NO_PCBLIB` here = the DM focus AND the open-document walk both missed a library that is current, and the gate needs widening |
+| P31 | `Proj_ImportDocument:CopyFile` | With a project focused, `proj_import_document` with a `source_path` outside the project folder | A count + dialog = `CopyFile` is not in the binding: copy in Python (`shutil.copy2`). The copy is now checked by its OUTCOME (`FileExists(DestPath)` after the call, `COPY_FAILED` if absent), so a `CopyFile` that returns False quietly answers `COPY_FAILED` like one that raises, and the missing-folder refusal before it is that same reply whichever it is. Success with no file at `dest_path` would be a bug in the outcome check |
+| P32 | (none: `PcbLibMayBeCurrent`, `PcbLibMayBeCurrentAt`) | (a) Right after `app_create_document kind=PCBLIB`, with no other step between: `lib_create_footprint`, `lib_add_footprint_pad`, then `pcb_renumber_pads`. (b) Focus a SchLib in the UI, then `lib_reload_library` on a SAVED `.PcbLib` (its programmatic close and reopen can leave the DM focus on the SchLib, stale rather than Nil) | (a) All act on the new library. (b) `reloaded: true` (`PcbLibMayBeCurrentAt` accepts a PcbLib open at `library_path` whatever the focus says). `NO_PCBLIB` in either = the DM focus AND the open-document walk (and, in b, `GetDocumentByPath` at the path) all missed a library that is current, and the gate needs widening |
 | P33 | (none: syntax check) | `audit_find_via_antennas` on a board with an internal plane | No dialog. A dialog per via and plane layer = `Via.IsConnectedToPlane[LayerId]` needs parentheses, not brackets (the docs show `( )`) |
 
 ### 39.5 If a dialog does appear

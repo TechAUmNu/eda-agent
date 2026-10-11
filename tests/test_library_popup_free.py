@@ -740,7 +740,7 @@ def test_pcb_library_load_is_only_attempted_on_a_loadable_file(fname):
 
 def test_an_unloadable_model_format_gets_the_model_nil_reply_before_preprocess():
     body = strip_comments(_lib()["Lib_Link3DModel"])
-    m = re.search(r"If Not Model3DExtLoadable\(ModelPath\) Then\s+Begin.*?End;",
+    m = re.search(r"If Not Model3DExtMayLoad\(ModelPath\) Then\s+Begin.*?End;",
                   body, re.S)
     assert m, "Lib_Link3DModel hands any file to ModelFactory_FromFilename"
     assert m.start() < body.index("PCBServer.PreProcess;"), (
@@ -756,12 +756,13 @@ def test_an_unloadable_model_format_gets_the_model_nil_reply_before_preprocess()
             + m.group(0) + "\nEnd;")
     ns = _ns(extra={"BuildErrorResponse": lambda r, c, msg: replies.append(
         (c, msg)) or "ERR"})
-    build(_lib(), ["Model3DExtLoadable"], ns)
+    build(_lib(), ["Model3DExtMayLoad"], ns)
     build({"Snip": snip}, ["Snip"], ns)
-    for good in ("m.step", "M.STP", "m.x_t", "m.X_B", "part.SLDPRT"):
+    for good in ("m.step", "M.STP", "m.x_t", "m.X_B", "part.SLDPRT",
+                 "m.wrl", "m.igs", "m.stl"):
         ns["Snip"](good, "r")
         assert replies == [], good
-    path = r"C:\Models\body.wrl"
+    path = r"C:\Models\body.txt"
     ns["Snip"](path, "r")
     assert replies == [("MODEL_LOAD_FAILED", "Could not load a 3D model from "
                         + path + ". Nothing was removed or added.")]

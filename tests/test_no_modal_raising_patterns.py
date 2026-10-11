@@ -62,6 +62,77 @@ def _unguarded(body: str, construct: str, guard: str | None) -> int:
     return hits
 
 
+def _call_arg(body: str, open_paren: int) -> str:
+    """The text from ``open_paren`` (just past a ``(``) to its match."""
+    depth, i = 0, open_paren
+    while i < len(body):
+        c = body[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            if depth == 0:
+                break
+            depth -= 1
+        i += 1
+    return body[open_paren:i].strip()
+
+
+def _conversion_unguarded(name, body):
+    """A conversion is guarded only by a range-safe check OF ITS OWN
+    ARGUMENT, made after the argument was last assigned. A check of some
+    other variable earlier in the routine proves nothing about this one
+    (re-review: any earlier IsFloatStr used to mark every later
+    conversion guarded)."""
+    hits = 0
+    for m in re.finditer(
+            r"\b(?:StrToInt|StrToInt64|StrToFloat)\s*\(\s*(?!\d+\s*\))", body):
+        arg = _call_arg(body, m.end())
+        before = body[:m.start()]
+        esc = re.escape(arg)
+        checks = [g.start() for g in re.finditer(
+            r"\b(?:IsInt32Str|CfgIntOk|IsFloatStr)\s*\(\s*" + esc + r"\s*\)",
+            before)]
+        sets = [a.start() for a in re.finditer(
+            r"(?<![\w.])" + esc + r"\s*:=", before)]
+        if not checks or (sets and sets[-1] > checks[-1]):
+            hits += 1
+    return hits
+
+
+# The only shapes that count as having asked before a bare
+# PCBServer.GetCurrentPCBLibrary (re-review: a guard ANYWHERE earlier in the
+# routine, even in a sibling If branch, used to count):
+#   1. the gate on the SAME statement:  If PcbLibMayBeCurrent[At](..) Then V :=
+#   2. the gate's early exit (PCB_RenumberPads):
+#        If Not PcbLibMayBeCurrent[At](..) Then Begin Result := ...; Exit; End;
+#   3. a SUCCESSFUL ResolveLibFootprint immediately before, with its Nil
+#      exit between: it asks the gated lookup itself and answers non-Nil
+#      only after GetCurrentPCBLibrary answered, so the server is loaded and
+#      the same lookup cannot raise.
+_PCBLIB_SAME_STATEMENT = re.compile(
+    r"\bPcbLibMayBeCurrent(?:At)?\s*\([^()]*\)\s+Then\s+\w+\s*:=\s*$")
+_PCBLIB_EARLY_EXIT = re.compile(
+    r"\bIf\s+Not\s+PcbLibMayBeCurrent(?:At)?\s*\([^()]*\)\s+Then\s+Begin\s+"
+    r"Result\s*:=\s*BuildErrorResponse\s*\([^;]*\)\s*;\s*Exit\s*;\s*End\s*;")
+_PCBLIB_AFTER_RESOLVE = re.compile(
+    r"(\w+)\s*:=\s*ResolveLibFootprint\s*\(\s*Params\s*,\s*ErrCode\s*,\s*Why\s*\)"
+    r"\s*;\s*If\s+\1\s*=\s*Nil\s+Then\s+Begin\s+Result\s*:=\s*BuildErrorResponse"
+    r"\s*\(\s*RequestId\s*,\s*ErrCode\s*,\s*Why\s*\)\s*;\s*Exit\s*;\s*End\s*;"
+    r"\s*\w+\s*:=\s*$")
+
+
+def _pcblib_unguarded(name, body):
+    hits = 0
+    for m in re.finditer(r"\bPCBServer\s*\.\s*GetCurrentPCBLibrary\b", body):
+        before = body[:m.start()]
+        if (_PCBLIB_SAME_STATEMENT.search(before)
+                or _PCBLIB_EARLY_EXIT.search(before)
+                or _PCBLIB_AFTER_RESOLVE.search(before)):
+            continue
+        hits += 1
+    return hits
+
+
 def _rule(construct, guard=None, routines=None):
     def count(name, body):
         if routines is not None and name not in routines:
@@ -78,11 +149,14 @@ PATTERNS = [
      "does not parse, is out of range or carries a control character, and "
      "the conversion error is a modal. IsIntStr is a SYNTAX test only "
      "(99999999999 passed it); the range-safe checks are IsInt32Str, "
-     "CfgIntOk and IsFloatStr. Use StrToIntDef / StrToFloatDef.",
-     _rule(r"\b(?:StrToInt|StrToInt64|StrToFloat)\s*\(\s*(?!\d+\s*\))",
-           r"\b(?:IsInt32Str|CfgIntOk|IsFloatStr)\s*\("),
+     "CfgIntOk and IsFloatStr, and each guards only a conversion OF THE "
+     "ARGUMENT IT CHECKED. Use StrToIntDef / StrToFloatDef.",
+     _conversion_unguarded,
      {"Main.pas": (1, "AltiumMajorVersion converts the digits-only string "
                       "of at most four characters it builds just above"),
+      "Utils.pas": (1, "StrToFloatDef converts Work, the locale-reshaped "
+                       "copy of S built only after IsFloatStr(S) and the "
+                       "control-character refusal passed"),
       "PCB.pas": (7, "PCB_RenumberPads re-reads indices and coordinates it "
                      "wrote into its own TStringLists with IntToStr")}),
 
@@ -135,22 +209,20 @@ PATTERNS = [
 
     ("pcblib_lookup_before_focus_check",
      "Naming PCBServer before any PcbDoc / PcbLib has opened in the session "
-     "raises an uncatchable undeclared identifier. PCB_RenumberPads asked "
-     "PCBServer.GetCurrentPCBLibrary with nothing checked, and so did four "
-     "library handlers; they now ask PcbLibMayBeCurrent (Main.pas) first, "
-     "and every other lookup follows one that established the library.",
-     _rule(r"\bPCBServer\s*\.\s*GetCurrentPCBLibrary\b",
-           r"\b(?:PcbLibMayBeCurrent|FocusedDocKindIs|DM_DocumentKind|"
-           r"DM_FocusedDocument|GetDocumentByPath|OpenDocument|"
-           r"LoadPCBLibraryByPath|GetPCBLibraryByPath|FocusPcbLib\w*|"
-           r"ResolveLibFootprint|GetPCBBoard\w*|ResolvePCBBoard)\b"),
+     "raises an uncatchable undeclared identifier. A focused SchLib or "
+     "SchDoc satisfies the handlers' own focus checks, so every lookup asks "
+     "PcbLibMayBeCurrent / PcbLibMayBeCurrentAt (Main.pas) ON THE SAME "
+     "STATEMENT, exits early on it (PCB_RenumberPads), or directly follows "
+     "a successful ResolveLibFootprint, which asked the gated lookup itself.",
+     _pcblib_unguarded,
      {}),
 
     ("model_factory_unchecked_format",
      "ModelFactory_FromFilename on a format the loader cannot read can "
-     "raise inside the PCB transaction. Ask Model3DExtLoadable first and "
-     "answer the Model = Nil reply.",
-     _rule(r"\.ModelFactory_FromFilename\s*\(", r"\bModel3DExtLoadable\s*\("),
+     "raise inside the PCB transaction. Ask Model3DExtMayLoad (a DENY-list: "
+     "it refuses only what is certainly not a model) first, answer the "
+     "Model = Nil reply, and count a raise in the call's own Except.",
+     _rule(r"\.ModelFactory_FromFilename\s*\(", r"\bModel3DExtMayLoad\s*\("),
      {}),
 
     ("mkset_into_layerset_object",

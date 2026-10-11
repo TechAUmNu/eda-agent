@@ -74,6 +74,10 @@ def read_last_caught(workspace_dir) -> Optional[dict]:
     time a Try/Except that is not a fault-only backstop catches something,
     i.e. each time an exception modal fired. Only the last 64 KB of the
     log is read.
+
+    THIS PUMP SESSION ONLY: the backward scan stops at the newest
+    ``_session_start`` row, so a catch from an earlier session is never
+    reported beside ``app_ping``'s ``caught_exceptions`` = 0 for this one.
     """
     path = Path(workspace_dir) / "activity.log"
     try:
@@ -86,6 +90,8 @@ def read_last_caught(workspace_dir) -> Optional[dict]:
         return None
     for line in reversed(tail.splitlines()):
         parts = line.split(",")
+        if len(parts) >= 3 and parts[2] == "_session_start":
+            return None
         if len(parts) >= 4 and parts[2] == "_caught_exception":
             return {
                 "at": parts[0],

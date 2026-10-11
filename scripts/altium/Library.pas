@@ -184,8 +184,15 @@ Begin
         Exit;
     End;
     LastCreatedLibPath := RememberedLibKey(SchLib);
+    { Fault-only backstop (not counted), the house pattern for this lookup: }
+    { a raise leaves the document unrecorded, which LastCreatedLibIsLive    }
+    { already treats as unknown (today's True).                             }
     If LooksAbsolutePath(LastCreatedLibPath) Then
-        LastCreatedLibDoc := Client.GetDocumentByPath(LastCreatedLibPath);
+        Try
+            LastCreatedLibDoc := Client.GetDocumentByPath(LastCreatedLibPath);
+        Except
+            LastCreatedLibDoc := Nil;
+        End;
 End;
 
 Procedure ForgetRememberedLibComponent(Dummy : Integer);
@@ -233,7 +240,11 @@ Begin
     If LastCreatedLibComponent = Nil Then Exit;
     Result := True;
     If Not LooksAbsolutePath(LastCreatedLibPath) Then Exit;
-    DocNow := Client.GetDocumentByPath(LastCreatedLibPath);
+    { Fault-only backstops (not counted). A lookup that RAISES is a doubt,  }
+    { not evidence the library has gone, so the answer stays True (Exit    }
+    { with Result True here; DocAgain Nil below leaves it True too).        }
+    DocNow := Nil;
+    Try DocNow := Client.GetDocumentByPath(LastCreatedLibPath); Except Exit; End;
     If DocNow = Nil Then
     Begin
         Result := False;
@@ -241,7 +252,8 @@ Begin
     End;
     If LastCreatedLibDoc = Nil Then Exit;
     If DocNow = LastCreatedLibDoc Then Exit;
-    DocAgain := Client.GetDocumentByPath(LastCreatedLibPath);
+    DocAgain := Nil;
+    Try DocAgain := Client.GetDocumentByPath(LastCreatedLibPath); Except DocAgain := Nil; End;
     If DocAgain = DocNow Then Result := False;
 End;
 
@@ -1779,7 +1791,13 @@ Begin
         End;
     End;
 
-    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrentAt (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway (a focused SchLib / SchDoc in a session with no }
+    { PcbDoc or PcbLib open: the uncatchable modal), so the Nil reply      }
+    { below comes without the dialog. A PcbLib open at LibPath always      }
+    { passes, whatever a stale DM focus says.                              }
+    PcbLib := Nil;
+    If PcbLibMayBeCurrentAt(LibPath) Then PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         ErrCode := 'NO_PCBLIB';
@@ -1894,7 +1912,13 @@ Begin
             + FocusedPath + '". Nothing was changed.';
         Exit;
     End;
-    Result := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrentAt (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway (a focused SchLib / SchDoc in a session with no }
+    { PcbDoc or PcbLib open: the uncatchable modal), so the Nil reply      }
+    { below comes without the dialog. A PcbLib open at LibPath always      }
+    { passes, whatever a stale DM focus says.                              }
+    Result := Nil;
+    If PcbLibMayBeCurrentAt(LibPath) Then Result := PCBServer.GetCurrentPCBLibrary;
     If Result = Nil Then
     Begin
         ErrCode := 'NO_PCBLIB';
@@ -3879,7 +3903,13 @@ Begin
         AddStringParameter('FileName', LibPath);
         RunProcess('WorkspaceManager:OpenObject');
     End;
-    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrentAt (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway (a focused SchLib / SchDoc in a session with no }
+    { PcbDoc or PcbLib open: the uncatchable modal), so the Nil reply      }
+    { below comes without the dialog. A PcbLib open at LibPath always      }
+    { passes, whatever a stale DM focus says.                              }
+    PcbLib := Nil;
+    If PcbLibMayBeCurrentAt(LibPath) Then PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
@@ -3973,7 +4003,13 @@ Begin
         AddStringParameter('FileName', LibPath);
         RunProcess('WorkspaceManager:OpenObject');
     End;
-    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrentAt (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway (a focused SchLib / SchDoc in a session with no }
+    { PcbDoc or PcbLib open: the uncatchable modal), so the Nil reply      }
+    { below comes without the dialog. A PcbLib open at LibPath always      }
+    { passes, whatever a stale DM focus says.                              }
+    PcbLib := Nil;
+    If PcbLibMayBeCurrentAt(LibPath) Then PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
@@ -4213,7 +4249,13 @@ Begin
         AddStringParameter('FileName', LibPath);
         RunProcess('WorkspaceManager:OpenObject');
     End;
-    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrentAt (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway (a focused SchLib / SchDoc in a session with no }
+    { PcbDoc or PcbLib open: the uncatchable modal), so the Nil reply      }
+    { below comes without the dialog. A PcbLib open at LibPath always      }
+    { passes, whatever a stale DM focus says.                              }
+    PcbLib := Nil;
+    If PcbLibMayBeCurrentAt(LibPath) Then PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
@@ -4576,7 +4618,13 @@ Begin
         AddStringParameter('FileName', LibPath);
         RunProcess('WorkspaceManager:OpenObject');
     End;
-    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrentAt (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway (a focused SchLib / SchDoc in a session with no }
+    { PcbDoc or PcbLib open: the uncatchable modal), so the Nil reply      }
+    { below comes without the dialog. A PcbLib open at LibPath always      }
+    { passes, whatever a stale DM focus says.                              }
+    PcbLib := Nil;
+    If PcbLibMayBeCurrentAt(LibPath) Then PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
@@ -4850,7 +4898,13 @@ Begin
         AddStringParameter('FileName', LibPath);
         RunProcess('WorkspaceManager:OpenObject');
     End;
-    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrentAt (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway (a focused SchLib / SchDoc in a session with no }
+    { PcbDoc or PcbLib open: the uncatchable modal), so the Nil reply      }
+    { below comes without the dialog. A PcbLib open at LibPath always      }
+    { passes, whatever a stale DM focus says.                              }
+    PcbLib := Nil;
+    If PcbLibMayBeCurrentAt(LibPath) Then PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
@@ -5052,7 +5106,13 @@ Begin
         AddStringParameter('FileName', LibPath);
         RunProcess('WorkspaceManager:OpenObject');
     End;
-    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrentAt (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway (a focused SchLib / SchDoc in a session with no }
+    { PcbDoc or PcbLib open: the uncatchable modal), so the Nil reply      }
+    { below comes without the dialog. A PcbLib open at LibPath always      }
+    { passes, whatever a stale DM focus says.                              }
+    PcbLib := Nil;
+    If PcbLibMayBeCurrentAt(LibPath) Then PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
@@ -5347,10 +5407,12 @@ Begin
     Try RunProcess('WorkspaceManager:OpenObject'); Except End;
     Try Application.ProcessMessages; Except End;
 
-    { PcbLibMayBeCurrent (Main.pas): PCBServer is not named when the    }
-    { answer is Nil anyway, so the reply below comes without the modal. }
+    { PcbLibMayBeCurrentAt, not PcbLibMayBeCurrent: the close and reopen    }
+    { above are programmatic, and the DM focus can stay on whatever was     }
+    { focused BEFORE the call (stale, not Nil). The library reopened at     }
+    { LibPath is what proves the server loaded (RELEASE_VERIFICATION P32).  }
     PcbLib := Nil;
-    If PcbLibMayBeCurrent(0) Then PcbLib := PCBServer.GetCurrentPCBLibrary;
+    If PcbLibMayBeCurrentAt(LibPath) Then PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
@@ -5402,7 +5464,13 @@ Begin
         AddStringParameter('FileName', LibPath);
         RunProcess('WorkspaceManager:OpenObject');
     End;
-    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrentAt (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway (a focused SchLib / SchDoc in a session with no }
+    { PcbDoc or PcbLib open: the uncatchable modal), so the Nil reply      }
+    { below comes without the dialog. A PcbLib open at LibPath always      }
+    { passes, whatever a stale DM focus says.                              }
+    PcbLib := Nil;
+    If PcbLibMayBeCurrentAt(LibPath) Then PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'No PcbLib');
@@ -6309,17 +6377,23 @@ Begin
         Result := Result + JsonNull('bbox');
 End;
 
-{ A model file ModelFactory_FromFilename can load: the STEP, Parasolid and    }
-{ SolidWorks part formats Altium's 3D body takes. Anything else (a .wrl, an }
-{ .stl, a renamed file) raised inside the PreProcess transaction - a modal - }
-{ where the Model = Nil branch would have answered MODEL_LOAD_FAILED.       }
-Function Model3DExtLoadable(Path : String) : Boolean;
+{ May ModelFactory_FromFilename be handed this file? A DENY-list, so it is   }
+{ CONSERVATIVE: False only for a file that is certainly not a 3D model (no   }
+{ extension, or text, document, data and image formats), which the factory   }
+{ answers Nil for anyway - the Model = Nil reply, MODEL_LOAD_FAILED, is what }
+{ the callers give on False. Every other extension goes to the factory as    }
+{ it did before this build: which formats Altium's loader takes (.wrl, .igs, }
+{ .stl ...) is probe P7, and an allow-list here would have refused any it    }
+{ does take, changing a call that succeeds today. A format the factory       }
+{ raises on is caught and COUNTED at the call site, not refused here.        }
+Function Model3DExtMayLoad(Path : String) : Boolean;
 Var
     Ext : String;
 Begin
     Ext := UpperCase(ExtractFileExt(Trim(Path)));
-    Result := (Ext = '.STEP') Or (Ext = '.STP') Or (Ext = '.X_T')
-        Or (Ext = '.X_B') Or (Ext = '.SLDPRT');
+    Result := (Ext <> '') And (Ext <> '.') And (Ext <> '.TXT') And (Ext <> '.PDF')
+        And (Ext <> '.CSV') And (Ext <> '.JSON') And (Ext <> '.PNG')
+        And (Ext <> '.JPG');
 End;
 
 { Lib_Link3DModel - attach a 3D STEP model to a PcbLib FOOTPRINT.              }
@@ -6481,7 +6555,13 @@ Begin
         End;
     End;
 
-    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrentAt (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway (a focused SchLib / SchDoc in a session with no }
+    { PcbDoc or PcbLib open: the uncatchable modal), so the Nil reply      }
+    { below comes without the dialog. A PcbLib open at LibPath always      }
+    { passes, whatever a stale DM focus says.                              }
+    PcbLib := Nil;
+    If PcbLibMayBeCurrentAt(LibPath) Then PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
@@ -6602,9 +6682,10 @@ Begin
     Body := Nil;
     Model := Nil;
 
-    { A format the loader cannot read gets the Model = Nil reply BEFORE the  }
-    { transaction opens, instead of raising inside it (Model3DExtLoadable). }
-    If Not Model3DExtLoadable(ModelPath) Then
+    { A file that is certainly not a model gets the Model = Nil reply BEFORE }
+    { the transaction opens (Model3DExtMayLoad, a deny-list: every other     }
+    { format still reaches the loader, as before).                          }
+    If Not Model3DExtMayLoad(ModelPath) Then
     Begin
         Result := BuildErrorResponse(RequestId, 'MODEL_LOAD_FAILED',
             'Could not load a 3D model from ' + ModelPath
@@ -6626,7 +6707,16 @@ Begin
 
         If Failure = '' Then
         Begin
-            Model := Body.ModelFactory_FromFilename(ModelPath, False);
+            { Counted, not guarded: whether the loader raises on a format  }
+            { it cannot read (rather than answering Nil) is probe P7. A     }
+            { raise is now the Model = Nil reply below, and counted.        }
+            Model := Nil;
+            Try
+                Model := Body.ModelFactory_FromFilename(ModelPath, False);
+            Except
+                RecordCaughtException('Lib_Link3DModel:ModelFactory_FromFilename');
+                Model := Nil;
+            End;
             If Model = Nil Then
             Begin
                 FailCode := 'MODEL_LOAD_FAILED';
@@ -7042,7 +7132,13 @@ Begin
             + FocusedPath + '".');
         Exit;
     End;
-    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrentAt (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway (a focused SchLib / SchDoc in a session with no }
+    { PcbDoc or PcbLib open: the uncatchable modal), so the Nil reply      }
+    { below comes without the dialog. A PcbLib open at LibPath always      }
+    { passes, whatever a stale DM focus says.                              }
+    PcbLib := Nil;
+    If PcbLibMayBeCurrentAt(LibPath) Then PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
@@ -11963,7 +12059,13 @@ Begin
         AddStringParameter('FileName', LibPath);
         RunProcess('WorkspaceManager:OpenObject');
     End;
-    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrentAt (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway (a focused SchLib / SchDoc in a session with no }
+    { PcbDoc or PcbLib open: the uncatchable modal), so the Nil reply      }
+    { below comes without the dialog. A PcbLib open at LibPath always      }
+    { passes, whatever a stale DM focus says.                              }
+    PcbLib := Nil;
+    If PcbLibMayBeCurrentAt(LibPath) Then PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
@@ -12145,7 +12247,13 @@ Begin
         AddStringParameter('FileName', LibPath);
         RunProcess('WorkspaceManager:OpenObject');
     End;
-    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrentAt (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway (a focused SchLib / SchDoc in a session with no }
+    { PcbDoc or PcbLib open: the uncatchable modal), so the Nil reply      }
+    { below comes without the dialog. A PcbLib open at LibPath always      }
+    { passes, whatever a stale DM focus says.                              }
+    PcbLib := Nil;
+    If PcbLibMayBeCurrentAt(LibPath) Then PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'Failed to focus PCB library at ' + LibPath);
@@ -13077,7 +13185,13 @@ Begin
         AddStringParameter('FileName', LibPath);
         RunProcess('WorkspaceManager:OpenObject');
     End;
-    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrentAt (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway (a focused SchLib / SchDoc in a session with no }
+    { PcbDoc or PcbLib open: the uncatchable modal), so the Nil reply      }
+    { below comes without the dialog. A PcbLib open at LibPath always      }
+    { passes, whatever a stale DM focus says.                              }
+    PcbLib := Nil;
+    If PcbLibMayBeCurrentAt(LibPath) Then PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'Failed to focus PCB library at ' + LibPath);
@@ -13483,7 +13597,11 @@ Begin
         If (SourceLib = Nil) And PcbLibLoadable(SourceLibPath) Then
             Try SourceLib := PCBServer.LoadPCBLibraryByPath(SourceLibPath); Except End;
     End
-    Else
+    { The focused PcbLib, asked only when one may be current            }
+    { (PcbLibMayBeCurrent, Main.pas): a focused SchLib in a session with }
+    { no PcbDoc / PcbLib open named PCBServer here, the uncatchable      }
+    { modal. The NO_PCBLIB reply below is the false branch, unchanged.   }
+    Else If PcbLibMayBeCurrent(0) Then
         SourceLib := PCBServer.GetCurrentPCBLibrary;
     If SourceLib = Nil Then
     Begin
@@ -13627,7 +13745,13 @@ Begin
         AddStringParameter('FileName', LibPath);
         RunProcess('WorkspaceManager:OpenObject');
     End;
-    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrentAt (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway (a focused SchLib / SchDoc in a session with no }
+    { PcbDoc or PcbLib open: the uncatchable modal), so the Nil reply      }
+    { below comes without the dialog. A PcbLib open at LibPath always      }
+    { passes, whatever a stale DM focus says.                              }
+    PcbLib := Nil;
+    If PcbLibMayBeCurrentAt(LibPath) Then PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'Failed to focus PCB library at ' + LibPath);
@@ -14844,7 +14968,13 @@ Begin
         Exit;
     End;
 
-    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrentAt (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway (a focused SchLib / SchDoc in a session with no }
+    { PcbDoc or PcbLib open: the uncatchable modal), so the Nil reply      }
+    { below comes without the dialog. A PcbLib open at LibPath always      }
+    { passes, whatever a stale DM focus says.                              }
+    PcbLib := Nil;
+    If PcbLibMayBeCurrentAt(LibPath) Then PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
@@ -16685,7 +16815,13 @@ Begin
         Exit;
     End;
 
-    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrentAt (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway (a focused SchLib / SchDoc in a session with no }
+    { PcbDoc or PcbLib open: the uncatchable modal), so the Nil reply      }
+    { below comes without the dialog. A PcbLib open at LibPath always      }
+    { passes, whatever a stale DM focus says.                              }
+    PcbLib := Nil;
+    If PcbLibMayBeCurrentAt(LibPath) Then PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
