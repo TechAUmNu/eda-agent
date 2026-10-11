@@ -157,6 +157,29 @@ Var
     { as cast_errors so a non-zero value at session end isn't invisible.     }
     CastErrorCount : Integer;
 
+    { WHICH COMMAND RAISED, for the modal nobody can see the reply of.       }
+    { Altium's script engine shows an exception as a modal 'press OK'       }
+    { dialog BEFORE the surrounding Try/Except runs (measured: see          }
+    { WriteFileContent and StrToFloatDef), and while it is up the engine is }
+    { blocked. So the command and request in flight are recorded BEFORE     }
+    { dispatch (CurrentCommand / CurrentRequestId), and every Except that   }
+    { is not a fault-only backstop calls RecordCaughtException, which       }
+    { counts the catch and stamps it with that command. A rise in           }
+    { CaughtExceptionCount across a run means a modal fired somewhere, even }
+    { one somebody clicked away. Reset by ResetCaughtExceptions at pump     }
+    { start.                                                                }
+    CurrentCommand : String;
+    CurrentRequestId : String;
+    CaughtExceptionCount : Integer;
+    LastCaughtWhere : String;
+    LastCaughtCommand : String;
+    LastCaughtRequestId : String;
+    LastCaughtStamp : String;
+
+    { Client.GetProductVersion's major number, read once (AltiumMajorVersion). }
+    { '' = not read yet; '-1' = unreadable; otherwise the digits.              }
+    AltiumMajorCache : String;
+
     { Tracks the most recently created/selected library component so the    }
     { Lib_Add* primitive helpers can target it directly. SchLib's           }
     { CurrentSchComponent setter is a no-op in DelphiScript, assigning to  }
@@ -190,6 +213,15 @@ Var
       rather than against anything read back off the component. }
     LastCreatedLibComponentName : String;
 
+    { The library document LastCreatedLibComponent belongs to, recorded when  }
+    { it is set: the path (SchLib.DocumentName) and the IServerDocument that  }
+    { Client.GetDocumentByPath returned for it then. A pointer and a string,  }
+    { so asking whether the held reference is still live never reads a       }
+    { member off it (see LastCreatedLibComponentName for why it cannot).      }
+    { Cleared wherever LastCreatedLibComponent is cleared.                    }
+    LastCreatedLibDoc : IServerDocument;
+    LastCreatedLibPath : String;
+
     { Re-entry guard for LookupLibComponent's last-resort reopen. A
       reopen re-reads the document and the retry looks the name up
       again; without this the retry could trigger another reopen. }
@@ -209,6 +241,122 @@ Begin
     AutoShutdownMs       := 600000;  { 10 min }
     YieldIterations      := 5;
     YieldEveryNActive    := 5;
+End;
+
+{ THE LOGGER AND THE CATCH COUNTERS SIT AT THE TOP OF THE FIRST UNIT so    }
+{ every routine in every .pas file, Main.pas's own included, can call     }
+{ them (DelphiScript resolves strictly top-down and has no Forward).       }
+{                                                                           }
+{ Append a line to workspace/activity.log for performance profiling. The     }
+{ polling loop uses this to record per-command timings, and handlers can     }
+{ add their own sub-stage timings for bottleneck analysis. Silently           }
+{ swallows IO errors, logging must not break a command.                      }
+Procedure AppendLog(Line : String);
+Var
+    F : TextFile;
+    LogPath : String;
+Begin
+    Try
+        LogPath := WorkspaceDir + 'activity.log';
+        AssignFile(F, LogPath);
+        If FileExists(LogPath) Then Append(F) Else Rewrite(F);
+        Try
+            WriteLn(F, Line);
+        Finally
+            CloseFile(F);
+        End;
+    Except
+        // Never raise from the logger
+    End;
+End;
+
+Function FormatLogStamp(Dummy : Integer): String;
+Begin
+    Try
+        Result := FormatDateTime('yyyy-mm-dd hh:nn:ss.zzz', Now);
+    Except
+        Result := '';
+    End;
+End;
+
+Procedure RecordCastError(Where : String);
+Begin
+    Inc(CastErrorCount);
+    AppendLog(FormatLogStamp(0) + ',0,_cast_error,' + Where);
+End;
+
+{ A Try/Except caught something that was not a genuine fault. Since the
+  engine has ALREADY shown the exception as a modal by the time the Except
+  runs, this is a record that a dialog fired, not a recovery: one counter,
+  the place, and the command and request that were in flight (set by the
+  dispatcher before it calls the handler). One activity.log row in the
+  RecordCastError style, which the dashboard already tails. Where names the
+  site as '<Function>:<what>'. }
+Procedure RecordCaughtException(Where : String);
+Begin
+    Inc(CaughtExceptionCount);
+    LastCaughtWhere := Where;
+    LastCaughtCommand := CurrentCommand;
+    LastCaughtRequestId := CurrentRequestId;
+    LastCaughtStamp := FormatLogStamp(0);
+    AppendLog(LastCaughtStamp + ',0,_caught_exception,' + Where + ','
+        + CurrentCommand + ',' + CurrentRequestId);
+End;
+
+{ Start a session with nothing counted and no command in flight, never with }
+{ whatever an uninitialised global holds. Called by StartMCPPump.           }
+Procedure ResetCaughtExceptions(Dummy : Integer);
+Begin
+    CaughtExceptionCount := 0;
+    LastCaughtWhere := '';
+    LastCaughtCommand := '';
+    LastCaughtRequestId := '';
+    LastCaughtStamp := '';
+    CurrentCommand := '';
+    CurrentRequestId := '';
+End;
+
+{ The running Altium's major version (26 for '26.10.1.6'), read once and
+  cached in AltiumMajorCache. -1 when the version cannot be read or does not
+  start with a number.
+
+  GATE RULE for callers: skip a version-specific member only when the result
+  is >= 0 AND below the first version known to have it. -1 (unknown) must
+  never suppress anything, so a build whose version string this cannot parse
+  behaves exactly as it does today. The GetProductVersion read is the one
+  App_Ping makes on every keep-alive, so it is fault-only on every supported
+  build; its Except is the fault backstop, not a guard. }
+Function AltiumMajorVersion(Dummy : Integer) : Integer;
+Var
+    Ver, Digits, Ch : String;
+    I : Integer;
+Begin
+    If AltiumMajorCache = '' Then
+    Begin
+        Ver := '';
+        Try
+            Ver := Client.GetProductVersion;
+        Except
+            Ver := '';
+        End;
+        Ver := Trim(Ver);
+        Digits := '';
+        I := 1;
+        While I <= Length(Ver) Do
+        Begin
+            Ch := Copy(Ver, I, 1);
+            If (Ch < '0') Or (Ch > '9') Then Break;
+            Digits := Digits + Ch;
+            I := I + 1;
+        End;
+        { Four digits at most, so StrToInt below can never be handed a value }
+        { that does not fit (and never raises: the string is digits only).   }
+        If (Digits = '') Or (Length(Digits) > 4) Then
+            AltiumMajorCache := '-1'
+        Else
+            AltiumMajorCache := Digits;
+    End;
+    Result := StrToInt(AltiumMajorCache);
 End;
 
 {..............................................................................}
@@ -1158,6 +1306,131 @@ Begin
 End;
 
 {..............................................................................}
+{ CHECK FIRST, DO NOT CATCH. Non-raising pre-checks for the calls that raise  }
+{ on an ordinary bad input. Altium's script engine shows an exception as a    }
+{ modal BEFORE the surrounding Try/Except runs, so a Try around one of these  }
+{ calls is not a guard. Each answers from the DM layer, the Client's own      }
+{ document list or the file system, and none references PCBServer or         }
+{ SchServer, so none can load (or fail to find) an editor server.             }
+{..............................................................................}
+
+{ The focused document's DM kind is Kind ('PCB', 'PCBLIB', 'SCH', 'SCHLIB',   }
+{ ...; case-insensitive). False with no workspace or nothing focused. Use it  }
+{ before a PCBServer.GetCurrentPCBLibrary / GetCurrentPCBBoard that no        }
+{ successful board lookup precedes: merely referencing PCBServer when no PCB  }
+{ document was opened this session is the uncatchable 'Undeclared            }
+{ identifier' modal GetPCBBoardAnywhere documents.                           }
+Function FocusedDocKindIs(Kind : String) : Boolean;
+Var
+    Workspace : IWorkspace;
+    Doc : IDocument;
+Begin
+    Result := False;
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Exit;
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc = Nil Then Exit;
+    Result := UpperCase(Doc.DM_DocumentKind) = UpperCase(Kind);
+End;
+
+{ A document Client.OpenDocument can be handed without raising: one already  }
+{ open (GetDocumentByPath answers, which covers an unsaved new document that }
+{ has no file yet) or one on disk. '' is never present.                      }
+Function DocumentPresent(Path : String) : Boolean;
+Begin
+    Result := False;
+    If Trim(Path) = '' Then Exit;
+    If Client.GetDocumentByPath(Path) <> Nil Then
+        Result := True
+    Else
+        Result := FileExists(Path);
+End;
+
+{ Client.OpenDocument(Kind, Path) only when the document is present; Nil     }
+{ otherwise, which is what every caller already does on an OpenDocument that }
+{ returned Nil or raised. The Try stays as the backstop for a GENUINE fault  }
+{ (a file that is there but will not load).                                 }
+Function OpenDocumentIfPresent(Kind : String; Path : String) : IServerDocument;
+Begin
+    Result := Nil;
+    If Not DocumentPresent(Path) Then Exit;
+    Try
+        Result := Client.OpenDocument(Kind, Path);
+    Except
+        Result := Nil;
+    End;
+End;
+
+{ Path names a PCB document that OpenDocument('PCB', Path) can take: a       }
+{ .PcbDoc (or a legacy .Pcb) that is open or on disk. False sends the        }
+{ callers down their existing 'ServerDoc = Nil' route (fall back / Continue).}
+Function PcbPathOpenable(Path : String) : Boolean;
+Var
+    Ext : String;
+Begin
+    Result := False;
+    Ext := UpperCase(ExtractFileExt(Trim(Path)));
+    If (Ext <> '.PCBDOC') And (Ext <> '.PCB') Then Exit;
+    Result := DocumentPresent(Path);
+End;
+
+{ Whether a PCB or PCB-library document is open now, told WITHOUT ever       }
+{ referencing PCBServer (the reference itself is what raises when the PCB    }
+{ editor server is not loaded). A project member counts only while it is     }
+{ open (GetDocumentByPath answers: a member can be listed and closed); a     }
+{ free document is open by definition, and its DM_FullPath is often a bare   }
+{ name GetDocumentByPath misses, so its kind alone counts.                   }
+{ NOT a test of server registration: a board opened and closed again earlier }
+{ in the session leaves the server loaded and this False. A caller that      }
+{ gates on it must accept losing that case.                                  }
+Function PcbEditorDocOpen(Dummy : Integer) : Boolean;
+Var
+    Workspace : IWorkspace;
+    Project : IProject;
+    Doc : IDocument;
+    Kind, Path : String;
+    P, I : Integer;
+Begin
+    Result := False;
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Exit;
+    For P := 0 To Workspace.DM_ProjectCount - 1 Do
+    Begin
+        Project := Workspace.DM_Projects(P);
+        If Project = Nil Then Continue;
+        For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+        Begin
+            Doc := Project.DM_LogicalDocuments(I);
+            If Doc = Nil Then Continue;
+            Kind := UpperCase(Doc.DM_DocumentKind);
+            If (Kind <> 'PCB') And (Kind <> 'PCBLIB') Then Continue;
+            Path := '';
+            Try Path := Doc.DM_FullPath; Except End;
+            If Path = '' Then Continue;
+            If Client.GetDocumentByPath(Path) <> Nil Then
+            Begin
+                Result := True;
+                Exit;
+            End;
+        End;
+    End;
+    Project := Nil;
+    Try Project := Workspace.DM_FreeDocumentsProject; Except End;
+    If Project = Nil Then Exit;
+    For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    Begin
+        Doc := Project.DM_LogicalDocuments(I);
+        If Doc = Nil Then Continue;
+        Kind := UpperCase(Doc.DM_DocumentKind);
+        If (Kind = 'PCB') Or (Kind = 'PCBLIB') Then
+        Begin
+            Result := True;
+            Exit;
+        End;
+    End;
+End;
+
+{..............................................................................}
 { GetPCBBoardAnywhere - Focus-independent PCB board lookup.                    }
 {..............................................................................}
 
@@ -1168,6 +1441,7 @@ Var
     Doc : IDocument;
     ServerDoc : IServerDocument;
     PrevView : IServerDocumentView;
+    PrevDoc : IServerDocument;
     Path : String;
     I, P : Integer;
 Begin
@@ -1219,8 +1493,23 @@ Begin
             If (UpperCase(Doc.DM_DocumentKind) <> 'PCB') And
                (Pos('.PCBDOC', UpperCase(Path)) <= 0) Then Continue;
 
+            { CHECK FIRST: a project can list a board that is not on disk   }
+            { (moved, renamed, a project copied without it), and handing     }
+            { OpenDocument that dead path raised - a modal before the Except }
+            { - on every read that reached this walk. An ABSOLUTE listing    }
+            { that is neither open nor on disk cannot be opened, so it is    }
+            { skipped with the same Continue a Nil ServerDoc takes. A bare   }
+            { listing is not judged (GetDocumentByPath misses those) and     }
+            { keeps today's attempt. The Except is counted, so a residual    }
+            { raise shows in a live run.                                     }
+            If LooksAbsolutePath(Path) And (Not DocumentPresent(Path)) Then Continue;
+
             ServerDoc := Nil;
-            Try ServerDoc := Client.OpenDocument('PCB', Path); Except End;
+            Try
+                ServerDoc := Client.OpenDocument('PCB', Path);
+            Except
+                RecordCaughtException('GetPCBBoardAnywhere:OpenDocument');
+            End;
             If ServerDoc = Nil Then Continue;
 
             Try Client.ShowDocument(ServerDoc); Except End;
@@ -1231,9 +1520,25 @@ Begin
         If Result <> Nil Then Break;
     End;
 
-    { Restore the user's prior view so the focus blink is invisible. }
+    { Restore the user's prior view so the focus blink is invisible.         }
+    { CHECK FIRST: a view that is not a document's (the Home page, a viewer  }
+    { or web tab) has no OwnerDocument, and ShowDocument(Nil) raised - a     }
+    { modal before the Except - on any fallback that ran from such a view.   }
+    { A Nil owner now restores nothing, which is what the Except left. The   }
+    { owner READ keeps its Try, counted: whether it can raise on such a view }
+    { is not measured (RELEASE_VERIFICATION section 39).                     }
     If (PrevView <> Nil) And (Client <> Nil) Then
-        Try Client.ShowDocument(PrevView.OwnerDocument); Except End;
+    Begin
+        PrevDoc := Nil;
+        Try
+            PrevDoc := PrevView.OwnerDocument;
+        Except
+            RecordCaughtException('GetPCBBoardAnywhere:OwnerDocument');
+            PrevDoc := Nil;
+        End;
+        If PrevDoc <> Nil Then
+            Try Client.ShowDocument(PrevDoc); Except End;
+    End;
 End;
 
 {..............................................................................}
@@ -1255,8 +1560,30 @@ Begin
         Result := GetPCBBoardAnywhere(0);
         Exit;
     End;
+    { CHECK FIRST, then open. A board_path that names no PCB document (a    }
+    { .SchDoc, a .PcbLib) or an absolute path that is neither open nor on   }
+    { disk takes the fallback below without calling OpenDocument: the call  }
+    { raised on such a path (a modal before the Except) or handed back a    }
+    { non-PCB document, after which reading PCBServer could be the          }
+    { uncatchable 'Undeclared identifier' GetPCBBoardAnywhere describes.    }
+    { CONSERVATIVE: the skip is the same GetPCBBoardAnywhere(0) a Nil       }
+    { ServerDoc takes, and a bare .PcbDoc name is not judged (it keeps      }
+    { today's attempt), so only an open that could not have produced a     }
+    { board is skipped.                                                     }
+    If (Not PcbPathOpenable(Path)) And
+       (LooksAbsolutePath(Path) Or
+        ((UpperCase(ExtractFileExt(Trim(Path))) <> '.PCBDOC') And
+         (UpperCase(ExtractFileExt(Trim(Path))) <> '.PCB'))) Then
+    Begin
+        Result := GetPCBBoardAnywhere(0);
+        Exit;
+    End;
     ServerDoc := Nil;
-    Try ServerDoc := Client.OpenDocument('PCB', Path); Except End;
+    Try
+        ServerDoc := Client.OpenDocument('PCB', Path);
+    Except
+        RecordCaughtException('ResolvePCBBoard:OpenDocument');
+    End;
     If ServerDoc = Nil Then
     Begin
         { Path didn't resolve to a loadable PcbDoc; fall back rather than    }
@@ -1725,6 +2052,55 @@ Begin
     Result := P;
 End;
 
+{ THE DM DOCUMENT (IDocument) LISTED AT AN ABSOLUTE PATH, walking every open   }
+{ project and then the free documents; Nil when none lists it. An           }
+{ ISch_Document / IServerDocument is NOT an IDocument, and calling a DM_     }
+{ member on one raises; this is how a handler holding an editor document     }
+{ reaches its DM twin. Matching is by DocPathKey on the listed DM_FullPath,  }
+{ and only an ABSOLUTE listing can match: a free document's bare listing     }
+{ proves nothing about which file it is, and a bare Path is never guessed    }
+{ at, so this can never answer with a namesake (review of c8ee69e). A miss   }
+{ is Nil, which callers treat as 'no DM document', today's outcome.          }
+Function FindDMDocumentByPath(Path : String) : IDocument;
+Var
+    Workspace : IWorkspace;
+    Project : IProject;
+    Doc : IDocument;
+    Want, Full : String;
+    I, J, N : Integer;
+Begin
+    Result := Nil;
+    If Not LooksAbsolutePath(Trim(Path)) Then Exit;
+    Want := DocPathKey(Path);
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Exit;
+    N := Workspace.DM_ProjectCount;
+    For I := 0 To N Do
+    Begin
+        Project := Nil;
+        If I < N Then
+            Project := Workspace.DM_Projects(I)
+        Else
+        Begin
+            Try Project := Workspace.DM_FreeDocumentsProject; Except End;
+        End;
+        If Project = Nil Then Continue;
+        For J := 0 To Project.DM_LogicalDocumentCount - 1 Do
+        Begin
+            Doc := Project.DM_LogicalDocuments(J);
+            If Doc = Nil Then Continue;
+            Full := '';
+            Try Full := Doc.DM_FullPath; Except End;
+            If Not LooksAbsolutePath(Full) Then Continue;
+            If DocPathKey(Full) = Want Then
+            Begin
+                Result := Doc;
+                Exit;
+            End;
+        End;
+    End;
+End;
+
 {..............................................................................}
 { Did the save actually write anything.                                        }
 {                                                                              }
@@ -2134,44 +2510,6 @@ Begin
         If FileExists(FilePath) Then DeleteFile(FilePath);
         Sleep(15);
     End;
-End;
-
-{ Append a line to workspace/activity.log for performance profiling. The     }
-{ polling loop uses this to record per-command timings, and handlers can     }
-{ add their own sub-stage timings for bottleneck analysis. Silently           }
-{ swallows IO errors, logging must not break a command.                      }
-Procedure AppendLog(Line : String);
-Var
-    F : TextFile;
-    LogPath : String;
-Begin
-    Try
-        LogPath := WorkspaceDir + 'activity.log';
-        AssignFile(F, LogPath);
-        If FileExists(LogPath) Then Append(F) Else Rewrite(F);
-        Try
-            WriteLn(F, Line);
-        Finally
-            CloseFile(F);
-        End;
-    Except
-        // Never raise from the logger
-    End;
-End;
-
-Function FormatLogStamp(Dummy : Integer): String;
-Begin
-    Try
-        Result := FormatDateTime('yyyy-mm-dd hh:nn:ss.zzz', Now);
-    Except
-        Result := '';
-    End;
-End;
-
-Procedure RecordCastError(Where : String);
-Begin
-    Inc(CastErrorCount);
-    AppendLog(FormatLogStamp(0) + ',0,_cast_error,' + Where);
 End;
 
 Function IsWhitespaceOrColon(S : String; Idx : Integer) : Boolean;
@@ -2662,7 +3000,33 @@ End;
 { Ordering matters: write the response file BEFORE deleting the progress     }
 { file so there is never a moment where neither exists (which would let       }
 { Python's deadline-check race the cleanup and fire a false hard-timeout).    }
-Procedure StartProgress(RequestId : String);
+{ Command text as the heartbeat may carry it: every character outside     }
+{ A-Z a-z 0-9 . _ - becomes '_', so it can sit between JSON quotes with no }
+{ escaping (EscapeJsonString is in Utils.pas, which builds after this).   }
+Function ProgressSafeText(S : String) : String;
+Var
+    I : Integer;
+    Ch : String;
+Begin
+    Result := '';
+    For I := 1 To Length(S) Do
+    Begin
+        Ch := Copy(S, I, 1);
+        If ((Ch >= 'A') And (Ch <= 'Z')) Or ((Ch >= 'a') And (Ch <= 'z'))
+           Or ((Ch >= '0') And (Ch <= '9')) Or (Ch = '.') Or (Ch = '_')
+           Or (Ch = '-') Then
+            Result := Result + Ch
+        Else
+            Result := Result + '_';
+    End;
+End;
+
+{ The heartbeat NAMES THE COMMAND AND THE REQUEST. While a handler sits    }
+{ behind an exception modal the script engine is blocked and cannot say    }
+{ what it was doing, but this file is already on disk: get_altium_status   }
+{ and the stuck-handler timeout read the command from it (Python side).    }
+{ RequestId is charset-checked by IsValidRequestId, so it needs no mapping. }
+Procedure StartProgress(RequestId : String; Command : String);
 Var
     ProgressPath : String;
 Begin
@@ -2670,7 +3034,9 @@ Begin
     ProgressPath := ProgressFilePath(RequestId);
     Try
         WriteFileContent(ProgressPath,
-            '{"started_ms":' + IntToStr(GetTickCount) + '}');
+            '{"started_ms":' + IntToStr(GetTickCount)
+            + ',"command":"' + ProgressSafeText(Command)
+            + '","request_id":"' + RequestId + '"}');
     Except End;
 End;
 
@@ -2780,8 +3146,10 @@ Begin
         FindFiles(WorkspaceDir, 'request_*.json', 63, False, Files);
         For I := 0 To Files.Count - 1 Do
             Try
-                DeleteFile(Files[I]);
-                Inc(Purged);
+                { Counted only when the file went: DeleteFile answers False }
+                { for one it could not remove, and the log line used to     }
+                { count that too.                                            }
+                If DeleteFile(Files[I]) Then Inc(Purged);
             Except End;
     Finally
         Files.Free;
@@ -2808,8 +3176,10 @@ Begin
         FindFiles(WorkspaceDir, 'response_*.json', 63, False, Files);
         For I := 0 To Files.Count - 1 Do
             Try
-                DeleteFile(Files[I]);
-                Inc(Purged);
+                { Counted only when the file went: DeleteFile answers False }
+                { for one it could not remove, and the log line used to     }
+                { count that too.                                            }
+                If DeleteFile(Files[I]) Then Inc(Purged);
             Except End;
     Finally
         Files.Free;
@@ -2817,6 +3187,37 @@ Begin
     If Purged > 0 Then
         AppendLog(FormatLogStamp(0) + ',0,_purge_responses,count=' + IntToStr(Purged)
             + ',0,');
+End;
+
+{ Whether StrToInt(V) is safe for a config value, so LoadMCPConfig never     }
+{ hands it anything that raises (the raise is a modal before its Except).    }
+{ Main.pas builds before Utils.pas, so IsIntStr is not visible here. An      }
+{ optional sign, then digits only, at most nine of them after leading zeros: }
+{ nine digits always fit Int32, and every config value is far below that.    }
+{ Leading blanks are allowed (StrToInt skips them); a trailing one is not    }
+{ (StrToInt raises on it).                                                   }
+Function CfgIntOk(V : String) : Boolean;
+Var
+    I, StartPos, Sig : Integer;
+    Ch : String;
+Begin
+    Result := False;
+    If V = '' Then Exit;
+    StartPos := 1;
+    While (StartPos <= Length(V)) And (Copy(V, StartPos, 1) = ' ') Do
+        StartPos := StartPos + 1;
+    If StartPos > Length(V) Then Exit;
+    If (Copy(V, StartPos, 1) = '-') Or (Copy(V, StartPos, 1) = '+') Then
+        StartPos := StartPos + 1;
+    If StartPos > Length(V) Then Exit;
+    Sig := 0;
+    For I := StartPos To Length(V) Do
+    Begin
+        Ch := Copy(V, I, 1);
+        If (Ch < '0') Or (Ch > '9') Then Exit;
+        If (Sig > 0) Or (Ch <> '0') Then Sig := Sig + 1;
+    End;
+    Result := Sig <= 9;
 End;
 
 {..............................................................................}
@@ -2831,28 +3232,32 @@ Var
     ConfigPath, Content, V : String;
     N : Integer;
 Begin
+    { CHECK FIRST: each value reaches StrToInt only when CfgIntOk says it    }
+    { cannot raise. A hand-edited 600000.0, 1e6 or 3000000000 used to raise  }
+    { inside a Try, and the raise is a modal before the Except; such a value }
+    { now leaves the compiled-in default, exactly what the empty Except did. }
     ConfigPath := WorkspaceDir + CONFIG_FILE;
     If Not FileExists(ConfigPath) Then Exit;
     Content := ReadFileContent(ConfigPath);
     If Content = '' Then Exit;
 
     V := ExtractJsonValue(Content, 'poll_interval_active_ms');
-    If V <> '' Then Begin Try N := StrToInt(V); If N > 0 Then PollIntervalActiveMs := N; Except End; End;
+    If CfgIntOk(V) Then Begin N := StrToInt(V); If N > 0 Then PollIntervalActiveMs := N; End;
 
     V := ExtractJsonValue(Content, 'poll_interval_idle_ms');
-    If V <> '' Then Begin Try N := StrToInt(V); If N > 0 Then PollIntervalIdleMs := N; Except End; End;
+    If CfgIntOk(V) Then Begin N := StrToInt(V); If N > 0 Then PollIntervalIdleMs := N; End;
 
     V := ExtractJsonValue(Content, 'idle_threshold');
-    If V <> '' Then Begin Try N := StrToInt(V); If N > 0 Then IdleThreshold := N; Except End; End;
+    If CfgIntOk(V) Then Begin N := StrToInt(V); If N > 0 Then IdleThreshold := N; End;
 
     V := ExtractJsonValue(Content, 'auto_shutdown_ms');
-    If V <> '' Then Begin Try N := StrToInt(V); If N >= 0 Then AutoShutdownMs := N; Except End; End;
+    If CfgIntOk(V) Then Begin N := StrToInt(V); If N >= 0 Then AutoShutdownMs := N; End;
 
     V := ExtractJsonValue(Content, 'yield_iterations');
-    If V <> '' Then Begin Try N := StrToInt(V); If N > 0 Then YieldIterations := N; Except End; End;
+    If CfgIntOk(V) Then Begin N := StrToInt(V); If N > 0 Then YieldIterations := N; End;
 
     V := ExtractJsonValue(Content, 'yield_every_n_active');
-    If V <> '' Then Begin Try N := StrToInt(V); If N > 0 Then YieldEveryNActive := N; Except End; End;
+    If CfgIntOk(V) Then Begin N := StrToInt(V); If N > 0 Then YieldEveryNActive := N; End;
 End;
 
 {..............................................................................}

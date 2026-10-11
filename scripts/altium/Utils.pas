@@ -512,6 +512,13 @@ Begin
     { process call on every read for no reason.                            }
     If SavedPath = '' Then Exit;
     If UpperCase(CurrentFocusedDocPath(0)) = UpperCase(SavedPath) Then Exit;
+    { An ABSOLUTE path that is neither open nor on disk (the document was   }
+    { closed and deleted, or renamed, while the handler ran) has nothing    }
+    { OpenObject can focus: the process could only end in Altium's own      }
+    { 'file not found' dialog, and today's catch-all then restores nothing  }
+    { either. A bare name (a free document's listing) is not judged here -  }
+    { GetDocumentByPath misses those - so it keeps today's attempt.         }
+    If LooksAbsolutePath(SavedPath) And (Not DocumentPresent(SavedPath)) Then Exit;
 
     Try
         ResetParameters;
@@ -787,23 +794,50 @@ Function IsFloatStr(S : String) : Boolean;
 Var
     I, StartPos : Integer;
     Dots, Digits, Exponents : Integer;
+    IntSig, FracZeros, ExpSig, ExpVal, Mag : Integer;
+    SeenFrac : Boolean;
     Ch : String;
 Begin
     S := Trim(S);
     Result := False;
     If S = '' Then Exit;
     StartPos := 1;
-    If (S[1] = '-') Or (S[1] = '+') Then StartPos := 2;
+    If (Copy(S, 1, 1) = '-') Or (Copy(S, 1, 1) = '+') Then StartPos := 2;
     If StartPos > Length(S) Then Exit;
 
     Dots := 0;
     Digits := 0;
     Exponents := 0;
+    IntSig := 0;         { integer-part digits after leading zeros }
+    FracZeros := 0;      { zeros after '.' before the first non-zero digit }
+    SeenFrac := False;   { a non-zero digit after '.' has been seen }
+    ExpSig := 0;
+    ExpVal := 0;
     For I := StartPos To Length(S) Do
     Begin
         Ch := Copy(S, I, 1);
         If (Ch >= '0') And (Ch <= '9') Then
-            Digits := Digits + 1
+        Begin
+            If Exponents = 0 Then
+            Begin
+                Digits := Digits + 1;
+                If Dots = 0 Then
+                Begin
+                    If (IntSig > 0) Or (Ch <> '0') Then IntSig := IntSig + 1;
+                End
+                Else If (IntSig = 0) And (Not SeenFrac) Then
+                Begin
+                    If Ch = '0' Then FracZeros := FracZeros + 1
+                    Else SeenFrac := True;
+                End;
+            End
+            Else If (ExpSig > 0) Or (Ch <> '0') Then
+            Begin
+                ExpSig := ExpSig + 1;
+                If ExpSig > 6 Then Exit;   { an exponent of a million or more }
+                ExpVal := ExpVal * 10 + Pos(Ch, '0123456789') - 1;
+            End;
+        End
         Else If Ch = '.' Then
         Begin
             Dots := Dots + 1;
@@ -828,6 +862,25 @@ Begin
         Else
             Exit;                          { anything else is not a number }
     End;
+
+    { NOTHING StrToFloat WOULD OVERFLOW ON. A syntactically perfect '1e999'
+      (or 400 plain digits) raised EConvertError all the same, and the raise
+      is a modal before the Except. Mag is the value's decimal order of
+      magnitude (1.5e3 -> 3, 0.05e3 -> 1); a Double holds below 1.79e308, so
+      anything of order 307 or less converts and nothing above is accepted.
+      Every value that parsed before still does, except an order-308 value
+      (1e308 .. 1.79e308) and an exponent of a million or more that a
+      million-digit fraction would have pulled back into range.
+      The exponent is never negative here: the loop above meets the sign
+      after 'e' as a non-number and exits, so a signed exponent is refused
+      already. Allowing one needs an underflow rule for this too. }
+    If IntSig > 0 Then
+        Mag := IntSig - 1 + ExpVal
+    Else If SeenFrac Then
+        Mag := ExpVal - FracZeros - 1
+    Else
+        Mag := 0;                          { the mantissa is zero }
+    If Mag > 307 Then Exit;
     Result := Digits > 0;
 End;
 
@@ -844,6 +897,57 @@ Begin
     For I := StartPos To Length(S) Do
         If (S[I] < '0') Or (S[I] > '9') Then Exit;
     Result := True;
+End;
+
+{ IsIntStr, AND the value fits a 32-bit Integer, so StrToInt cannot raise on
+  it. IsIntStr alone is a syntax test: '99999999999' passed it, and
+  StrToInt then raised EConvertError - a modal before StrToIntDef's Except.
+  Leading zeros do not count against the width; an equal-length digit string
+  compares as the number it spells. The bound is written as its first nine
+  digits and its last one, because the full 32-bit literal is kept out of the
+  sources (tests/test_sch_properties_match_their_interface.py: AD25 refuses
+  it as a constant). }
+Function IsInt32Str(S : String) : Boolean;
+Var
+    T, Head, LastMax : String;
+    Neg : Boolean;
+Begin
+    Result := False;
+    If Not IsIntStr(S) Then Exit;
+    T := Trim(S);
+    Neg := Copy(T, 1, 1) = '-';
+    If Neg Then T := Copy(T, 2, Length(T));
+    While (Length(T) > 1) And (Copy(T, 1, 1) = '0') Do
+        T := Copy(T, 2, Length(T));
+    If Length(T) < 10 Then
+        Result := True
+    Else If Length(T) = 10 Then
+    Begin
+        Head := Copy(T, 1, 9);
+        If Neg Then LastMax := '8' Else LastMax := '7';
+        If Head < '214748364' Then
+            Result := True
+        Else If Head = '214748364' Then
+            Result := Copy(T, 10, 1) <= LastMax;
+    End;
+End;
+
+{ The folder a file is about to be created or copied into exists, checked
+  without raising (AssignFile/Rewrite, SaveToFile and CopyFile into a missing
+  folder raise, and the raise is a modal before the Except). A bare file name
+  has no folder of its own to check and passes, so the caller does exactly
+  what it does today with one; '' never passes. }
+Function TargetDirExists(Path : String) : Boolean;
+Var
+    Dir : String;
+Begin
+    Result := False;
+    If Trim(Path) = '' Then Exit;
+    Dir := ExtractFilePath(Path);
+    If Dir = '' Then
+        Result := True
+    Else
+        Result := DirectoryExists(Dir);
 End;
 
 {..............................................................................}
@@ -1001,6 +1105,15 @@ Begin
         Result := Default;
         Exit;
     End;
+    { IsFloatStr trims, and StrToFloat does not: its text scan skips SPACES  }
+    { only, so a tab, CR or LF at either end ('1.5'#13, #9'2') passed the    }
+    { check above and raised in the conversion - a modal, then the Default   }
+    { the Except returned. Refused here with that same Default.              }
+    If (Copy(S, Length(S), 1) < ' ') Or (Copy(S, 1, 1) < ' ') Then
+    Begin
+        Result := Default;
+        Exit;
+    End;
 
     { IsFloatStr above guarantees S is in dot form, so the conversion is
       done by putting it into the form THIS locale parses rather than by
@@ -1036,7 +1149,16 @@ Begin
     { Guard the conversion: a non-integer value (blank, 'null', or a symbolic  }
     { token like 'eElectricOutput') returns Default WITHOUT calling StrToInt,  }
     { so no EConvertError is raised. The Try/Except stays as a backstop.       }
-    If Not IsIntStr(S) Then
+    {                                                                          }
+    { CHECK FIRST, ALL OF IT. IsIntStr is a syntax test and trims, so two      }
+    { kinds of value passed it that StrToInt still raised on, and the raise is }
+    { a modal before the Except: a value outside 32 bits ('99999999999',       }
+    { '4294967295'; IsInt32Str refuses it) and a control or blank character at }
+    { an end StrToInt does not skip (Val skips leading SPACES only, and        }
+    { nothing trailing: '12 ', '5'#13, #9'5'). Each now returns Default        }
+    { without the call - the value the Except returned after the dialog.       }
+    If (Not IsInt32Str(S)) Or (Copy(S, Length(S), 1) <= ' ')
+       Or (Copy(S, 1, 1) < ' ') Then
         Result := Default
     Else
     Begin
@@ -1060,6 +1182,24 @@ End;
 
 // UnescapeJsonString is defined in Main.pas (compiles first)
 // and applied automatically inside ExtractJsonValue for string values.
+
+{ Copper signal layer: TopLayer, MidLayer1..30 or BottomLayer. The range
+  test PCB.pas uses inline, named, and in place of ILayer.IsSignalLayer: ILayer
+  is undeclared in DelphiScript, so calling it raised every time. }
+Function LayerIdIsSignal(L : Integer) : Boolean;
+Begin
+    Result := (L >= eTopLayer) And (L <= eBottomLayer);
+End;
+
+{ Any copper layer: a signal layer or InternalPlane1..16. The layers that   }
+{ carry CopperThickness, sit in the copper stack, and can be inserted or    }
+{ removed as copper. A caller that wants only the INNER copper also         }
+{ excludes eTopLayer and eBottomLayer.                                      }
+Function IsElectricalLayerId(L : Integer) : Boolean;
+Begin
+    Result := LayerIdIsSignal(L)
+        Or ((L >= eInternalPlane1) And (L <= eInternalPlane16));
+End;
 
 Function GetLayerFromString(LayerStr : String) : TLayer;
 Begin
@@ -1482,13 +1622,22 @@ End;
 { readable. AD17 and AD18 have no mechanical layer kinds at all, and the read }
 { faults there rather than returning zero.                                    }
 
+{ CHECK FIRST: on a build older than AD19 the read is not attempted at all,  }
+{ because the Except below runs only AFTER the engine has shown the fault as  }
+{ a modal, once per mechanical layer a layer-model read walks. CONSERVATIVE   }
+{ by the rule in AltiumMajorVersion: the skip returns -1, the value the       }
+{ Except returns after that modal, and an unreadable version (-1) never       }
+{ skips. The Except stays, and records itself, for a fault on a build this    }
+{ gate lets through (none is known; the live run would show it).            }
 Function ReadMechKind(LayerObj : IPCB_LayerObject_V7) : Integer;
 Begin
     Result := -1;
     If LayerObj = Nil Then Exit;
+    If (AltiumMajorVersion(0) >= 0) And (AltiumMajorVersion(0) < 19) Then Exit;
     Try
         Result := LayerObj.Kind;
     Except
+        RecordCaughtException('ReadMechKind:Kind');
         Result := -1;
     End;
 End;
@@ -1562,9 +1711,17 @@ Begin
         Result := GetLayerFromString('Mechanical' + IntToStr(N));
         Exit;
     End;
+    { NOT GATED, deliberately. Which build first declares LayerUtils is not   }
+    { known, and mechanical layers above 16 predate AD19, so a version gate   }
+    { could refuse a layer that resolves today. The Except is counted        }
+    { instead (RecordCaughtException), so a live run on any build shows       }
+    { whether it ever fires; an UNDECLARED LayerUtils would not reach it at  }
+    { all (that fault is uncatchable) and would show as the dispatcher's     }
+    { catch. See RELEASE_VERIFICATION section 39.                            }
     Try
         Result := LayerUtils.MechanicalLayer(N);
     Except
+        RecordCaughtException('MechLayerFromNumber:LayerUtils.MechanicalLayer');
         Result := eNoLayer;
     End;
 End;

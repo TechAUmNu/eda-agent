@@ -49,6 +49,7 @@ from .recovery import (
     DEAD_LOOP,
     CORRUPT_RESPONSE,
 )
+from .inflight import read_in_flight, read_last_caught
 
 from ..safety import refuse_command
 
@@ -399,6 +400,15 @@ class AltiumBridge:
             "candidate_pids": [c.pid for c in selection.candidates],
             "selected_by": selection.selected_by,
         }
+        # WHAT ALTIUM IS DOING, read from the workspace files and not over
+        # the bridge, so it answers while an Altium error dialog blocks the
+        # script engine: the calls whose progress heartbeat is on disk
+        # (command, request id, age) and the last exception a Try/Except
+        # caught (activity.log's _caught_exception row - each one is a
+        # modal that fired).
+        workspace = self.config.workspace_dir
+        common["in_flight"] = read_in_flight(workspace)
+        common["last_caught"] = read_last_caught(workspace)
         if selection.process:
             return {
                 "running": True,
@@ -835,7 +845,14 @@ class AltiumBridge:
         probe = self._dialog_probe()
 
         if extensions >= _MAX_HEARTBEAT_EXTENSIONS:
-            self._note_fault(workspace_dir, recovery_guidance(STUCK_HANDLER))
+            # Name the call Altium is stuck on, from its own heartbeat (this
+            # request's progress file, which the extensions were counted
+            # on), and say an error dialog may be what is holding it.
+            flying = read_in_flight(workspace_dir)
+            mine = [f for f in flying if f.get("request_id") == request_id]
+            in_flight = (mine or flying or [None])[0]
+            self._note_fault(workspace_dir,
+                             recovery_guidance(STUCK_HANDLER, in_flight))
             # PAST TENSE, because that is all the evidence supports. This
             # message used to say "Altium IS responding to keepalives ...
             # likely stuck in an infinite loop", present tense, as a fixed
@@ -855,9 +872,10 @@ class AltiumBridge:
                 f"wait, but that is not rechecked here, so the loop may be "
                 f"stuck in a long operation OR may since have died. Confirm "
                 f"with app_ping before choosing a recovery. "
-                + recovery_message(STUCK_HANDLER)
+                + recovery_message(STUCK_HANDLER, in_flight)
                 + self._dialog_suffix(probe),
-                details={"recovery": recovery_guidance(STUCK_HANDLER),
+                details={"recovery": recovery_guidance(STUCK_HANDLER,
+                                                       in_flight),
                          "dialogs": probe},
             )
         self._note_fault(workspace_dir, recovery_guidance(DEAD_LOOP))

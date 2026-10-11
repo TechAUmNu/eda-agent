@@ -224,6 +224,13 @@ def register_application_tools(mcp):
         - Process ID
         - Executable path
         - Whether the MCP bridge is attached
+        - ``in_flight``: the calls Altium is working on now, newest first,
+          each ``{command, request_id, age_s}``, read from the progress
+          heartbeat files rather than over the bridge, so it answers while
+          an Altium error dialog is blocking the script engine
+        - ``last_caught``: the last exception a script Try/Except caught,
+          ``{where, command, request_id, at}`` from activity.log, or None.
+          Each one is a modal dialog that fired in Altium.
 
         MORE THAN ONE ALTIUM. ``candidate_count`` and ``candidate_pids``
         list every instance, and ``selected_by`` says how ``pid`` was
@@ -773,6 +780,14 @@ def register_application_tools(mcp):
               on an old build, because most of the toolset works on one.
               It is here because a bug report without it costs a round
               trip, and twice the answer changed the diagnosis.
+            - cast_errors: silent interface-cast failures this session
+            - caught_exceptions: Try/Excepts in the script that caught
+              something this session. Altium shows every script exception
+              as a modal 'press OK' dialog BEFORE the Except runs, so a
+              rise between two pings means a dialog fired, even one
+              somebody clicked away. None from a script too old to say.
+            - last_caught: the last of those, {where, command, request_id,
+              at}, or None
             - message: human-readable status (flags stale cache if detected)
         """
         bridge = get_bridge()
@@ -784,6 +799,9 @@ def register_application_tools(mcp):
                 "bundled_script_version": _bundled_script_version(),
                 "version_match": False,
                 "altium_version": "",
+                "cast_errors": None,
+                "caught_exceptions": None,
+                "last_caught": None,
                 "message": "Altium Designer is not running",
             }
 
@@ -797,6 +815,9 @@ def register_application_tools(mcp):
                 "bundled_script_version": bundled,
                 "version_match": False,
                 "altium_version": "",
+                "cast_errors": None,
+                "caught_exceptions": None,
+                "last_caught": None,
                 "message": "Altium script is not responding. Run StartMCPServer in Altium_API.PrjScr.",
             }
 
@@ -828,6 +849,9 @@ def register_application_tools(mcp):
             "bundled_script_version": bundled,
             "version_match": match,
             "altium_version": result.get("altium_version") or "",
+            "cast_errors": result.get("cast_errors"),
+            "caught_exceptions": result.get("caught_exceptions"),
+            "last_caught": result.get("last_caught"),
             "message": msg,
             "_system_reminder": _SESSION_REMINDER,
         }

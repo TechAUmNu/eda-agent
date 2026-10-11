@@ -40,6 +40,13 @@ Var
     InFlightCommand  : String;
     InFlightStartMs  : Cardinal;
     InFlightActive   : Boolean;
+    { Which request, and the WALL-CLOCK time it started. The status line    }
+    { shows both because an exception modal blocks the script engine: the   }
+    { spinner's elapsed readout may stop ticking behind it, but the form    }
+    { still repaints, so a fixed 'since hh:nn:ss' tells a user how long the }
+    { dialog has been up and which call it belongs to.                      }
+    InFlightRequestId : String;
+    InFlightSince    : String;
 
     { Free-text filter applied at WRITE time to mmo_Log.Lines. Empty = no   }
     { text filter. Changing the filter only affects new entries; old ones   }
@@ -353,12 +360,23 @@ Begin
 End;
 
 
+{ The in-flight call as the status line names it: the command, the first   }
+{ eight characters of its request id and the wall-clock start.             }
+Function InFlightLabel(Dummy : Integer) : String;
+Begin
+    Result := InFlightCommand + '  #' + Copy(InFlightRequestId, 1, 8)
+        + '  since ' + InFlightSince;
+End;
+
 { Dispatcher calls this just before invoking ProcessCommand so the spinner   }
 { kicks on. ResetInFlight clears it after the call returns.                  }
-Procedure SetInFlight(Command : String);
+Procedure SetInFlight(Command : String; RequestId : String);
 Begin
     Try
         InFlightCommand := Command;
+        InFlightRequestId := RequestId;
+        InFlightSince := '';
+        Try InFlightSince := FormatDateTime('hh:nn:ss', Now); Except End;
         InFlightStartMs := GetTickCount;
         InFlightActive := True;
         SpinnerFrame := 0;
@@ -366,7 +384,7 @@ Begin
         Try
             pnl_StatusDot.Color := COLOR_ACCENT_AMBER;
             lbl_Spinner.Caption := SpinnerGlyph(SpinnerFrame);
-            lbl_Status.Caption := Command + '  (0.0 s)';
+            lbl_Status.Caption := InFlightLabel(0) + '  (0.0 s)';
             lbl_Status.Font.Color := COLOR_TEXT_BODY;
         Except End;
     Except End;
@@ -377,6 +395,8 @@ Begin
     Try
         InFlightActive := False;
         InFlightCommand := '';
+        InFlightRequestId := '';
+        InFlightSince := '';
         Try tmr_Spinner.Enabled := False; Except End;
         Try
             lbl_Spinner.Caption := '';
@@ -536,7 +556,7 @@ Begin
     ElapsedMs := GetTickCount - InFlightStartMs;
     Tenths := ElapsedMs Div 100;
     Try
-        lbl_Status.Caption := InFlightCommand + '  ('
+        lbl_Status.Caption := InFlightLabel(0) + '  ('
             + IntToStr(Tenths Div 10) + '.' + IntToStr(Tenths Mod 10) + ' s)';
     Except End;
 End;
@@ -1098,6 +1118,11 @@ Begin
     End;
 
     StatusLastCommand := Command;
+    { Named for RecordCaughtException BEFORE dispatch: once a handler's     }
+    { exception is up as a modal the engine is blocked, and anything that   }
+    { names the call has to be in place already. Cleared after the reply.   }
+    CurrentCommand := Command;
+    CurrentRequestId := RequestId;
     Inc(StatusRequestCount);
     StartMs := GetTickCount;
     ResultTag := 'OK';
@@ -1108,7 +1133,7 @@ Begin
 
     { Spinner + in-flight readout on the dashboard. Reset on exit so the }
     { status pill drops back to idle/paused/green when we're done.       }
-    SetInFlight(Command);
+    SetInFlight(Command, RequestId);
 
     { WHERE THE CALLER WAS LOOKING, BEFORE THE HANDLER RAN.
       Nearly every tool acts on the focused document, and several change
@@ -1127,11 +1152,15 @@ Begin
     { working" from "polling loop dead" when the 10 s default deadline runs   }
     { out on a legitimately-slow handler. Delete only AFTER writing the       }
     { response, so at no point are both files missing.                        }
-    StartProgress(RequestId);
+    StartProgress(RequestId, Command);
     Try
         Try
             ResponseContent := ProcessCommand(Command, Params, RequestId);
         Except
+            { The handler raised and nothing nearer caught it. The engine  }
+            { has already shown it as a modal; count it against this      }
+            { command so app_ping's caught_exceptions says so.             }
+            RecordCaughtException('dispatcher');
             ExceptionMsg := 'Unhandled exception processing: ' + Command;
             ResponseContent := BuildErrorResponse(RequestId, 'INTERNAL_ERROR', ExceptionMsg);
             ResultTag := 'EXCEPTION';
@@ -1211,6 +1240,8 @@ Begin
     AppendLogLine(Command, DurationMs, DashIsError, RequestId, DashDetail);
 
     ResetInFlight(0);
+    CurrentCommand := '';
+    CurrentRequestId := '';
 
     Result := True;
 End;
@@ -1498,6 +1529,13 @@ Begin
     If Running Then Exit;
 
     InitDefaultConfig(0);
+    { Nothing counted and nothing in flight at session start; the Altium   }
+    { version is re-read on first use (see AltiumMajorVersion).           }
+    ResetCaughtExceptions(0);
+    { cast_errors is per pump session too, like caught_exceptions, so a    }
+    { before/after reading within one session compares like with like.    }
+    CastErrorCount := 0;
+    AltiumMajorCache := '';
     EnsureWorkspaceDir(0);
     LoadMCPConfig(0);
     { Startup purge: nothing on disk can belong to a live exchange, because no

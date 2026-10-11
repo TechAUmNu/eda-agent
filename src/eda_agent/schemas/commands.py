@@ -35,6 +35,12 @@ class PingResponse(BaseModel):
     script_version: str
     protocol_version: int
     cast_errors: int = 0
+    # Try/Excepts that caught something this pump session (each one is an
+    # exception modal that fired, since Altium's engine shows the modal
+    # before the Except runs), and the last one: {where, command,
+    # request_id, at}. See RecordCaughtException in Main.pas.
+    caught_exceptions: int = 0
+    last_caught: Optional[dict] = None
 
 
 register_command(

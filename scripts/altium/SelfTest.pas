@@ -368,11 +368,12 @@ Begin
     AssertValidJson(Resp, 'ActiveDoc response');
     AssertContains(Resp, '"success":true', 'ActiveDoc succeeds');
 
-    // Stop server should set Running to False
-    Running := True;
-    Resp := HandleApplicationCommand('stop_server', '{}', 'test-stop');
-    AssertContains(Resp, '"success":true', 'StopServer succeeds');
-    AssertTrue(Running = False, 'StopServer sets Running to False');
+    // stop_server is NOT run live here any more. It calls SaveAllDirty,
+    // which writes EVERY open document (mtime and parameter-UniqueID churn
+    // on files the tester did not touch) and can meet Altium's own
+    // 'A command is currently active' prompt, a modal, before it clears
+    // Running. Its contract (save pass, Running := False, stopped:true) is
+    // checked offline by tests/test_popup_free_core.py instead.
 
     // Unknown action
     Resp := HandleApplicationCommand('nonexistent_action', '{}', 'test-unk');

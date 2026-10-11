@@ -15,6 +15,8 @@ copy, consumed by the bridge exceptions and the web dashboard.
 
 from __future__ import annotations
 
+from typing import Optional
+
 # Fault kinds the bridge can distinguish.
 STUCK_HANDLER = "stuck_handler"      # heartbeat ticking, handler never returns
 DEAD_LOOP = "dead_loop"              # no heartbeat, no response
@@ -29,13 +31,29 @@ _RELAUNCH_STEP = (
     "Dispatcher.pas > StartMCPServer > Run."
 )
 
+# An exception inside a handler is shown by Altium's script engine as a
+# MODAL "press OK" dialog BEFORE the handler's own Try/Except runs, and
+# the engine is blocked until someone presses it. From outside that looks
+# exactly like a handler stuck in a loop (the heartbeat file stays), so
+# the stuck-handler guidance names the dialog first: pressing OK lets the
+# handler finish and the call returns INTERNAL_ERROR, and stopping the
+# script instead would throw that away.
+_DIALOG_STEP = (
+    "Look for an Altium error dialog first: an exception inside the "
+    "handler is shown as a modal 'press OK' dialog that blocks the script "
+    "engine. If one is open, note its text and press OK; the handler then "
+    "finishes and the call returns INTERNAL_ERROR, so do not stop the "
+    "script."
+)
+
 _GUIDANCE = {
     STUCK_HANDLER: {
         "diagnosis": (
             "Altium is alive (it answered keep-alives) but the command's "
-            "handler never returned: likely stuck in a loop."
+            "handler never returned: an Altium error dialog may be open and "
+            "blocking it, or it is stuck in a loop."
         ),
-        "steps": [_STOP_STEP, _RELAUNCH_STEP],
+        "steps": [_DIALOG_STEP, _STOP_STEP, _RELAUNCH_STEP],
     },
     DEAD_LOOP: {
         "diagnosis": (
@@ -66,11 +84,29 @@ _GUIDANCE = {
 _DOCS_HINT = "See README 'Known limitations' > 'Altium DelphiScript engine can crash'."
 
 
-def recovery_guidance(fault: str) -> dict:
+def _in_flight_phrase(in_flight: Optional[dict]) -> str:
+    """'application.save_all (request 1a2b3c4d)', or '' with nothing known."""
+    if not in_flight:
+        return ""
+    command = str(in_flight.get("command") or "").strip()
+    if not command:
+        return ""
+    request_id = str(in_flight.get("request_id") or "").strip()
+    if request_id:
+        return f"{command} (request {request_id[:8]})"
+    return command
+
+
+def recovery_guidance(fault: str, in_flight: Optional[dict] = None) -> dict:
     """Structured recovery steps for a fault kind.
 
     Returns ``{fault, diagnosis, steps:[...], docs}``. An unknown fault gets
     a generic stop-and-relaunch fallback so callers never get an empty dict.
+
+    ``in_flight`` is the call Altium is working on, as the progress
+    heartbeat names it (``{"command", "request_id", ...}``; see
+    ``read_in_flight``). When given, a stuck-handler diagnosis names that
+    command and the result carries it as ``in_flight``.
     """
     entry = _GUIDANCE.get(fault)
     if entry is None:
@@ -78,21 +114,36 @@ def recovery_guidance(fault: str) -> dict:
             "diagnosis": "The Altium script engine is not responding as expected.",
             "steps": [_STOP_STEP, _RELAUNCH_STEP],
         }
-    return {
+    diagnosis = entry["diagnosis"]
+    named = _in_flight_phrase(in_flight)
+    if named and fault == STUCK_HANDLER:
+        diagnosis = (
+            f"Altium is alive (it answered keep-alives) but the handler for "
+            f"{named} never returned: an Altium error dialog may be open and "
+            f"blocking it (pressing OK lets it finish with INTERNAL_ERROR), "
+            f"or it is stuck in a loop."
+        )
+    out = {
         "fault": fault,
-        "diagnosis": entry["diagnosis"],
+        "diagnosis": diagnosis,
         "steps": list(entry["steps"]),
         "docs": _DOCS_HINT,
     }
+    if named:
+        out["in_flight"] = dict(in_flight)
+    return out
 
 
-def recovery_message(fault: str) -> str:
+def recovery_message(fault: str, in_flight: Optional[dict] = None) -> str:
     """One-line, numbered recovery steps for embedding in an error message.
 
     The MCP layer surfaces ``str(exception)``, not the structured details, so
     the actionable steps must live in the message text too. Same source as
     ``recovery_guidance``, no drift.
     """
-    g = recovery_guidance(fault)
+    g = recovery_guidance(fault, in_flight)
     numbered = " ".join(f"{i}) {s}" for i, s in enumerate(g["steps"], 1))
+    named = _in_flight_phrase(in_flight)
+    if named and fault == STUCK_HANDLER:
+        return f"In flight: {named}. Recovery: {numbered}"
     return f"Recovery: {numbered}"

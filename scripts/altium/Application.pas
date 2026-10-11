@@ -6,7 +6,7 @@
 
 Function App_Ping(RequestId : String) : String;
 Var
-    Ver : String;
+    Ver, Caught : String;
 Begin
     // Return the compiled-in SCRIPT_VERSION so Python can detect a stale
     // Altium script cache. cast_errors surfaces the silent-cast counter
@@ -22,17 +22,33 @@ Begin
     // would take away the part that works to prevent the part that does
     // not. Empty when the API will not answer, which is itself a fact
     // worth having.
+    //
+    // caught_exceptions / last_caught: how many Try/Excepts that are not
+    // fault-only backstops have caught something this pump session, and
+    // the last one (RecordCaughtException). The engine shows every
+    // exception as a modal BEFORE the Except runs, so a rise across a run
+    // means a dialog fired, even one somebody clicked away.
     Ver := '';
     Try
         Ver := Client.GetProductVersion;
     Except
         Ver := '';
     End;
+    If LastCaughtStamp = '' Then
+        Caught := JsonNull('last_caught')
+    Else
+        Caught := JsonRaw('last_caught', JsonObj(
+            JsonStr('where', LastCaughtWhere) + ',' +
+            JsonStr('command', LastCaughtCommand) + ',' +
+            JsonStr('request_id', LastCaughtRequestId) + ',' +
+            JsonStr('at', LastCaughtStamp)));
     Result := BuildSuccessResponse(RequestId,
         '{"pong":true,"script_version":"' + SCRIPT_VERSION +
         '","altium_version":"' + EscapeJsonString(Ver) +
         '","protocol_version":' + IntToStr(PROTOCOL_VERSION) +
-        ',"cast_errors":' + IntToStr(CastErrorCount) + '}');
+        ',"cast_errors":' + IntToStr(CastErrorCount) +
+        ',"caught_exceptions":' + IntToStr(CaughtExceptionCount) +
+        ',' + Caught + '}');
 End;
 
 Function App_GetVersion(RequestId : String) : String;
@@ -152,8 +168,15 @@ Begin
     // independent of workspace focus.
     If Data = '' Then
     Begin
+        { CHECK FIRST: with no schematic server loaded (PCB-only work)       }
+        { SchServer is Nil and the call raised - a modal before the Except.  }
+        { Nil now leaves SchDoc Nil, which is what the Except left, and the  }
+        { PCB fallback below answers as before.                              }
         SchDoc := Nil;
-        Try SchDoc := SchServer.GetCurrentSchDocument; Except SchDoc := Nil; End;
+        If SchServer <> Nil Then
+        Begin
+            Try SchDoc := SchServer.GetCurrentSchDocument; Except SchDoc := Nil; End;
+        End;
         If SchDoc <> Nil Then
         Begin
             FileName := SchDoc.DocumentName;
@@ -441,20 +464,29 @@ Begin
         Data := Data + '"pcb":null';
     End;
 
-    { Try to get schematic preferences from active schematic }
-    Try
-        SchDoc := SchServer.GetCurrentSchDocument;
-        If SchDoc <> Nil Then
-        Begin
-            Data := Data + ',"schematic":{';
-            Try Data := Data + '"visible_grid_size":' + IntToStr(SchDoc.VisibleGridSize); Except Data := Data + '"visible_grid_size":0'; End;
-            Try Data := Data + ',"snap_grid_size":' + IntToStr(SchDoc.SnapGridSize); Except Data := Data + ',"snap_grid_size":0'; End;
-            Data := Data + '}';
-        End
-        Else
+    { Try to get schematic preferences from active schematic.              }
+    { CHECK FIRST: SchServer is Nil when the schematic server is not        }
+    { loaded, and the call on it raised - a modal before the Except - on    }
+    { every call in a PCB-only session. Nil emits exactly the text the      }
+    { Except emitted.                                                       }
+    If SchServer = Nil Then
+        Data := Data + ',"schematic":null'
+    Else
+    Begin
+        Try
+            SchDoc := SchServer.GetCurrentSchDocument;
+            If SchDoc <> Nil Then
+            Begin
+                Data := Data + ',"schematic":{';
+                Try Data := Data + '"visible_grid_size":' + IntToStr(SchDoc.VisibleGridSize); Except Data := Data + '"visible_grid_size":0'; End;
+                Try Data := Data + ',"snap_grid_size":' + IntToStr(SchDoc.SnapGridSize); Except Data := Data + ',"snap_grid_size":0'; End;
+                Data := Data + '}';
+            End
+            Else
+                Data := Data + ',"schematic":null';
+        Except
             Data := Data + ',"schematic":null';
-    Except
-        Data := Data + ',"schematic":null';
+        End;
     End;
 
     Data := Data + '}';
@@ -621,7 +653,7 @@ Var
     ServerDoc : IServerDocument;
     Workspace : IWorkspace;
     Project : IProject;
-    AddToProject, Saved, Added : Boolean;
+    AddToProject, Saved, Added, DirOk : Boolean;
 Begin
     DocKind := ExtractJsonValue(Params, 'kind');
     FilePath := ExtractJsonValue(Params, 'file_path');
@@ -643,7 +675,13 @@ Begin
 
     { Client.OpenNewDocument creates a blank in-memory IServerDocument of the
       given kind. Pass False for ReuseExisting so we don't accidentally grab
-      a stale load of the same path. }
+      a stale load of the same path.
+      NOT PRE-CHECKED: whether a kind no server registers (a typo such as
+      SCHEMATIC) comes back Nil (CREATE_FAILED below) or raises is not
+      measured, and an allow-list would refuse kinds that work today. A raise
+      here has no local Try: the dispatcher's catch records it with this
+      command (RecordCaughtException, where = dispatcher).
+      RELEASE_VERIFICATION section 39 probes it. }
     ServerDoc := Client.OpenNewDocument(DocKind, FilePath, DocName, False);
     If ServerDoc = Nil Then
     Begin
@@ -659,14 +697,28 @@ Begin
       reason, fall back to WorkspaceManager:SaveObject with an explicit
       FileName, that path is effectively Save-As, which is what we
       want for a previously-unsaved document. }
+    { CHECK FIRST: a file_path in a folder that does not exist cannot be     }
+    { written, and both saves below raised on one (the EFCreateError family, }
+    { a modal before the Except) or opened Altium's own error or Save As.    }
+    { CONSERVATIVE: success is FileExists(FilePath), which no save can make  }
+    { true in a missing folder (a save does not create folders), so skipping }
+    { both leaves saved:false exactly as the failed saves did. A bare name   }
+    { has no folder to check and keeps today's attempt (TargetDirExists).    }
     Saved := False;
+    DirOk := TargetDirExists(FilePath);
     Try ServerDoc.SetFileName(FilePath); Except End;
-    Try
-        ServerDoc.SetModified(True);
-        ServerDoc.DoFileSave('');
-        Saved := FileExists(FilePath);
-    Except Saved := False; End;
-    If Not Saved Then
+    If DirOk Then
+    Begin
+        Try
+            ServerDoc.SetModified(True);
+            ServerDoc.DoFileSave('');
+            Saved := FileExists(FilePath);
+        Except
+            RecordCaughtException('App_CreateDocument:DoFileSave');
+            Saved := False;
+        End;
+    End;
+    If DirOk And (Not Saved) Then
     Begin
         Try
             ServerDoc.Focus;
@@ -675,7 +727,10 @@ Begin
             AddStringParameter('FileName', FilePath);
             RunProcess('WorkspaceManager:SaveObject');
             Saved := FileExists(FilePath);
-        Except Saved := False; End;
+        Except
+            RecordCaughtException('App_CreateDocument:SaveObject');
+            Saved := False;
+        End;
     End;
 
     { Add to the focused project via IProject.DM_AddSourceDocument.            }
@@ -993,7 +1048,7 @@ End;
 { reference script does exactly this and nothing else.                         }
 Function App_ExitActiveCommand(RequestId : String) : String;
 Var
-    PcbOk, SchOk : Boolean;
+    PcbOk, SchOk, PcbFailed : Boolean;
     DirtyBefore, DirtyAfter, I : Integer;
 Begin
     DirtyBefore := CountDirtyDocuments(0);
@@ -1004,21 +1059,44 @@ Begin
     { unwind further than any plausible leak. Calling it with nothing         }
     { outstanding is harmless, which is the whole basis of the one-line       }
     { remedy in ExitActiveCommand.vbs.                                        }
+    {                                                                          }
+    { NO PRE-CHECK EXISTS FOR PCBServer, so the Try stays and is counted.     }
+    { Gating on "a PCB document is open" (PcbEditorDocOpen) is NOT            }
+    { conservative here: a PcbLib handler that died mid-transaction and was    }
+    { then closed leaves the server loaded with the transaction open, and     }
+    { this tool is exactly the recovery for that - the gate would skip it.    }
+    { What is safe is to stop at the FIRST raise: nothing in this loop can    }
+    { load or register the PCB server, so a PostProcess that raised once      }
+    { raises on every later pass, and seven more modals bought nothing.       }
+    { RELEASE_VERIFICATION section 39 probes the SchLib-only session.         }
     PcbOk := False;
+    PcbFailed := False;
     For I := 1 To 8 Do
-        Try
-            PCBServer.PostProcess;
-            PcbOk := True;
-        Except End;
+        If Not PcbFailed Then
+        Begin
+            Try
+                PCBServer.PostProcess;
+                PcbOk := True;
+            Except
+                RecordCaughtException('App_ExitActiveCommand:PCBServer.PostProcess');
+                PcbFailed := True;
+            End;
+        End;
 
     { The schematic server keeps its own transaction, and a SchLib handler    }
     { can die the same way, so close that too. Its PostProcess takes the      }
     { document, and Nil means "whatever is current".                          }
+    { CHECK FIRST: with no schematic server loaded SchServer is Nil and the   }
+    { call raised (a modal before the Except); Nil leaves SchOk False, as the }
+    { Except did.                                                             }
     SchOk := False;
-    Try
-        SchServer.ProcessControl.PostProcess(SchServer.GetCurrentSchDocument, '');
-        SchOk := True;
-    Except End;
+    If SchServer <> Nil Then
+    Begin
+        Try
+            SchServer.ProcessControl.PostProcess(SchServer.GetCurrentSchDocument, '');
+            SchOk := True;
+        Except End;
+    End;
 
     DirtyAfter := CountDirtyDocuments(0);
 

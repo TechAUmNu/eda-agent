@@ -85,23 +85,50 @@ Function IsFloatStr(S : String) : Boolean;
 Var
     I, StartPos : Integer;
     Dots, Digits, Exponents : Integer;
+    IntSig, FracZeros, ExpSig, ExpVal, Mag : Integer;
+    SeenFrac : Boolean;
     Ch : String;
 Begin
     S := Trim(S);
     Result := False;
     If S = '' Then Exit;
     StartPos := 1;
-    If (S[1] = '-') Or (S[1] = '+') Then StartPos := 2;
+    If (Copy(S, 1, 1) = '-') Or (Copy(S, 1, 1) = '+') Then StartPos := 2;
     If StartPos > Length(S) Then Exit;
 
     Dots := 0;
     Digits := 0;
     Exponents := 0;
+    IntSig := 0;         { integer-part digits after leading zeros }
+    FracZeros := 0;      { zeros after '.' before the first non-zero digit }
+    SeenFrac := False;   { a non-zero digit after '.' has been seen }
+    ExpSig := 0;
+    ExpVal := 0;
     For I := StartPos To Length(S) Do
     Begin
         Ch := Copy(S, I, 1);
         If (Ch >= '0') And (Ch <= '9') Then
-            Digits := Digits + 1
+        Begin
+            If Exponents = 0 Then
+            Begin
+                Digits := Digits + 1;
+                If Dots = 0 Then
+                Begin
+                    If (IntSig > 0) Or (Ch <> '0') Then IntSig := IntSig + 1;
+                End
+                Else If (IntSig = 0) And (Not SeenFrac) Then
+                Begin
+                    If Ch = '0' Then FracZeros := FracZeros + 1
+                    Else SeenFrac := True;
+                End;
+            End
+            Else If (ExpSig > 0) Or (Ch <> '0') Then
+            Begin
+                ExpSig := ExpSig + 1;
+                If ExpSig > 6 Then Exit;   { an exponent of a million or more }
+                ExpVal := ExpVal * 10 + Pos(Ch, '0123456789') - 1;
+            End;
+        End
         Else If Ch = '.' Then
         Begin
             Dots := Dots + 1;
@@ -126,6 +153,25 @@ Begin
         Else
             Exit;                          { anything else is not a number }
     End;
+
+    { NOTHING StrToFloat WOULD OVERFLOW ON. A syntactically perfect '1e999'
+      (or 400 plain digits) raised EConvertError all the same, and the raise
+      is a modal before the Except. Mag is the value's decimal order of
+      magnitude (1.5e3 -> 3, 0.05e3 -> 1); a Double holds below 1.79e308, so
+      anything of order 307 or less converts and nothing above is accepted.
+      Every value that parsed before still does, except an order-308 value
+      (1e308 .. 1.79e308) and an exponent of a million or more that a
+      million-digit fraction would have pulled back into range.
+      The exponent is never negative here: the loop above meets the sign
+      after 'e' as a non-number and exits, so a signed exponent is refused
+      already. Allowing one needs an underflow rule for this too. }
+    If IntSig > 0 Then
+        Mag := IntSig - 1 + ExpVal
+    Else If SeenFrac Then
+        Mag := ExpVal - FracZeros - 1
+    Else
+        Mag := 0;                          { the mantissa is zero }
+    If Mag > 307 Then Exit;
     Result := Digits > 0;
 End;
 
@@ -187,6 +233,15 @@ Begin
       behind an EConvertError dialog and the polling loop stops with it.
       StrToIntDef has carried this pre-check for the same reason. }
     If Not IsFloatStr(S) Then
+    Begin
+        Result := Default;
+        Exit;
+    End;
+    { IsFloatStr trims, and StrToFloat does not: its text scan skips SPACES  }
+    { only, so a tab, CR or LF at either end ('1.5'#13, #9'2') passed the    }
+    { check above and raised in the conversion - a modal, then the Default   }
+    { the Except returned. Refused here with that same Default.              }
+    If (Copy(S, Length(S), 1) < ' ') Or (Copy(S, 1, 1) < ' ') Then
     Begin
         Result := Default;
         Exit;

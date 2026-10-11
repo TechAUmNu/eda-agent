@@ -231,6 +231,14 @@ _SESSION_RE = re.compile(
     r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}),"
     r"0,(?P<kind>_session_start|_session_end),(?P<rest>.*)$"
 )
+#   Caught exception (RecordCaughtException, Main.pas):
+#     YYYY-MM-DD HH:MM:SS.mmm,0,_caught_exception,where,command,request_id
+#   Its fifth field is a command, not a byte count, so _LINE_RE dropped it
+#   and the dashboard never showed the one row that says a modal fired.
+_CAUGHT_RE = re.compile(
+    r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}),"
+    r"0,_caught_exception,(?P<where>[^,]*),(?P<cmd>[^,]*),?(?P<rid>.*)$"
+)
 
 _ERR_RE = re.compile(
     r'"error"\s*:\s*\{[^{}]*?"code"\s*:\s*"(?P<code>[^"]+)"[^{}]*?'
@@ -312,6 +320,25 @@ def _parse_line(line: str) -> Optional[LogEntry | SessionEvent]:
             reqs = int(v.group(1))
         return SessionEvent(
             timestamp=sm["ts"], kind="session_end", requests=reqs,
+        )
+
+    cm = _CAUGHT_RE.match(stripped)
+    if cm:
+        # Its own command slot, so the real command's timing stats are not
+        # diluted by a zero-duration row; the command it happened in is in
+        # the message and the request id column.
+        during = cm["cmd"].strip() or "an unknown command"
+        return LogEntry(
+            timestamp=cm["ts"],
+            duration_ms=0,
+            command="_caught_exception",
+            tag="EXCEPTION",
+            response_bytes=0,
+            request_id=cm["rid"].strip()[:8],
+            error_code="CAUGHT_EXCEPTION",
+            error_msg=(f"an Altium error dialog fired at {cm['where']} "
+                       f"during {during}"),
+            payload_prefix="",
         )
 
     m = _LINE_RE.match(stripped)
