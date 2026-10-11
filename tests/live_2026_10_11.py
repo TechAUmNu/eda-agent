@@ -8,7 +8,7 @@ reason; this module holds the field's odd modified flag and small helpers.
 """
 from __future__ import annotations
 
-from tests.pascal_eval import build
+from tests.pascal_eval import PascalError, build
 from tests.pascal_source import load
 from tests.test_bridge_record_names_one_file import _ALTIUM, _key
 
@@ -22,11 +22,13 @@ def _keys(text):
 
 
 class FieldFlag:
-    """What AD 26.10.1.5 read back after SetModified(True): a Boolean
-    variant holding 1 (the leading hypothesis). 'If X' is False for it, a
-    compare with the Boolean literals fails (True is -1), and only a NUMERIC
-    compare with 0 sees it set. A Null (None here) compares unequal to 0 the
-    same way."""
+    """What AD 26.10.1.5 read back after SetModified(True) on a sheet: a
+    value for which 'If X' AND 'If Not X' were BOTH false (live). The
+    leading hypothesis is a Boolean variant holding 1: a compare with the
+    Boolean literals fails (True is -1) and a NUMERIC compare with 0 sees it
+    set. ``__pnot__`` is DelphiScript's 'If Not X' (tests/pascal_eval.py
+    routes Not through it); ``FieldFlag(-1)`` is a normal True and
+    ``FieldFlag(0)`` a normal False."""
 
     def __init__(self, value=1):
         self.value = value
@@ -34,6 +36,11 @@ class FieldFlag:
     def __bool__(self):
         # DelphiScript's 'If X' holds only for True's -1.
         return self.value == -1
+
+    def __pnot__(self):
+        # 'If Not X' held only for a real False (live: false for the odd
+        # value as well as for True).
+        return self.value == 0
 
     def __eq__(self, other):
         if isinstance(other, bool):
@@ -43,6 +50,50 @@ class FieldFlag:
     def __ne__(self, other):
         return not self.__eq__(other)
 
+    __hash__ = None
+
+
+class NullFlag:
+    """A Null: converting it to a Boolean raises (Delphi's default), so
+    'If X' and 'If Not X' both raise, as does any compare."""
+
+    def _raise(self, *_a):
+        raise PascalError("Null")
+
+    __bool__ = __pnot__ = __eq__ = __ne__ = _raise
+    __hash__ = None
+
+
+class StrictFlag:
+    """A NORMAL flag that refuses every form the field never proved on it:
+    'If X' and 'If Not X' answer, but a compare with an integer or a Boolean
+    literal raises. A reader built only from the two proven forms never
+    notices; one that compares a Boolean with 0 does."""
+
+    def __init__(self, value):
+        self.value = bool(value)
+
+    def __bool__(self):
+        return self.value
+
+    def __pnot__(self):
+        return not self.value
+
+    def __eq__(self, _other):
+        raise PascalError("unproven compare")
+
+    __ne__ = __eq__
+    __hash__ = None
+
+
+class OddRaising(FieldFlag):
+    """The field's odd value, if the engine also refuses the numeric and
+    literal compares: both proven tests false, every compare raises."""
+
+    def __eq__(self, _other):
+        raise PascalError("compare")
+
+    __ne__ = __eq__
     __hash__ = None
 
 

@@ -165,7 +165,14 @@ class _Translator:
             elif kind == "num":
                 parts.append(text)
             elif kind == "kw":
-                parts.append({"and": " and ", "or": " or ", "not": " not ",
+                # Pascal's Not binds tighter than any binary operator and
+                # Python's `not` looser than a comparison, so it becomes the
+                # prefix _PNOT_ @ (matmul binds tighter than every compare
+                # and every `and`/`or`): `Not A = B` is (Not A) = B, as in
+                # Pascal. A fixture value may define __pnot__ to model a
+                # value whose 'If Not X' differs from Python's `not x` (the
+                # field's modified flag, tests/live_2026_10_11.py).
+                parts.append({"and": " and ", "or": " or ", "not": " _PNOT_ @ ",
                               "div": " // ", "mod": " % ", "nil": "None",
                               "true": "True", "false": "False"}[text])
             elif kind == "op":
@@ -334,6 +341,16 @@ def _strtointdef(s, d):
         return d
 
 
+class _PNot:
+    """``Not X``: ``X.__pnot__()`` when the value models one, else ``not X``."""
+
+    def __matmul__(self, value):
+        hook = getattr(type(value), "__pnot__", None)
+        if hook is not None:
+            return hook(value)
+        return not value
+
+
 class PascalError(Exception):
     """What a fixture raises to model an Altium call raising; the only
     exception a translated Try/Except catches."""
@@ -341,6 +358,7 @@ class PascalError(Exception):
 
 BUILTINS = {
     "PascalError": PascalError,
+    "_PNOT_": _PNot(),
     "UpperCase": lambda s: s.upper(),
     "LowerCase": lambda s: s.lower(),
     "Trim": lambda s: s.strip(),

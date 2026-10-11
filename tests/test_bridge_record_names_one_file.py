@@ -236,7 +236,7 @@ class Client:
 
 
 _MAIN_NAMES = [
-    "ModifiedFlagOf", "ModifiedFlagRaw", "ModifiedFlagTests",
+    "ModifiedFlagState", "ModifiedFlagOf", "ModifiedFlagRaw", "ModifiedFlagTests",
     "LooksAbsolutePath", "DocPathKey", "DocNameKey",
     "ServerDocFileName", "FocusedServerDoc", "ListedDocKey", "DocNameCount",
     "IsProjectMemberFile", "FindOpenServerDoc", "FileAgeOrNone", "BridgeEntryKey",
@@ -256,6 +256,7 @@ _GLOBALS = {
     "SaveUnresolvedPaths": "", "SaveBridgeRecordUnresolved": "",
     "SaveAttempts": 0, "SaveSkipped": 0, "SaveSkippedPaths": "",
     "SaveSkipCleanLibs": False, "SaveSkipCleanSheets": False,
+    "SaveWalkPass": False,
     "FindDocVia": "none", "DocNameMemberKeys": "", "MarkLastPath": "", "MarkLastFile": "",
     "MarkLastVia": "none", "MarkLastFound": False,
     "MarkLastModified": False, "MarkLastFocused": -1, "MarkLastError": "",

@@ -1569,6 +1569,7 @@ Begin
     SaveBridgeRecordClosed := '';
     SaveBridgeRecordUnresolved := '';
     SaveAttemptedKeys := '';
+    SaveWalkPass := False;
     SaveUnresolvedPaths := '';
     MarkLastRecorded := False;
     MarkLastPath := '';

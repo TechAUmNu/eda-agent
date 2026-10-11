@@ -127,6 +127,13 @@ Var
     { closed, and listed by app_save_all as bridge_record_unresolved.      }
     SaveBridgeRecordUnresolved : String;
     SaveAttemptedKeys : String;
+    { True only while SaveAllDirty walks the workspace. The one-visit-per-  }
+    { file early exit in SaveOneDocByDocRef applies only then: proj_save,   }
+    { proj_close save=true and the other direct SaveProjectMembers callers  }
+    { never reset SaveAttemptedKeys, so outside a walk the list still holds }
+    { the LAST app_save_all's files, and an edit made since would be        }
+    { silently left unwritten (review of 0c4f20e).                          }
+    SaveWalkPass : Boolean;
     { Free documents the save walk could not reach: a bare DM_FullPath that  }
     { resolves to no free document (several listed documents carry the name, }
     { or only a project member or nothing answers it). Listed                }
@@ -447,104 +454,142 @@ End;
 { THE MODIFIED FLAG AS A REAL BOOLEAN (live 2026-10-11, AD 26.10.1.5).        }
 {                                                                              }
 { After SetModified(True), IServerDocument.Modified read as NEITHER true NOR  }
-{ false: 'If X' and 'If Not X' were both false. The tab showed '*', every     }
-{ mark answered marked_modified:false, and the branches that test the        }
-{ NEGATION never fired either (obj_modify's 'If Not Marked' save_hint,       }
-{ MarkDocDirty's 'flag reads False' problem, app_close_document's 'This      }
-{ bridge edited' message). A plain False cannot do that. The likely value is }
-{ a Boolean variant holding 1 rather than True's -1: a condition tested as   }
-{ '= True' fails for 1, and 'Not 1' is -2, which fails it too. Documents     }
-{ nobody edited read a normal False.                                         }
+{ false on a schematic sheet: 'If X' and 'If Not X' were both false. The tab  }
+{ showed '*', every mark answered marked_modified:false, and the branches     }
+{ that test the NEGATION never fired either (obj_modify's 'If Not Marked'     }
+{ save_hint, MarkDocDirty's 'flag reads False' problem, app_close_document's  }
+{ 'This bridge edited' message). A plain False cannot do that. The likely     }
+{ value is a Boolean variant holding 1 rather than True's -1. Documents       }
+{ nobody edited read a normal False; the PcbDoc / PcbLib flags read true.     }
 {                                                                              }
-{ So every read goes through here and comes back a REAL Boolean:             }
-{   Nil document               False (nothing open holds no edits)           }
-{   the read raised            True, counted (doubt writes)                  }
-{   anything else              True when the value is not 0. A numeric       }
-{                              compare, never 'If X' and never '= True', so  }
-{                              1, -1 and every other non-zero value count.   }
-{                              A Null compares unequal to 0 too under the    }
-{                              engine's default Null rule (not measured), so }
-{                              it reads as modified: doubt writes.           }
-{ ONLY OPERATORS, NO VARIANT ROUTINE. VarType / VarIsNull / VarIsEmpty /     }
-{ VarToStr have never run in this codebase, and an identifier this binding   }
-{ does not declare faults at RUN time - inside the polling loop, on every    }
-{ edit. An unassigned (Empty) value compares equal to 0 and reads False;     }
-{ telling it apart would need VarIsEmpty, so it is left to the diagnostic   }
-{ below (flag_raw 0 with flag_tests showing which comparisons held).          }
+{ ONLY THE TWO FORMS THAT RAN LIVE ON THIS VALUE. 'If X' and 'If Not X' were  }
+{ both evaluated on the odd value AND on normal ones, live, with 0 caught     }
+{ exceptions. Nothing else is: no compare of a Boolean with an integer or    }
+{ with the True / False literals appears anywhere else in these units, and a  }
+{ raise here would be a modal on every edit and every save walk. No Variant   }
+{ routine either (VarType / VarIsNull / VarToStr have never run here, and an  }
+{ undeclared identifier faults uncatchably inside the polling loop).          }
+{                                                                              }
+{ ModifiedFlagState answers, never raising:                                    }
+{   0  clean: 'If Not X' holds (and a Nil document: nothing open holds edits) }
+{   1  modified: 'If X' holds                                                 }
+{   2  NEITHER holds - the field's odd value. Counted as modified: doubt      }
+{      writes.                                                                 }
+{   3  unreadable: the read (or one of the two tests) raised, counted.         }
+{ ModifiedFlagOf is the Boolean every save, close and count gate uses: state  }
+{ <> 0, so an odd or unreadable flag writes. A READ-BACK (MarkDocDirty) uses  }
+{ the state itself, so a mark never claims a flag it could not read.          }
+{ An unassigned (Empty) value reads False under 'If Not X' (Delphi converts   }
+{ it to False) and so reads clean; a Null raises on conversion and reads 3.   }
 { DelphiScript locals are untyped, so Raw holds exactly what the property    }
 { returned: the live run showed MarkLastModified (declared Boolean) carrying }
 { the odd value straight through.                                            }
 {..............................................................................}
-Function ModifiedFlagOf(Doc : IServerDocument) : Boolean;
+Function ModifiedFlagState(Doc : IServerDocument) : Integer;
 Var
     Raw : Boolean;
 Begin
-    Result := False;
+    Result := 0;
     If Doc = Nil Then Exit;
-    Result := True;
+    Result := 3;
     Try
         Raw := Doc.Modified;
+        If Raw Then Result := 1
+        Else If Not Raw Then Result := 0
+        Else Result := 2;
     Except
-        RecordCaughtException('ModifiedFlagOf:Modified');
-        Exit;
+        Result := 3;
+        RecordCaughtException('ModifiedFlagState:Modified');
     End;
-    Result := Raw <> 0;
 End;
 
-{ THE D1 DIAGNOSTIC: the raw value, named by comparisons only ('-1', '0',    }
-{ '1' or 'other'; 'unreadable' when the read raised, '' with no document).    }
+Function ModifiedFlagOf(Doc : IServerDocument) : Boolean;
+Begin
+    Result := ModifiedFlagState(Doc) <> 0;
+End;
+
+{ THE D1 DIAGNOSTIC (one-shot, for the live run). Both readers run the two   }
+{ proven tests FIRST, and the numeric / literal compares - forms that have   }
+{ never run in this codebase - ONLY when neither proven test held, i.e. only }
+{ on the odd value itself, each stage inside its own Try with a counted      }
+{ Except. A normal document therefore never executes an unproven form, and a }
+{ compare that raises leaves the proven part of the answer in place.         }
+{                                                                              }
+{ ModifiedFlagRaw: 'true' / 'false' when 'If X' / 'If Not X' held; for the   }
+{ odd value '1', '-1', '0' or 'other' by numeric compare, 'odd' when that    }
+{ compare raised; 'unreadable' when the read or a proven test raised; ''     }
+{ with no document.                                                           }
 Function ModifiedFlagRaw(Doc : IServerDocument) : String;
 Var
     Raw : Boolean;
+    Neither : Boolean;
 Begin
     Result := '';
     If Doc = Nil Then Exit;
     Result := 'unreadable';
+    Neither := False;
     Try
         Raw := Doc.Modified;
+        If Raw Then Result := 'true'
+        Else If Not Raw Then Result := 'false'
+        Else Neither := True;
     Except
         RecordCaughtException('ModifiedFlagRaw:Modified');
         Exit;
     End;
-    If Raw = 0 Then Result := '0'
-    Else If Raw = 1 Then Result := '1'
-    Else If Raw = -1 Then Result := '-1'
-    Else Result := 'other';
+    If Not Neither Then Exit;
+    Result := 'odd';
+    Try
+        If Raw = 1 Then Result := '1'
+        Else If Raw = -1 Then Result := '-1'
+        Else If Raw = 0 Then Result := '0'
+        Else Result := 'other';
+    Except
+        RecordCaughtException('ModifiedFlagRaw:compare');
+    End;
 End;
 
-{ Which tests the raw value passes, 1/0 each: the 'If X' and 'If Not X' the }
-{ code used to make, the comparisons with the Boolean literals, and the      }
-{ numeric one ModifiedFlagOf makes. A normal True reads                      }
-{ if=1,not=0,eq_true=1,eq_false=0,ne_zero=1; the 1-hypothesis reads          }
-{ if=0,not=0,eq_true=0,eq_false=0,ne_zero=1. Every one of these already ran  }
-{ live on the value without raising ('If X', 'If Not X') or is the same      }
-{ numeric compare ModifiedFlagOf makes.                                      }
+{ ModifiedFlagTests: 'if=1|0,not=1|0' from the two proven tests, always;     }
+{ only when both are 0 (the odd value) it goes on with ',ne_zero=..',        }
+{ ',eq_true=..' and ',eq_false=..', each appended as soon as it is known -   }
+{ these three are NEW forms, never run here before - and ',raised' if one of }
+{ them raised. A normal True reads 'if=1,not=0', a normal False              }
+{ 'if=0,not=1'; the 1-hypothesis reads                                       }
+{ 'if=0,not=0,ne_zero=1,eq_true=0,eq_false=0'.                               }
 Function ModifiedFlagTests(Doc : IServerDocument) : String;
 Var
     Raw : Boolean;
-    TIf, TNot, TTrue, TFalse, TNz : String;
+    TIf, TNot, T : String;
 Begin
     Result := '';
     If Doc = Nil Then Exit;
     Result := 'unreadable';
+    TIf := '0';
+    TNot := '0';
     Try
         Raw := Doc.Modified;
+        If Raw Then TIf := '1';
+        If Not Raw Then TNot := '1';
     Except
         RecordCaughtException('ModifiedFlagTests:Modified');
         Exit;
     End;
-    TIf := '0';
-    TNot := '0';
-    TTrue := '0';
-    TFalse := '0';
-    TNz := '0';
-    If Raw Then TIf := '1';
-    If Not Raw Then TNot := '1';
-    If Raw = True Then TTrue := '1';
-    If Raw = False Then TFalse := '1';
-    If Raw <> 0 Then TNz := '1';
-    Result := 'if=' + TIf + ',not=' + TNot + ',eq_true=' + TTrue
-        + ',eq_false=' + TFalse + ',ne_zero=' + TNz;
+    Result := 'if=' + TIf + ',not=' + TNot;
+    If (TIf <> '0') Or (TNot <> '0') Then Exit;
+    Try
+        T := '0';
+        If Raw <> 0 Then T := '1';
+        Result := Result + ',ne_zero=' + T;
+        T := '0';
+        If Raw = True Then T := '1';
+        Result := Result + ',eq_true=' + T;
+        T := '0';
+        If Raw = False Then T := '1';
+        Result := Result + ',eq_false=' + T;
+    Except
+        RecordCaughtException('ModifiedFlagTests:compare');
+        Result := Result + ',raised';
+    End;
 End;
 
 { Probe whether any logical document in the project has been modified by    }
@@ -1284,6 +1329,7 @@ Var
     ServerDoc, Focused : IServerDocument;
     DiskName, FocusedName : String;
     FocusedMod : Boolean;
+    FlagState : Integer;
 Begin
     Result := False;
     MarkLastPath := FilePath;
@@ -1336,15 +1382,21 @@ Begin
         Except
             MarkLastError := 'SetModified raised on the document found';
         End;
-        { The D1 diagnostic, read before anything else touches the flag. }
-        MarkLastFlagRaw := ModifiedFlagRaw(ServerDoc);
-        MarkLastFlagTests := ModifiedFlagTests(ServerDoc);
+        { The D1 diagnostic, read before anything else touches the flag.   }
+        { Both readers never raise; the Try is belt and braces so a fault  }
+        { in a diagnostic can never abort a mark whose edit is already made. }
         Try
-            MarkLastModified := ModifiedFlagOf(ServerDoc);
+            MarkLastFlagRaw := ModifiedFlagRaw(ServerDoc);
+            MarkLastFlagTests := ModifiedFlagTests(ServerDoc);
         Except
-            MarkLastModified := False;
-            If MarkLastError = '' Then MarkLastError := 'the modified flag could not be read';
         End;
+        { A READ-BACK: the state, not ModifiedFlagOf's doubt-writes Boolean. }
+        { An odd value (2, the field's) is a mark that took; an unreadable   }
+        { flag (3) is NOT, and the reply says so instead of claiming it.     }
+        FlagState := ModifiedFlagState(ServerDoc);
+        MarkLastModified := (FlagState = 1) Or (FlagState = 2);
+        If (FlagState = 3) And (MarkLastError = '') Then
+            MarkLastError := 'the modified flag could not be read';
         { The focused document, when it is THIS file by key: the object the  }
         { tab's '*' belongs to, which may not be the object the lookup       }
         { returned. Never a namesake - only the same absolute file.          }
@@ -1354,8 +1406,8 @@ Begin
             And (DocPathKey(FocusedName) = DocPathKey(DiskName)) Then
         Begin
             Try Focused.SetModified(True); Except End;
-            FocusedMod := False;
-            Try FocusedMod := ModifiedFlagOf(Focused); Except FocusedMod := False; End;
+            FlagState := ModifiedFlagState(Focused);
+            FocusedMod := (FlagState = 1) Or (FlagState = 2);
             If FocusedMod Then MarkLastFocused := 1 Else MarkLastFocused := 0;
             If FocusedMod Then MarkLastModified := True;
         End;
@@ -2108,6 +2160,22 @@ Begin
             { alone, which keeps the 2026-10-06 fix.                           }
             DiskPath := ServerDocFileName(ServerDoc);
             If Not LooksAbsolutePath(DiskPath) Then DiskPath := DocPath;
+            { NO ABSOLUTE PATH, NO FILE TO WRITE. Neither the document's own  }
+            { FileName nor its listing names a file, so DoFileSave('') could  }
+            { only ask where to save (a Save As dialog) and no key can tell   }
+            { two such documents apart. Listed in free_documents_not_reached, }
+            { never written and never matched by key (review of 0c4f20e: an   }
+            { empty key matched an empty attempted list by accident).         }
+            If Not LooksAbsolutePath(Trim(DiskPath)) Then
+            Begin
+                If Trim(DocPath) <> '' Then
+                    SaveUnresolvedPaths := PathListWith(SaveUnresolvedPaths, DocPath)
+                Else If Trim(DiskPath) <> '' Then
+                    SaveUnresolvedPaths := PathListWith(SaveUnresolvedPaths, DiskPath)
+                Else
+                    SaveUnresolvedPaths := PathListWith(SaveUnresolvedPaths, '(unnamed document)');
+                Exit;
+            End;
             { ONE VISIT PER FILE PER PASS (live 2026-10-11). The walk reaches  }
             { a document once per listing: a real project's member and the   }
             { Free Documents listing of the same file (DM_Projects can hold   }
@@ -2115,10 +2183,15 @@ Begin
             { spellings of one path. The first visit wrote it; the second     }
             { read the now-clean flag and filed the file it had just written  }
             { under skipped_unmodified / libraries_skipped. A file this pass  }
-            { has already attempted is not looked at again.                   }
-            If Pos('|' + DocPathKey(DiskPath) + '|', '|' + SaveAttemptedKeys + '|') > 0 Then Exit;
-            If LooksAbsolutePath(Trim(DocPath))
-                And (Pos('|' + DocPathKey(DocPath) + '|', '|' + SaveAttemptedKeys + '|') > 0) Then Exit;
+            { has already attempted is not looked at again - inside a walk    }
+            { ONLY (SaveWalkPass): a direct proj_save after an app_save_all   }
+            { must write an edit made since, whatever the list still holds.  }
+            If SaveWalkPass Then
+            Begin
+                If Pos('|' + DocPathKey(DiskPath) + '|', '|' + SaveAttemptedKeys + '|') > 0 Then Exit;
+                If LooksAbsolutePath(Trim(DocPath))
+                    And (Pos('|' + DocPathKey(DocPath) + '|', '|' + SaveAttemptedKeys + '|') > 0) Then Exit;
+            End;
             InRecord := BridgeEditRecorded(DocPath) Or BridgeEditRecorded(DiskPath);
             ByRecord := False;
             Skip := False;
@@ -2538,13 +2611,17 @@ Begin
     SaveAttemptedKeys := '';
     Workspace := GetWorkspace;
     If Workspace = Nil Then Exit;
+    SaveWalkPass := True;
+    Try
+        // Real projects + their member docs
+        For I := 0 To Workspace.DM_ProjectCount - 1 Do
+            SaveProjectMembers(Workspace.DM_Projects(I));
 
-    // Real projects + their member docs
-    For I := 0 To Workspace.DM_ProjectCount - 1 Do
-        SaveProjectMembers(Workspace.DM_Projects(I));
-
-    // Free documents live inside the synthetic FreeDocumentsProject
-    Try SaveProjectMembers(Workspace.DM_FreeDocumentsProject); Except End;
+        // Free documents live inside the synthetic FreeDocumentsProject
+        Try SaveProjectMembers(Workspace.DM_FreeDocumentsProject); Except End;
+    Finally
+        SaveWalkPass := False;
+    End;
 End;
 
 { WRITE WHAT THE RECORD HOLDS THAT THE WALK DID NOT REACH. Review 2026-10-11: }
