@@ -3369,22 +3369,22 @@ Begin
     If Content = '' Then Exit;
 
     V := ExtractJsonValue(Content, 'poll_interval_active_ms');
-    If CfgIntOk(V) Then Try N := StrToInt(V); If N > 0 Then PollIntervalActiveMs := N; Except End;
+    If CfgIntOk(V) Then Begin Try N := StrToInt(V); If N > 0 Then PollIntervalActiveMs := N; Except End; End;
 
     V := ExtractJsonValue(Content, 'poll_interval_idle_ms');
-    If CfgIntOk(V) Then Try N := StrToInt(V); If N > 0 Then PollIntervalIdleMs := N; Except End;
+    If CfgIntOk(V) Then Begin Try N := StrToInt(V); If N > 0 Then PollIntervalIdleMs := N; Except End; End;
 
     V := ExtractJsonValue(Content, 'idle_threshold');
-    If CfgIntOk(V) Then Try N := StrToInt(V); If N > 0 Then IdleThreshold := N; Except End;
+    If CfgIntOk(V) Then Begin Try N := StrToInt(V); If N > 0 Then IdleThreshold := N; Except End; End;
 
     V := ExtractJsonValue(Content, 'auto_shutdown_ms');
-    If CfgIntOk(V) Then Try N := StrToInt(V); If N >= 0 Then AutoShutdownMs := N; Except End;
+    If CfgIntOk(V) Then Begin Try N := StrToInt(V); If N >= 0 Then AutoShutdownMs := N; Except End; End;
 
     V := ExtractJsonValue(Content, 'yield_iterations');
-    If CfgIntOk(V) Then Try N := StrToInt(V); If N > 0 Then YieldIterations := N; Except End;
+    If CfgIntOk(V) Then Begin Try N := StrToInt(V); If N > 0 Then YieldIterations := N; Except End; End;
 
     V := ExtractJsonValue(Content, 'yield_every_n_active');
-    If CfgIntOk(V) Then Try N := StrToInt(V); If N > 0 Then YieldEveryNActive := N; Except End;
+    If CfgIntOk(V) Then Begin Try N := StrToInt(V); If N > 0 Then YieldEveryNActive := N; Except End; End;
 End;
 
 {..............................................................................}
