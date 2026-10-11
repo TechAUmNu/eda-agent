@@ -1579,6 +1579,8 @@ Begin
     MarkLastModified := False;
     MarkLastFocused := -1;
     MarkLastError := '';
+    MarkLastFlagRaw := '';
+    MarkLastFlagTests := '';
 
     StatusStartTick := GetTickCount;
     StatusRequestCount := 0;

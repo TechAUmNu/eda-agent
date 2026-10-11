@@ -642,7 +642,10 @@ def register_generic_tools(mcp):
             ``focused_modified_read``, ``recorded_for_save_all`` - true
             when the file went on the bridge's record under an ABSOLUTE
             path, the only kind ``app_save_all`` writes from -,
-            ``problem``), and ``save_hint`` appears when the flag did not
+            ``problem``, and ``flag_raw`` / ``flag_tests``: the raw flag
+            right after the mark, named by comparisons only, a diagnostic
+            for the 2026-10-11 reading that was neither true nor false),
+            and ``save_hint`` appears when the flag did not
             register: save with ``app_save_all`` WITHOUT ``only_modified``
             (it also writes the document from the bridge's own record), or
             ``lib_save_library`` for a library. Project scope reports

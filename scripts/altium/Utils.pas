@@ -597,6 +597,10 @@ Begin
 End;
 
 {..............................................................................}
+{ flag_raw / flag_tests (2026.10.11.02) are the one-shot D1 diagnostic: the  }
+{ raw Modified value right after SetModified(True), named by comparisons     }
+{ only (ModifiedFlagRaw / ModifiedFlagTests in Main.pas); '' when nothing    }
+{ was found.                                                                 }
 { What the last MarkDocDirty found, for every reply that claims               }
 { marked_modified. MEASURED 2026-10-10: marked_modified was a constant True   }
 { on obj_modify while the document read modified:false, because the mark     }
@@ -622,7 +626,9 @@ Begin
         + ',"modified_read":' + BoolToJsonStr(MarkLastModified)
         + ',"focused_modified_read":' + FocusedJson
         + ',"recorded_for_save_all":' + BoolToJsonStr(MarkLastRecorded)
-        + ',"problem":"' + EscapeJsonString(MarkLastError) + '"}';
+        + ',"problem":"' + EscapeJsonString(MarkLastError) + '"'
+        + ',"flag_raw":"' + EscapeJsonString(MarkLastFlagRaw) + '"'
+        + ',"flag_tests":"' + EscapeJsonString(MarkLastFlagTests) + '"}';
 End;
 
 { A marked_modified value lifted out of a reply ('true' / 'false'), as JSON; }

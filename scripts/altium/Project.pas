@@ -4936,7 +4936,7 @@ Begin
             Inc(OpenCount);
 
             Try
-                If ServerDoc.Modified Then
+                If ModifiedFlagOf(ServerDoc) Then
                 Begin
                     Inc(DirtyCount);
                     If Not First Then DirtyList := DirtyList + ',';

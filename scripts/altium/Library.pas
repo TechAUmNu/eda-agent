@@ -12486,7 +12486,7 @@ Begin
     End;
 
     WasModified := False;
-    Try WasModified := ServerDoc.Modified; Except WasModified := False; End;
+    Try WasModified := ModifiedFlagOf(ServerDoc); Except WasModified := False; End;
     { was_modified is the flag, which read false after real height edits  }
     { (2026-10-10). bridge_edited says whether THIS bridge marked the file }
     { since it was last written, which the flag cannot be trusted to say. }
@@ -12501,7 +12501,7 @@ Begin
     AgeAfter := -1;
     Try AgeAfter := FileAge(LibPath); Except AgeAfter := -1; End;
     StillModified := False;
-    Try StillModified := ServerDoc.Modified; Except StillModified := False; End;
+    Try StillModified := ModifiedFlagOf(ServerDoc); Except StillModified := False; End;
     ExistsAfter := FileExists(LibPath);
     If (AgeAfter <> -1) And (AgeAfter <> AgeBefore) Then
     Begin

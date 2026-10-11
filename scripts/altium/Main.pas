@@ -151,6 +151,11 @@ Var
     MarkLastModified : Boolean;
     MarkLastFocused : Integer;
     MarkLastError : String;
+    { THE ONE-SHOT D1 DIAGNOSTIC (2026.10.11.02). The raw Modified value the }
+    { mark read right after SetModified(True), told apart by comparisons     }
+    { alone (ModifiedFlagRaw / ModifiedFlagTests): '' when nothing was found. }
+    MarkLastFlagRaw : String;
+    MarkLastFlagTests : String;
     { True when the mark put an ABSOLUTE key on the record (the only kind  }
     { app_save_all can write from); a bare entry never sets it.            }
     MarkLastRecorded : Boolean;
@@ -438,6 +443,110 @@ End;
 { project was compiled less than COMPILE_CACHE_TTL_MS ago.                      }
 {..............................................................................}
 
+{..............................................................................}
+{ THE MODIFIED FLAG AS A REAL BOOLEAN (live 2026-10-11, AD 26.10.1.5).        }
+{                                                                              }
+{ After SetModified(True), IServerDocument.Modified read as NEITHER true NOR  }
+{ false: 'If X' and 'If Not X' were both false. The tab showed '*', every     }
+{ mark answered marked_modified:false, and the branches that test the        }
+{ NEGATION never fired either (obj_modify's 'If Not Marked' save_hint,       }
+{ MarkDocDirty's 'flag reads False' problem, app_close_document's 'This      }
+{ bridge edited' message). A plain False cannot do that. The likely value is }
+{ a Boolean variant holding 1 rather than True's -1: a condition tested as   }
+{ '= True' fails for 1, and 'Not 1' is -2, which fails it too. Documents     }
+{ nobody edited read a normal False.                                         }
+{                                                                              }
+{ So every read goes through here and comes back a REAL Boolean:             }
+{   Nil document               False (nothing open holds no edits)           }
+{   the read raised            True, counted (doubt writes)                  }
+{   anything else              True when the value is not 0. A numeric       }
+{                              compare, never 'If X' and never '= True', so  }
+{                              1, -1 and every other non-zero value count.   }
+{                              A Null compares unequal to 0 too under the    }
+{                              engine's default Null rule (not measured), so }
+{                              it reads as modified: doubt writes.           }
+{ ONLY OPERATORS, NO VARIANT ROUTINE. VarType / VarIsNull / VarIsEmpty /     }
+{ VarToStr have never run in this codebase, and an identifier this binding   }
+{ does not declare faults at RUN time - inside the polling loop, on every    }
+{ edit. An unassigned (Empty) value compares equal to 0 and reads False;     }
+{ telling it apart would need VarIsEmpty, so it is left to the diagnostic   }
+{ below (flag_raw 0 with flag_tests showing which comparisons held).          }
+{ DelphiScript locals are untyped, so Raw holds exactly what the property    }
+{ returned: the live run showed MarkLastModified (declared Boolean) carrying }
+{ the odd value straight through.                                            }
+{..............................................................................}
+Function ModifiedFlagOf(Doc : IServerDocument) : Boolean;
+Var
+    Raw : Boolean;
+Begin
+    Result := False;
+    If Doc = Nil Then Exit;
+    Result := True;
+    Try
+        Raw := Doc.Modified;
+    Except
+        RecordCaughtException('ModifiedFlagOf:Modified');
+        Exit;
+    End;
+    Result := Raw <> 0;
+End;
+
+{ THE D1 DIAGNOSTIC: the raw value, named by comparisons only ('-1', '0',    }
+{ '1' or 'other'; 'unreadable' when the read raised, '' with no document).    }
+Function ModifiedFlagRaw(Doc : IServerDocument) : String;
+Var
+    Raw : Boolean;
+Begin
+    Result := '';
+    If Doc = Nil Then Exit;
+    Result := 'unreadable';
+    Try
+        Raw := Doc.Modified;
+    Except
+        RecordCaughtException('ModifiedFlagRaw:Modified');
+        Exit;
+    End;
+    If Raw = 0 Then Result := '0'
+    Else If Raw = 1 Then Result := '1'
+    Else If Raw = -1 Then Result := '-1'
+    Else Result := 'other';
+End;
+
+{ Which tests the raw value passes, 1/0 each: the 'If X' and 'If Not X' the }
+{ code used to make, the comparisons with the Boolean literals, and the      }
+{ numeric one ModifiedFlagOf makes. A normal True reads                      }
+{ if=1,not=0,eq_true=1,eq_false=0,ne_zero=1; the 1-hypothesis reads          }
+{ if=0,not=0,eq_true=0,eq_false=0,ne_zero=1. Every one of these already ran  }
+{ live on the value without raising ('If X', 'If Not X') or is the same      }
+{ numeric compare ModifiedFlagOf makes.                                      }
+Function ModifiedFlagTests(Doc : IServerDocument) : String;
+Var
+    Raw : Boolean;
+    TIf, TNot, TTrue, TFalse, TNz : String;
+Begin
+    Result := '';
+    If Doc = Nil Then Exit;
+    Result := 'unreadable';
+    Try
+        Raw := Doc.Modified;
+    Except
+        RecordCaughtException('ModifiedFlagTests:Modified');
+        Exit;
+    End;
+    TIf := '0';
+    TNot := '0';
+    TTrue := '0';
+    TFalse := '0';
+    TNz := '0';
+    If Raw Then TIf := '1';
+    If Not Raw Then TNot := '1';
+    If Raw = True Then TTrue := '1';
+    If Raw = False Then TFalse := '1';
+    If Raw <> 0 Then TNz := '1';
+    Result := 'if=' + TIf + ',not=' + TNot + ',eq_true=' + TTrue
+        + ',eq_false=' + TFalse + ',ne_zero=' + TNz;
+End;
+
 { Probe whether any logical document in the project has been modified by    }
 { an out-of-band edit (typically: user clicked in Altium's UI between MCP   }
 { calls). If so the cached DM_Compile is stale even if it's within the     }
@@ -500,7 +609,7 @@ Begin
         If ServerDoc <> Nil Then
         Begin
             Try
-                If ServerDoc.Modified Then
+                If ModifiedFlagOf(ServerDoc) Then
                 Begin
                     Result := True;
                     Exit;
@@ -1185,6 +1294,8 @@ Begin
     MarkLastFocused := -1;
     MarkLastRecorded := False;
     MarkLastError := '';
+    MarkLastFlagRaw := '';
+    MarkLastFlagTests := '';
     If Trim(FilePath) = '' Then
     Begin
         MarkLastError := 'no path was given, so no document could be marked';
@@ -1225,8 +1336,11 @@ Begin
         Except
             MarkLastError := 'SetModified raised on the document found';
         End;
+        { The D1 diagnostic, read before anything else touches the flag. }
+        MarkLastFlagRaw := ModifiedFlagRaw(ServerDoc);
+        MarkLastFlagTests := ModifiedFlagTests(ServerDoc);
         Try
-            MarkLastModified := ServerDoc.Modified;
+            MarkLastModified := ModifiedFlagOf(ServerDoc);
         Except
             MarkLastModified := False;
             If MarkLastError = '' Then MarkLastError := 'the modified flag could not be read';
@@ -1241,7 +1355,7 @@ Begin
         Begin
             Try Focused.SetModified(True); Except End;
             FocusedMod := False;
-            Try FocusedMod := Focused.Modified; Except FocusedMod := False; End;
+            Try FocusedMod := ModifiedFlagOf(Focused); Except FocusedMod := False; End;
             If FocusedMod Then MarkLastFocused := 1 Else MarkLastFocused := 0;
             If FocusedMod Then MarkLastModified := True;
         End;
@@ -1319,7 +1433,7 @@ Begin
     ServerDoc := FindOpenServerDoc(FilePath);
     If ServerDoc = Nil Then Exit;
     Try
-        If ServerDoc.Modified Then Result := True;
+        If ModifiedFlagOf(ServerDoc) Then Result := True;
     Except
         Result := False;
     End;
@@ -1330,7 +1444,7 @@ Begin
         And (DocPathKey(ServerDocFileName(Focused)) = DocPathKey(DiskName)) Then
     Begin
         Try
-            If Focused.Modified Then Result := True;
+            If ModifiedFlagOf(Focused) Then Result := True;
         Except
             Result := False;
         End;
@@ -1895,7 +2009,7 @@ Begin
     Else
     Begin
         StillMod := True;
-        Try StillMod := ServerDoc.Modified; Except StillMod := True; End;
+        Try StillMod := ModifiedFlagOf(ServerDoc); Except StillMod := True; End;
         If StillMod Or (Not AgeIsThisTick(AgeBefore)) Then
             SaveBridgeRecordUnwritten := PathListWith(SaveBridgeRecordUnwritten, DiskPath)
         Else
@@ -1954,7 +2068,7 @@ Begin
         If ServerDoc <> Nil Then
         Begin
             WasModified := False;
-            Try WasModified := ServerDoc.Modified; Except WasModified := True; End;
+            Try WasModified := ModifiedFlagOf(ServerDoc); Except WasModified := True; End;
             DocPath := '';
             Try DocPath := Doc.DM_FullPath; Except DocPath := ''; End;
             Ext := '';
@@ -2013,7 +2127,7 @@ Begin
     // The project file itself, when it's a real on-disk project
     Try
         ProjectServerDoc := Client.GetDocumentByPath(Project.DM_ProjectFullPath);
-        If (ProjectServerDoc <> Nil) And ProjectServerDoc.Modified Then
+        If ModifiedFlagOf(ProjectServerDoc) Then
             Try ProjectServerDoc.DoFileSave(''); Except End;
     Except End;
 End;
@@ -2041,7 +2155,7 @@ Begin
         Begin
             Try
                 ServerDoc := Client.GetDocumentByPath(Doc.DM_FullPath);
-                If (ServerDoc <> Nil) And ServerDoc.Modified Then
+                If ModifiedFlagOf(ServerDoc) Then
                     Result := Result + 1;
             Except End;
         End;

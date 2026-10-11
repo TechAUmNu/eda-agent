@@ -317,6 +317,7 @@ Var
     ServerDoc, Again : IServerDocument;
     WasModified, Discard, FlagRead, BridgeEdited : Boolean;
     AgeBefore, AgeAfter : Integer;
+    FlagWhy : String;
 Begin
     FilePath := ExtractJsonValue(Params, 'file_path');
     Discard := LowerCase(ExtractJsonValue(Params, 'discard')) = 'true';
@@ -336,18 +337,30 @@ Begin
         If ServerDoc.FileName <> '' Then DiskPath := ServerDoc.FileName;
     Except End;
     FlagRead := False;
-    Try FlagRead := ServerDoc.Modified; Except FlagRead := False; End;
+    Try FlagRead := ModifiedFlagOf(ServerDoc); Except FlagRead := False; End;
     BridgeEdited := BridgeEditRecorded(FilePath) Or BridgeEditRecorded(DiskPath);
     WasModified := FlagRead Or BridgeEdited;
     If WasModified And Not Discard Then
     Begin
-        If BridgeEdited And Not FlagRead Then
+        { A BRIDGE EDIT IS NAMED WHENEVER THERE IS ONE (live 2026-10-11).  }
+        { The test was 'BridgeEdited And Not FlagRead', and on AD 26.10.1.5 }
+        { the raw flag read neither true nor false, so the generic message }
+        { came back for a document this bridge had edited. The flag is a   }
+        { real Boolean now (ModifiedFlagOf), and it only decides the       }
+        { wording, never whether the bridge edit is named.                 }
+        If BridgeEdited Then
+        Begin
+            If FlagRead Then
+                FlagWhy := 'its modified flag reads modified as well'
+            Else
+                FlagWhy := 'its modified flag reads clean, which has been '
+                    + 'measured to miss edits';
             Result := BuildErrorResponse(RequestId, 'MODIFIED',
                 'This bridge edited the document and the edit has not been '
-                + 'written (its modified flag reads clean, which has been '
-                + 'measured to miss edits), so it was not closed: ' + FilePath
+                + 'written (' + FlagWhy + '), so it was not closed: ' + FilePath
                 + '. Save it first (app_save_all, lib_save_library or '
-                + 'proj_save) or close with discard_changes=true.')
+                + 'proj_save) or close with discard_changes=true.');
+        End
         Else
             Result := BuildErrorResponse(RequestId, 'MODIFIED',
                 'The document has unsaved changes, so it was not closed: ' + FilePath);

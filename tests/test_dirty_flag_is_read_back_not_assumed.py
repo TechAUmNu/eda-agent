@@ -188,7 +188,7 @@ def test_the_mark_returns_the_flag_it_reads_back():
     body = _main()["MarkDocDirty"]
     assert body.startswith("Function MarkDocDirty(FilePath : String) : Boolean;")
     set_at = _at(body, "ServerDoc.SetModified(True);")
-    read_at = _at(body, "MarkLastModified := ServerDoc.Modified;")
+    read_at = _at(body, "MarkLastModified := ModifiedFlagOf(ServerDoc);")
     assert set_at < read_at, "the flag must be read AFTER it is set"
     assert "Result := MarkLastModified;" in body
 
@@ -223,7 +223,7 @@ def test_the_focused_document_is_marked_and_read_too():
     body = strip_comments(_main()["MarkDocDirty"])
     focus = body[_at(body, "Focused := FocusedServerDoc(0);"):]
     assert "Focused.SetModified(True);" in focus
-    assert "FocusedMod := Focused.Modified;" in focus
+    assert "FocusedMod := ModifiedFlagOf(Focused);" in focus
     assert "If FocusedMod Then MarkLastModified := True;" in focus
 
 

@@ -236,6 +236,7 @@ class Client:
 
 
 _MAIN_NAMES = [
+    "ModifiedFlagOf", "ModifiedFlagRaw", "ModifiedFlagTests",
     "LooksAbsolutePath", "DocPathKey", "DocNameKey",
     "ServerDocFileName", "FocusedServerDoc", "ListedDocKey", "DocNameCount",
     "IsProjectMemberFile", "FindOpenServerDoc", "FileAgeOrNone", "BridgeEntryKey",
@@ -258,6 +259,9 @@ _GLOBALS = {
     "FindDocVia": "none", "DocNameMemberKeys": "", "MarkLastPath": "", "MarkLastFile": "",
     "MarkLastVia": "none", "MarkLastFound": False,
     "MarkLastModified": False, "MarkLastFocused": -1, "MarkLastError": "",
+    "MarkLastFlagRaw": "", "MarkLastFlagTests": "",
+    # ModifiedFlagOf counts a read that raised; no fixture read raises.
+    "RecordCaughtException": lambda where: None,
 }
 
 

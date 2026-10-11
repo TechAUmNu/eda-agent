@@ -319,7 +319,7 @@ def test_delete_sheet_passes_a_partial_failure_through(generic_tool):
 
 def test_the_save_pass_can_skip_an_unmodified_library():
     body = _main()["SaveOneDocByDocRef"]
-    assert ".Modified" in body, "the pass never reads the modified flag"
+    assert "ModifiedFlagOf(ServerDoc)" in body, "the pass never reads the modified flag"
     assert "'.SCHLIB'" in body and "'.PCBLIB'" in body
     assert "SaveSkipCleanLibs" in body and "SaveSkipCleanSheets" in body
     skip = _at(body, "If Skip Then")

@@ -3937,7 +3937,7 @@ Begin
     WasLoaded := ServerDoc <> Nil;
     WasModified := False;
     If WasLoaded Then
-        Try WasModified := ServerDoc.Modified; Except WasModified := False; End;
+        Try WasModified := ModifiedFlagOf(ServerDoc); Except WasModified := False; End;
     { The bridge's record is a witness too (review 2026-10-11, F5): a bridge }
     { edit whose flag reads clean is unsaved work all the same.              }
     BridgeEdited := WasLoaded And BridgeEditRecorded(MemberPath);
@@ -13066,7 +13066,7 @@ Begin
         Try ProjPath := OwnerProject.DM_ProjectFullPath; Except ProjPath := ''; End;
 
     WasModified := False;
-    Try WasModified := ServerDoc.Modified; Except WasModified := False; End;
+    Try WasModified := ModifiedFlagOf(ServerDoc); Except WasModified := False; End;
 
     { 1. Save, and prove it. }
     Saved := False;
@@ -13081,7 +13081,7 @@ Begin
         Try Application.ProcessMessages; Except End;
         Try AgeAfter := FileAge(FilePath); Except AgeAfter := -1; End;
         StillModified := True;
-        Try StillModified := ServerDoc.Modified; Except StillModified := True; End;
+        Try StillModified := ModifiedFlagOf(ServerDoc); Except StillModified := True; End;
         Saved := (AgeAfter <> -1) And (AgeAfter <> AgeBefore);
         If (Not Saved) And (AgeAfter <> -1) And AgeIsThisTick(AgeBefore) Then
         Begin
@@ -13099,7 +13099,7 @@ Begin
             Try Application.ProcessMessages; Except End;
             Try AgeAfter := FileAge(FilePath); Except AgeAfter := -1; End;
             StillModified := True;
-            Try StillModified := ServerDoc.Modified; Except StillModified := True; End;
+            Try StillModified := ModifiedFlagOf(ServerDoc); Except StillModified := True; End;
             Saved := (AgeAfter <> -1) And (AgeAfter <> AgeBefore);
         End;
         If Not Saved Then
