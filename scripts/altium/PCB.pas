@@ -2390,6 +2390,20 @@ Begin
     If Increment = 0 Then Increment := 1;
     Prefix := ExtractJsonValue(Params, 'prefix');
 
+    { ASK THE DM LAYER BEFORE TOUCHING PCBServer. Every board handler reaches  }
+    { PCBServer only after GetPCBBoardAnywhere found a board; this one did not, }
+    { and merely naming PCBServer before any PcbDoc or PcbLib was opened this   }
+    { session is the 'Undeclared identifier' the engine shows as a MODAL before }
+    { the Except runs. GetCurrentPCBLibrary answers for the FOCUSED library     }
+    { only, so a focused document that is not a PcbLib got the NO_PCBLIB below  }
+    { anyway: same reply, without the dialog.                                   }
+    If Not FocusedDocKindIs('PCBLIB') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
+            'No PCB library is active. Open the .PcbLib and select a footprint.');
+        Exit;
+    End;
+
     PcbLib := Nil;
     Try PcbLib := PCBServer.GetCurrentPCBLibrary; Except End;
     If PcbLib = Nil Then
@@ -3642,6 +3656,41 @@ Begin
 End;
 
 {..............................................................................}
+{ LayerInStackWalk - whether layer L is in the board's copper stack.           }
+{                                                                              }
+{ LayerObject_V7[L] cannot answer that: it returns an object for ANY id,       }
+{ mechanical and overlay layers and unused mid layers included (pcb_get_mech_  }
+{ layer_names relies on objects coming back for unused ids). The FirstLayer /  }
+{ NextLayer walk lists exactly the layers in the stack, signal and plane       }
+{ alike - it is what pcb_get_layer_stackup prints, and LmBoardSection meets    }
+{ the planes on it. The Trys are fault backstops copied from the proven walk   }
+{ in ResolveLayerIdInStack; an ordinary input never raises in them.            }
+{..............................................................................}
+
+Function LayerInStackWalk(LayerStack : IPCB_LayerStack_V7; L : TLayer) : Boolean;
+Var
+    Obj : IPCB_LayerObject_V7;
+    Lid : TLayer;
+Begin
+    Result := False;
+    If LayerStack = Nil Then Exit;
+    If L = eNoLayer Then Exit;
+    Obj := Nil;
+    Try Obj := LayerStack.FirstLayer; Except Obj := Nil; End;
+    While Obj <> Nil Do
+    Begin
+        Lid := eNoLayer;
+        Try Lid := Obj.LayerID; Except Lid := eNoLayer; End;
+        If Lid = L Then
+        Begin
+            Result := True;
+            Exit;
+        End;
+        Try Obj := LayerStack.NextLayer(Obj); Except Obj := Nil; End;
+    End;
+End;
+
+{..............................................................................}
 { PCB_AddLayer - Insert a copper layer (MidLayer1..30 / InternalPlane1..16)   }
 { into the stack via IPCB_LayerStack.InsertLayer.                             }
 { Params: layer (e.g. MidLayer1)                                              }
@@ -3653,6 +3702,7 @@ Var
     LayerStack : IPCB_LayerStack_V7;
     LayerName : String;
     TargetLayer : TLayer;
+    Insertable : Boolean;
 Begin
     Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then
@@ -3684,9 +3734,23 @@ Begin
         Exit;
     End;
 
+    { ASK BEFORE INSERTING. ResolveLayerId accepts any canonical token, so     }
+    { TopOverlay, KeepOutLayer, Mechanical1 and layers already in the stack    }
+    { reached InsertLayer, which can only refuse them - and a refusal is a     }
+    { MODAL before the Except runs. Only a mid layer or an internal plane that }
+    { the stack walk does not already list is handed over. The reply is not    }
+    { changed: success:true either way, exactly as after the dialog.           }
+    { Conservative: a layer outside those ranges is never in the copper stack  }
+    { and one already in it cannot be inserted again, so a call skipped here   }
+    { is one that could only have popped the dialog.                           }
+    Insertable := (((TargetLayer >= eMidLayer1) And (TargetLayer <= eMidLayer30))
+                   Or ((TargetLayer >= eInternalPlane1) And (TargetLayer <= eInternalPlane16)))
+                  And (Not LayerInStackWalk(LayerStack, TargetLayer));
+
     PCBServer.PreProcess;
     Try
-        Try LayerStack.InsertLayer(TargetLayer); Except End;
+        If Insertable Then
+            Try LayerStack.InsertLayer(TargetLayer); Except End;
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, c_NoEventData);
     Finally
@@ -3710,6 +3774,7 @@ Var
     LayerObj : IPCB_LayerObject_V7;
     LayerName : String;
     TargetLayer : TLayer;
+    Removable : Boolean;
 Begin
     Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then
@@ -3748,9 +3813,23 @@ Begin
         Exit;
     End;
 
+    { ASK BEFORE REMOVING. The Nil test above cannot catch a layer the stack  }
+    { does not hold, because LayerObject_V7 returns an object for any id, so   }
+    { RemoveFromStack was handed mechanical and overlay layers, unused mid     }
+    { layers and the Top/Bottom layers no board can lose - and its refusal is  }
+    { a MODAL before the Except runs. Only an electrical layer other than Top  }
+    { and Bottom that the stack walk lists is handed over. The reply is not    }
+    { changed: success:true either way, exactly as after the dialog.           }
+    { Conservative: each layer skipped here is one RemoveFromStack can only    }
+    { refuse, so nothing that removes today is skipped.                        }
+    Removable := IsElectricalLayerId(TargetLayer)
+                 And (TargetLayer <> eTopLayer) And (TargetLayer <> eBottomLayer)
+                 And LayerInStackWalk(LayerStack, TargetLayer);
+
     PCBServer.PreProcess;
     Try
-        Try LayerStack.RemoveFromStack(LayerObj); Except End;
+        If Removable Then
+            Try LayerStack.RemoveFromStack(LayerObj); Except End;
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, c_NoEventData);
     Finally
@@ -3798,6 +3877,7 @@ Begin
         Else If LayerObj.Dielectric.DielectricType = eSurfaceMaterial Then Result := 'surface'
         Else Result := 'other';
     Except
+        RecordCaughtException('DielectricTypeToken:Dielectric');
         Result := '';
     End;
 End;
@@ -3869,24 +3949,39 @@ Begin
     Try
         If NewName <> '' Then
             Try LayerObj.Name := NewName; Except End;
+        { COUNTED, NOT GUARDED. ResolveStackLayerObject also resolves        }
+        { mechanical and non-copper layers, and whether their layer objects   }
+        { carry CopperThickness / Dielectric is unmeasured. A guard on the    }
+        { layer id is not conservative: a solder mask layer has a dielectric  }
+        { in the stack manager and may well take these writes today. Each     }
+        { catch is counted so one live call on Mechanical1 and on TopSolder   }
+        { settles it.                                                         }
         If ThickStr <> '' Then
-            Try LayerObj.CopperThickness := MilsToCoord(StrToIntDef(ThickStr, 0)); Except End;
+            Try LayerObj.CopperThickness := MilsToCoord(StrToIntDef(ThickStr, 0));
+            Except RecordCaughtException('PCB_ModifyLayer:CopperThickness'); End;
 
         If TypeStr = 'none' Then
-            Try LayerObj.Dielectric.DielectricType := eNoDielectric; Except End
+            Try LayerObj.Dielectric.DielectricType := eNoDielectric;
+            Except RecordCaughtException('PCB_ModifyLayer:DielectricType'); End
         Else If TypeStr = 'core' Then
-            Try LayerObj.Dielectric.DielectricType := eCore; Except End
+            Try LayerObj.Dielectric.DielectricType := eCore;
+            Except RecordCaughtException('PCB_ModifyLayer:DielectricType'); End
         Else If TypeStr = 'prepreg' Then
-            Try LayerObj.Dielectric.DielectricType := ePrePreg; Except End
+            Try LayerObj.Dielectric.DielectricType := ePrePreg;
+            Except RecordCaughtException('PCB_ModifyLayer:DielectricType'); End
         Else If TypeStr = 'surface' Then
-            Try LayerObj.Dielectric.DielectricType := eSurfaceMaterial; Except End;
+            Try LayerObj.Dielectric.DielectricType := eSurfaceMaterial;
+            Except RecordCaughtException('PCB_ModifyLayer:DielectricType'); End;
 
         If HeightStr <> '' Then
-            Try LayerObj.Dielectric.DielectricHeight := MilsToCoord(StrToIntDef(HeightStr, 0)); Except End;
+            Try LayerObj.Dielectric.DielectricHeight := MilsToCoord(StrToIntDef(HeightStr, 0));
+            Except RecordCaughtException('PCB_ModifyLayer:DielectricHeight'); End;
         If ConstStr <> '' Then
-            Try LayerObj.Dielectric.DielectricConstant := StrToFloatDef(ConstStr, 1.0); Except End;
+            Try LayerObj.Dielectric.DielectricConstant := StrToFloatDef(ConstStr, 1.0);
+            Except RecordCaughtException('PCB_ModifyLayer:DielectricConstant'); End;
         If Material <> '' Then
-            Try LayerObj.Dielectric.DielectricMaterial := Material; Except End;
+            Try LayerObj.Dielectric.DielectricMaterial := Material;
+            Except RecordCaughtException('PCB_ModifyLayer:DielectricMaterial'); End;
 
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, c_NoEventData);
@@ -3921,7 +4016,8 @@ Begin
     If ThickStr <> '' Then
     Begin
         ThickBack := -1;
-        Try ThickBack := LayerObj.CopperThickness / 10000; Except ThickBack := -1; End;
+        Try ThickBack := LayerObj.CopperThickness / 10000;
+        Except RecordCaughtException('PCB_ModifyLayer:CopperThickness'); ThickBack := -1; End;
         If AppliedJson <> '' Then AppliedJson := AppliedJson + ',';
         AppliedJson := AppliedJson + '"copper_thickness_mils":' + FloatToJsonStr(ThickBack);
         If Abs(ThickBack - StrToIntDef(ThickStr, 0)) > 0.01 Then
@@ -3948,7 +4044,8 @@ Begin
     If HeightStr <> '' Then
     Begin
         HeightBack := -1;
-        Try HeightBack := LayerObj.Dielectric.DielectricHeight / 10000; Except HeightBack := -1; End;
+        Try HeightBack := LayerObj.Dielectric.DielectricHeight / 10000;
+        Except RecordCaughtException('PCB_ModifyLayer:DielectricHeight'); HeightBack := -1; End;
         If AppliedJson <> '' Then AppliedJson := AppliedJson + ',';
         AppliedJson := AppliedJson + '"dielectric_height_mils":' + FloatToJsonStr(HeightBack);
         If Abs(HeightBack - StrToIntDef(HeightStr, 0)) > 0.01 Then
@@ -3962,7 +4059,8 @@ Begin
     If ConstStr <> '' Then
     Begin
         ConstBack := -1;
-        Try ConstBack := LayerObj.Dielectric.DielectricConstant; Except ConstBack := -1; End;
+        Try ConstBack := LayerObj.Dielectric.DielectricConstant;
+        Except RecordCaughtException('PCB_ModifyLayer:DielectricConstant'); ConstBack := -1; End;
         If AppliedJson <> '' Then AppliedJson := AppliedJson + ',';
         AppliedJson := AppliedJson + '"dielectric_constant":' + FloatToJsonStr(ConstBack);
         If Abs(ConstBack - StrToFloatDef(ConstStr, 1.0)) > 0.001 Then
@@ -3976,7 +4074,8 @@ Begin
     If Material <> '' Then
     Begin
         MaterialBack := '';
-        Try MaterialBack := LayerObj.Dielectric.DielectricMaterial; Except MaterialBack := ''; End;
+        Try MaterialBack := LayerObj.Dielectric.DielectricMaterial;
+        Except RecordCaughtException('PCB_ModifyLayer:DielectricMaterial'); MaterialBack := ''; End;
         If AppliedJson <> '' Then AppliedJson := AppliedJson + ',';
         AppliedJson := AppliedJson + '"dielectric_material":"' + EscapeJsonString(MaterialBack) + '"';
         If MaterialBack <> Material Then
@@ -4009,14 +4108,16 @@ End;
 { why plane nets were being attempted with pcb_place_polygon_rect - there was  }
 { no other way to reach them, pcb_modify_layer having no net parameter.        }
 {                                                                              }
-{ THE WRITE PATH IS NOT CONFIRMED. The DelphiScript reference carried in this  }
-{ repo (docs/altium-delphiscript/) documents no plane-net accessor at all, so  }
-{ the layer object's Net property is attempted under Try/Except and then READ  }
-{ BACK. If this script binding does not carry that property, the write raises  }
-{ nothing and the read-back disagrees, and the call answers success=false with }
-{ applied=false rather than claiming a write that did not land - the same      }
-{ honesty contract pcb_modify_layer and pcb_set_layer_color already keep. The  }
-{ board is saved only when the read-back agrees.                               }
+{ THERE IS NO SCRIPTABLE WRITE PATH YET. The DelphiScript reference carried   }
+{ in this repo (docs/altium-delphiscript/) documents no plane-net accessor,    }
+{ and the layer object's Net property this handler used to write and read     }
+{ back faulted live as an undeclared identifier (2026-09-24) - a modal before  }
+{ any Except, twice per call, with nothing written. The handler therefore      }
+{ validates the request and answers success=false with applied=false and the   }
+{ Layer Stack Manager pointer, exactly what it answered after those dialogs,   }
+{ rather than claiming a write that did not land - the honesty contract        }
+{ pcb_modify_layer and pcb_set_layer_color keep. The candidate route is the    }
+{ layer's split plane objects; see the note in the body.                       }
 {                                                                              }
 { Params: layer (required, plane name or InternalPlaneN), net (required)       }
 {..............................................................................}
@@ -4105,21 +4206,18 @@ Begin
     ResolvedName := GetLayerString(TargetLayer);
     Try ResolvedName := LayerObj.Name; Except End;
 
-    PCBServer.PreProcess;
-    Try
-        Try LayerObj.Net := NetObj; Except End;
-        PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
-            PCBM_BoardRegisteration, c_NoEventData);
-    Finally
-        PCBServer.PostProcess;
-    End;
-
+    { NO WRITE AND NO READ OF LayerObj.Net. IPCB_LayerObject_V7 has no Net:  }
+    { it faulted live as an undeclared identifier (2026-09-24, LmBoardSection }
+    { carries the note), and the engine shows that as a MODAL before any      }
+    { Except runs - twice per call here, once for the write and once for the  }
+    { read-back, and the write never landed. Without them the board and the   }
+    { reply are exactly what the call produced after the two dialogs:         }
+    { net_readback empty, success=false, applied=false, the same note.        }
+    { Tying a plane for real needs another route - the layer's split plane    }
+    { objects (Split.Net := NetObj inside BeginModify/EndModify) - and that   }
+    { write is unverified, so it waits for a live probe rather than going in  }
+    { here. Nothing is written, so no PreProcess/PostProcess bracket either.  }
     NetBack := '';
-    Try
-        If LayerObj.Net <> Nil Then NetBack := LayerObj.Net.Name;
-    Except
-        NetBack := '';
-    End;
 
     Applied := (NetBack <> '') And (UpperCase(NetBack) = UpperCase(NetStr));
 
@@ -7385,7 +7483,6 @@ Function PCB_GetRoomRules(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
     Iterator : IPCB_BoardIterator;
-    Rule : IPCB_Rule;
     Room : IPCB_ConfinementConstraint;
     JsonItems, KindStr : String;
     BR : TCoordRect;
@@ -7408,17 +7505,21 @@ Begin
     Iterator.AddFilter_LayerSet(AllLayers);
     Iterator.AddFilter_Method(eProcessAll);
 
-    Rule := Iterator.FirstPCBObject;
-    While Rule <> Nil Do
+    { NARROWED AT THE ITERATOR, AND NOWHERE ELSE. BoundingRect and Kind live }
+    { on IPCB_ConfinementConstraint, not on the base IPCB_Rule, and           }
+    { DelphiScript narrows a rule interface only when the typed local is      }
+    { assigned straight from the iterator (LmRulesSection, PCB_SetRuleProperties). }
+    { The old 'Room := Rule' copied an IPCB_Rule local and did NOT narrow, so  }
+    { BoundingRect was an undeclared identifier - a MODAL per room rule - and }
+    { every room came back with a zero box. The Try stays as a fault backstop. }
+    Room := Iterator.FirstPCBObject;
+    While Room <> Nil Do
     Begin
-        If Rule.RuleKind = eRule_ConfinementConstraint Then
+        If Room.RuleKind = eRule_ConfinementConstraint Then
         Begin
             If Not First Then JsonItems := JsonItems + ',';
             First := False;
 
-            { BoundingRect / Kind / Comment etc. live on IPCB_ConfinementConstraint, }
-            { not on the base IPCB_Rule. Narrow the typed reference before reading. }
-            Room := Rule;
             Try
                 BR := Room.BoundingRect;
             Except
@@ -7430,18 +7531,18 @@ Begin
                 Else KindStr := 'ConfineOut';
             Except KindStr := 'Unknown'; End;
 
-            JsonItems := JsonItems + '{"name":"' + EscapeJsonString(Rule.Name) + '",'
-                + '"enabled":' + BoolToJsonStr(Rule.Enabled) + ','
+            JsonItems := JsonItems + '{"name":"' + EscapeJsonString(Room.Name) + '",'
+                + '"enabled":' + BoolToJsonStr(Room.Enabled) + ','
                 + '"kind":"' + EscapeJsonString(KindStr) + '",'
-                + '"scope_1":"' + EscapeJsonString(Rule.Scope1Expression) + '",'
-                + '"comment":"' + EscapeJsonString(Rule.Comment) + '",'
+                + '"scope_1":"' + EscapeJsonString(Room.Scope1Expression) + '",'
+                + '"comment":"' + EscapeJsonString(Room.Comment) + '",'
                 + '"x1":' + IntToStr(CoordToMils(BR.Left)) + ','
                 + '"y1":' + IntToStr(CoordToMils(BR.Bottom)) + ','
                 + '"x2":' + IntToStr(CoordToMils(BR.Right)) + ','
                 + '"y2":' + IntToStr(CoordToMils(BR.Top)) + '}';
             Inc(Count);
         End;
-        Rule := Iterator.NextPCBObject;
+        Room := Iterator.NextPCBObject;
     End;
     Board.BoardIterator_Destroy(Iterator);
 
@@ -8192,6 +8293,7 @@ Var
     Step : Double;
     NewPos : Integer;
     CompList : TInterfaceList;
+    Prim : IPCB_Primitive;
     Comp : IPCB_Component;
     Iterator : IPCB_BoardIterator;
     DeltaX, DeltaY : Integer;
@@ -8245,17 +8347,25 @@ Begin
         End;
         If DesName = '' Then Continue;
 
-        Comp := Iterator.FirstPCBObject;
-        While Comp <> Nil Do
+        { HELD AS THE BASE PRIMITIVE, NARROWED AFTER RETRIEVAL. A TInterfaceList }
+        { item assigned straight to a DERIVED IPCB_Component skips             }
+        { QueryInterface and faults in oleaut32 on the first call through it   }
+        { (measured; PCB_SetTrackWidth and PCB_MoveTracksToLayer carry the     }
+        { note). That was Comp.I_ObjectAddress below, on every call that       }
+        { matched two components. The list now holds IPCB_Primitive both in    }
+        { and out, the proven PCB_SetTrackWidth pattern.                        }
+        Prim := Iterator.FirstPCBObject;
+        While Prim <> Nil Do
         Begin
+            Comp := Prim;
             Try
                 If Comp.Name.Text = DesName Then
                 Begin
-                    CompList.Add(Comp);
+                    CompList.Add(Prim);
                     Break;
                 End;
             Except End;
-            Comp := Iterator.NextPCBObject;
+            Prim := Iterator.NextPCBObject;
         End;
     End;
     Board.BoardIterator_Destroy(Iterator);
@@ -8276,8 +8386,9 @@ Begin
     Try
         For I := 0 To Count - 1 Do
         Begin
-            Comp := CompList.Items[I];
-            If Comp = Nil Then Continue;
+            Prim := CompList.Items[I];
+            If Prim = Nil Then Continue;
+            Comp := Prim;
             NewPos := StartVal + Round(Step * I);
             PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
                 PCBM_BeginModify, c_NoEventData);
@@ -8991,7 +9102,7 @@ End;
 Function PCB_PlaceEmbeddedBoard(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
-    Emb : IPCB_Primitive;
+    Emb : IPCB_EmbeddedBoard;
     ChildPath, LayerStr, MirrorStr : String;
     X, Y, Rows, Cols, RowSpace, ColSpace : Integer;
     TargetLayer : TLayer;
@@ -9035,20 +9146,37 @@ Begin
         Exit;
     End;
 
+    { Emb IS DECLARED AS THE SUBTYPE, the way PCB_Panelize declares it, so    }
+    { the factory result narrows on assignment and XLocation, DocumentPath,   }
+    { RowCount and the rest resolve. Declared IPCB_Primitive, each of those   }
+    { eight writes was a subtype member on a base local - an undeclared       }
+    { identifier, a MODAL per write, the write lost. Conservative: the        }
+    { declaration only adds members to resolve against, so a write that       }
+    { lands today still lands, and one that popped either lands or pops as    }
+    { before. The Trys stay as backstops and count a catch, so one live call  }
+    { shows whether XLocation / YLocation exist on IPCB_EmbeddedBoard at all. }
     PCBServer.PreProcess;
     Try
         Try Emb.Layer := TargetLayer; Except End;
-        Try Emb.XLocation := MilsToCoord(X); Except End;
-        Try Emb.YLocation := MilsToCoord(Y); Except End;
-        Try Emb.DocumentPath := ChildPath; Except End;
-        Try Emb.RowCount := Rows; Except End;
-        Try Emb.ColCount := Cols; Except End;
+        Try Emb.XLocation := MilsToCoord(X);
+        Except RecordCaughtException('PCB_PlaceEmbeddedBoard:XLocation'); End;
+        Try Emb.YLocation := MilsToCoord(Y);
+        Except RecordCaughtException('PCB_PlaceEmbeddedBoard:YLocation'); End;
+        Try Emb.DocumentPath := ChildPath;
+        Except RecordCaughtException('PCB_PlaceEmbeddedBoard:DocumentPath'); End;
+        Try Emb.RowCount := Rows;
+        Except RecordCaughtException('PCB_PlaceEmbeddedBoard:RowCount'); End;
+        Try Emb.ColCount := Cols;
+        Except RecordCaughtException('PCB_PlaceEmbeddedBoard:ColCount'); End;
         If RowSpace > 0 Then
-            Try Emb.RowSpacing := MilsToCoord(RowSpace); Except End;
+            Try Emb.RowSpacing := MilsToCoord(RowSpace);
+            Except RecordCaughtException('PCB_PlaceEmbeddedBoard:RowSpacing'); End;
         If ColSpace > 0 Then
-            Try Emb.ColSpacing := MilsToCoord(ColSpace); Except End;
+            Try Emb.ColSpacing := MilsToCoord(ColSpace);
+            Except RecordCaughtException('PCB_PlaceEmbeddedBoard:ColSpacing'); End;
         If (MirrorStr = 'true') Or (MirrorStr = '1') Then
-            Try Emb.MirrorFlag := True; Except End;
+            Try Emb.MirrorFlag := True;
+            Except RecordCaughtException('PCB_PlaceEmbeddedBoard:MirrorFlag'); End;
 
         Board.AddPCBObject(Emb);
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
@@ -9436,6 +9564,20 @@ Begin
     GridYPad := 0;
     GridXCnt := 0;
     GridYCnt := 0;
+
+    { A ZERO GRID SIZE DIVIDES BY ZERO in the first line of the loop below,   }
+    { outside any Try: the engine showed the division error as a MODAL and    }
+    { the dispatcher's Except answered INTERNAL_ERROR. min_grid_size_mils=0   }
+    { (or anything Python rounds to 0) got there. Asked first now, with the   }
+    { reply the dispatcher gave after the dialog, word for word. A negative   }
+    { size never divides by zero: its counts come out <= 0 and it is refused  }
+    { as INFEASIBLE below, as before.                                         }
+    If GridSize = 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'INTERNAL_ERROR',
+            'Unhandled exception processing: pcb.make_paste_grid');
+        Exit;
+    End;
 
     { Outer loop -- bump grid size until coverage % satisfied.               }
     While PctCover < MinCoverPct Do
@@ -10310,7 +10452,12 @@ Begin
 
                         Try
                             SpatIter.AddFilter_ObjectSet(MkSet(eTrackObject));
-                            SpatIter.AddFilter_IPCB_LayerSet(MkSet(Track.Layer));
+                            { AddFilter_LayerSet takes a MkSet SET;          }
+                            { AddFilter_IPCB_LayerSet takes an IPCB_LayerSet }
+                            { OBJECT, and handing it a set raised a type     }
+                            { cast - a MODAL per endpoint - before the       }
+                            { Except, and the corner search found nothing.   }
+                            SpatIter.AddFilter_LayerSet(MkSet(Track.Layer));
                             SpatIter.AddFilter_Area(
                                 PX - Tol, PY - Tol, PX + Tol, PY + Tol);
 
@@ -10719,6 +10866,61 @@ Begin
         + 'Expansion rule instead: pcb_create_design_rule with '
         + 'rule_type=solder_mask_expansion and scope=IsVia.');
 End;
+
+{..............................................................................}
+{ MechPairIndexFor - the index of the mechanical pair TopL/BotL, created or    }
+{ rebuilt as needed; -1 when no index can be had.                              }
+{                                                                              }
+{ AddPair takes the TOP layer first and is the only call that reports an       }
+{ index: PairDefined answers a boolean and LayerPair(i) is noted as broken in  }
+{ the reference, so a pair that already exists cannot be located by reading.   }
+{ AddPair is asked first in case it is idempotent, and the pair is rebuilt     }
+{ only when that gives no index.                                               }
+{                                                                              }
+{ ASK BEFORE EACH RemovePair. The rebuild used to remove BOTH orientations     }
+{ although PairDefined had just said which one exists, so one RemovePair       }
+{ always targeted a pair that was not there - a MODAL before the Except on     }
+{ every re-run of a paired kind. Now each orientation is removed only when     }
+{ PairDefined says it is defined at that moment (BotL/TopL is asked after the  }
+{ TopL/BotL removal, so an orientation-blind PairDefined cannot send a second  }
+{ removal at a pair the first one took). The end state is today's: every pair  }
+{ between the two layers removed, then AddPair.                                }
+{                                                                              }
+{ The FIRST AddPair keeps its Try and is COUNTED, not guarded: whether AddPair }
+{ raises on an existing pair or returns its index is unmeasured, and skipping  }
+{ it for a defined pair would trade an idempotent success for the rebuild.     }
+{ One live re-run of a paired kind on already-paired layers settles it.        }
+{..............................................................................}
+
+Function MechPairIndexFor(MechPairs : IPCB_MechanicalLayerPairs; TopL : TLayer; BotL : TLayer) : Integer;
+Var
+    PairedTB, PairedBT : Boolean;
+Begin
+    Result := -1;
+    If MechPairs = Nil Then Exit;
+
+    Try
+        Result := MechPairs.AddPair(TopL, BotL);
+    Except
+        RecordCaughtException('PCB_SetMechLayerKind:AddPair');
+        Result := -1;
+    End;
+    If Result >= 0 Then Exit;
+
+    PairedTB := False;
+    Try PairedTB := MechPairs.PairDefined(TopL, BotL); Except PairedTB := False; End;
+    If PairedTB Then
+        Try MechPairs.RemovePair(TopL, BotL); Except End;
+
+    PairedBT := False;
+    Try PairedBT := MechPairs.PairDefined(BotL, TopL); Except PairedBT := False; End;
+    If PairedBT Then
+        Try MechPairs.RemovePair(BotL, TopL); Except End;
+
+    If PairedTB Or PairedBT Then
+        Try Result := MechPairs.AddPair(TopL, BotL); Except Result := -1; End;
+End;
+
 Function PCB_SetMechLayerKind(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
@@ -10730,7 +10932,7 @@ Var
     KindId, Readback, OtherKind : Integer;
     PartnerKind, PairKind, PairIdx, PairKindBack : Integer;
     MechPairs : IPCB_MechanicalLayerPairs;
-    First, Paired, PairApplied : Boolean;
+    First, PairApplied : Boolean;
 Begin
     Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then
@@ -10880,12 +11082,8 @@ Begin
 
         If (PartnerKind >= 0) And (PairKind >= 0) And (MechPairs <> Nil) Then
         Begin
-            { AddPair takes the TOP layer first and is the only call that   }
-            { reports an index: PairDefined answers a boolean and           }
-            { LayerPair(i) is noted as broken in the reference, so a pair   }
-            { that already exists cannot be located by reading. Ask for the }
-            { pair first in case AddPair is idempotent, and rebuild it only }
-            { when that gives no index.                                     }
+            { MechPairIndexFor finds, creates or rebuilds the pair; see its  }
+            { header for why each RemovePair is asked about first.           }
             If Pos(' Top', MechKindToString(KindId)) > 0 Then
             Begin
                 TopL := TargetLayer;
@@ -10897,22 +11095,7 @@ Begin
                 BotL := TargetLayer;
             End;
 
-            PairIdx := -1;
-            Try PairIdx := MechPairs.AddPair(TopL, BotL); Except PairIdx := -1; End;
-
-            If PairIdx < 0 Then
-            Begin
-                Paired := False;
-                Try Paired := MechPairs.PairDefined(TopL, BotL); Except Paired := False; End;
-                If Not Paired Then
-                    Try Paired := MechPairs.PairDefined(BotL, TopL); Except Paired := False; End;
-                If Paired Then
-                Begin
-                    Try MechPairs.RemovePair(TopL, BotL); Except End;
-                    Try MechPairs.RemovePair(BotL, TopL); Except End;
-                    Try PairIdx := MechPairs.AddPair(TopL, BotL); Except PairIdx := -1; End;
-                End;
-            End;
+            PairIdx := MechPairIndexFor(MechPairs, TopL, BotL);
 
             If PairIdx >= 0 Then
             Begin
@@ -11988,7 +12171,10 @@ Var
     Via : IPCB_Via;
     Rule : IPCB_Rule;
     Matches : TInterfaceList;
-    I, Checked, Changed : Integer;
+    FailedRules : TStringList;
+    RuleName : String;
+    I, Checked, Changed, NewSize, NewHole : Integer;
+    ReadOk : Boolean;
 Begin
     Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then
@@ -12020,6 +12206,20 @@ Begin
         Board.BoardIterator_Destroy(Iter);
     End;
 
+    { PreferedWidth / PreferedHoleWidth are routing-via-style members read   }
+    { off a base IPCB_Rule, which constraint members do not narrow onto        }
+    { (PCB_CreateDesignRule / PCB_SetRuleProperties headers) - probably an    }
+    { undeclared identifier, a MODAL per free via. Unmeasured, and no typed    }
+    { read of a via-style rule has ever run here, so the read is COUNTED and   }
+    { LATCHED rather than replaced: a rule whose members failed to read once   }
+    { is not read again this call. The same members of the same rule object   }
+    { fail the same way every time, so the latch only skips reads that could   }
+    { not succeed - a board with one via-style rule pops at most one dialog    }
+    { per call instead of one per via, and a build where the read works is     }
+    { untouched. The values are read BEFORE BeginModify, so a failed read no   }
+    { longer leaves a BeginModify without its EndModify.                       }
+    { Live probe: pcb_normalize_vias on a scratch board with one free via.     }
+    FailedRules := TStringList.Create;
     PCBServer.PreProcess;
     Try
         For I := 0 To Matches.Count - 1 Do
@@ -12029,24 +12229,44 @@ Begin
             { Only free vias -- a via owned by a component footprint, polygon,
               or dimension is a child primitive; modifying it faults. }
             If Prim.InComponent Or Prim.InPolygon Or Prim.InDimension Then Continue;
+            Rule := Nil;
             Try
                 Via := Prim;
                 Rule := Board.FindDominantRuleForObject(Via, eRule_RoutingViaStyle);
-                If Rule <> Nil Then
-                Begin
-                    PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast,
-                        PCBM_BeginModify, c_NoEventData);
-                    Via.Size := Rule.PreferedWidth;
-                    Via.HoleSize := Rule.PreferedHoleWidth;
-                    PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast,
-                        PCBM_EndModify, c_NoEventData);
-                    Changed := Changed + 1;
-                End;
+            Except
+                Rule := Nil;
+            End;
+            If Rule = Nil Then Continue;
+
+            RuleName := '';
+            Try RuleName := Rule.Name; Except RuleName := ''; End;
+            If FailedRules.IndexOf(RuleName) >= 0 Then Continue;
+
+            ReadOk := False;
+            Try
+                NewSize := Rule.PreferedWidth;
+                NewHole := Rule.PreferedHoleWidth;
+                ReadOk := True;
+            Except
+                RecordCaughtException('PCB_NormalizeVias:PreferedWidth');
+                FailedRules.Add(RuleName);
+            End;
+            If Not ReadOk Then Continue;
+
+            Try
+                PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast,
+                    PCBM_BeginModify, c_NoEventData);
+                Via.Size := NewSize;
+                Via.HoleSize := NewHole;
+                PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast,
+                    PCBM_EndModify, c_NoEventData);
+                Changed := Changed + 1;
             Except End;
         End;
     Finally
         PCBServer.PostProcess;
     End;
+    FailedRules.Free;
 
     MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId,
@@ -13223,6 +13443,7 @@ Var
     GrpIter : IPCB_GroupIterator;
     Pad, PadFound : IPCB_Pad;
     Net : IPCB_Net;
+    NetPrim : IPCB_Primitive;
     NetNames, MissingComps, MissingPads, MissingNets : TStringList;
     NetRefs : TInterfaceList;
     BindingsStr, Remaining, Op : String;
@@ -13292,17 +13513,27 @@ Begin
 
             { Net cache: one FindNetByName board scan per distinct name,      }
             { with a negative cache so absent nets don't rescan either.       }
+            { The cache holds the BASE IPCB_Primitive in and out, narrowed to }
+            { Net after retrieval: a TInterfaceList item assigned straight to }
+            { a derived interface skips QueryInterface and faults in oleaut32 }
+            { on the first call through it (measured for IPCB_Track and       }
+            { IPCB_Component; the same pattern hit the second pin of every    }
+            { net here). Same list, same names, same reply.                   }
             Net := Nil;
             NetIdx := NetNames.IndexOf(NetName);
             If NetIdx >= 0 Then
-                Net := NetRefs.Items[NetIdx]
+            Begin
+                NetPrim := NetRefs.Items[NetIdx];
+                Net := NetPrim;
+            End
             Else If MissingNets.IndexOf(NetName) < 0 Then
             Begin
                 Net := FindNetByName(Board, NetName);
                 If Net <> Nil Then
                 Begin
                     NetNames.Add(NetName);
-                    NetRefs.Add(Net);
+                    NetPrim := Net;
+                    NetRefs.Add(NetPrim);
                 End
                 Else
                     MissingNets.Add(NetName);

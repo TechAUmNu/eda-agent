@@ -40,7 +40,6 @@ Var
     Txt   : IPCB_Text;
     Arc   : IPCB_Arc;
     Fill  : IPCB_Fill;
-    Body  : IPCB_ComponentBody;
 Begin
     Result := 0;
     Found := False;
@@ -64,12 +63,14 @@ Begin
             If WantY Then Result := Comp.y Else Result := Comp.x;
             Found := True;
         End
-        Else If Oid = eComponentBodyObject Then
-        Begin
-            Body := Obj;
-            If WantY Then Result := Body.y Else Result := Body.x;
-            Found := True;
-        End
+        { NO COMPONENT-BODY BRANCH, ON PURPOSE. It read Body.x / Body.y,     }
+        { and IPCB_ComponentBody declares no x or y in the AD26 SDK (docs/  }
+        { altium-delphiscript/03-pcb-interfaces.md 3.11; Body.Rotation       }
+        { raised "Undeclared identifier" live on 26.9.1.9). The script       }
+        { engine shows that as a MODAL before the Except below runs, so every }
+        { obj_query / obj_modify of X or Y on a body popped a dialog and then }
+        { came back Found=False. A body now falls through to Found=False     }
+        { without the dialog: the same reply, 'unreadable', as before.       }
         Else If Oid = eTextObject Then
         Begin
             Txt := Obj;
@@ -362,6 +363,12 @@ Begin
             End;
         End;
     Except
+        { Counted for the live probe: IsRedundant and Mode on a ratsnest   }
+        { line (PCBConnRedundant / PCBConnMode) have never been called from }
+        { a script, and there is no way to ask first whether the engine     }
+        { knows an identifier. If the count names them, drop the branch and }
+        { the names from IsKnownPCBProperty / KnownPCBPropertyList.         }
+        RecordCaughtException('GetPCBProperty:' + PropName);
         Result := '';
     End;
 End;
@@ -576,6 +583,12 @@ Begin
 
         If Matched Then Result := 1 Else Result := 0;
     Except
+        { Counted for the live probe: the region Kind write (Kind /        }
+        { RegionKind) is attested only as a comparison, never assigned by a }
+        { reference script, and nothing can ask first whether it is         }
+        { writable. If the count names it, drop the write branch (Matched   }
+        { := False) and keep the read in GetPCBProperty.                    }
+        RecordCaughtException('SetPCBProperty:' + PropName);
         Result := -1;
     End;
 

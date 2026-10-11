@@ -57,7 +57,9 @@ def test_the_base_interface_is_never_asked_for_a_position(source: str):
     ("ePadObject", "Pad."),
     ("eViaObject", "Via."),
     ("eComponentObject", "Comp."),
-    ("eComponentBodyObject", "Body."),
+    # No eComponentBodyObject: IPCB_ComponentBody declares no x/y, so its
+    # branch read an undeclared identifier (a modal) and is gone. The body
+    # is refused like a track; tests/test_popup_free_pcb.py holds that.
     ("eTextObject", "Txt."),
     ("eArcObject", "Arc."),
     ("eFillObject", "Fill."),
