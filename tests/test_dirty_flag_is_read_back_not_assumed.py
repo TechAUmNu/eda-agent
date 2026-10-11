@@ -137,34 +137,16 @@ def _result_expr(func: str) -> str:
 
 
 def _compiled():
-    """DocPathKey, DocNameKey, LooksAbsolutePath and DocPathsMatch, built
-    from the source text."""
+    """DocPathKey, DocNameKey and LooksAbsolutePath, built from the source
+    text. (DocPathsMatch, which matched a bare name against ANY absolute
+    path of that name, is gone: review 2026-10-11 found it let the lookup
+    return a namesake. The lookup itself is EXECUTED on a fixture
+    workspace in tests/test_bridge_record_names_one_file.py.)"""
     ns: dict = dict(_FUNCS)
     for name, arg in (("LooksAbsolutePath", "P"), ("DocPathKey", "P"),
                       ("DocNameKey", "P")):
         expr = _py_expr(_result_expr(name))
         ns[name] = eval(f"lambda {arg}: {expr}", ns)          # noqa: S307
-
-    body = strip_comments(_main()["DocPathsMatch"])
-    # The function's shape, pinned so the evaluation below is faithful.
-    empty = re.search(r"If\s+(.+?)\s+Then\s+Exit;", body, re.S).group(1)
-    same = re.search(r"If\s+(DocPathKey\(A\)\s*=\s*DocPathKey\(B\))\s+Then",
-                     body).group(1)
-    bare = re.search(r"If\s+(\(Not LooksAbsolutePath.+?)\s+Then\s+Result\s*:=\s*(.+?);",
-                     body, re.S)
-    assert bare, "DocPathsMatch no longer has the bare-name branch"
-    f_empty = eval("lambda A, B: " + _py_expr(empty), ns)       # noqa: S307
-    f_same = eval("lambda A, B: " + _py_expr(same), ns)         # noqa: S307
-    f_bare = eval("lambda A, B: " + _py_expr(bare.group(1)), ns)  # noqa: S307
-    f_name = eval("lambda A, B: " + _py_expr(bare.group(2)), ns)  # noqa: S307
-
-    def match(a, b):
-        if f_empty(a, b):
-            return False
-        if f_same(a, b):
-            return True
-        return bool(f_bare(a, b) and f_name(a, b))
-    ns["DocPathsMatch"] = match
     return ns
 
 
@@ -172,19 +154,23 @@ _TEMP = r"C:\Users\user\AppData\Local\Temp\scratch\x"
 
 
 @pytest.mark.parametrize("a, b, same", [
-    # ProcessActiveDoc passes ISch_Document.DocumentName, which is a BARE
-    # name for a free document; GetDocumentByPath wants the full path.
-    ("SCRATCH_A.SchDoc", _TEMP + r"\SCRATCH_A.SchDoc", True),
     # The same file spelled with other case and forward slashes.
     (_TEMP.replace("\\", "/").lower() + "/height_copy.PcbLib",
      _TEMP + r"\HEIGHT_COPY.PCBLIB", True),
     # Two different files that share a name are NOT the same file.
     (r"C:\a\X.SchDoc", r"C:\b\X.SchDoc", False),
-    # Nothing matches an empty path.
-    ("", _TEMP + r"\SCRATCH_A.SchDoc", False),
+    # A bare name is not an absolute path's key, whatever its file name.
+    ("SCRATCH_A.SchDoc", _TEMP + r"\SCRATCH_A.SchDoc", False),
 ])
-def test_the_lookup_matches_the_field_spellings(a, b, same):
-    assert _compiled()["DocPathsMatch"](a, b) is same
+def test_one_key_per_file(a, b, same):
+    ns = _compiled()
+    assert (ns["DocPathKey"](a) == ns["DocPathKey"](b)) is same
+
+
+def test_a_bare_name_keys_by_its_file_name():
+    ns = _compiled()
+    assert ns["DocNameKey"]("SCRATCH_A.SchDoc") == \
+        ns["DocNameKey"](_TEMP + r"\scratch_a.schdoc")
 
 
 def test_a_unc_path_is_absolute():
@@ -222,15 +208,14 @@ def test_a_lookup_miss_is_no_longer_silent():
 
 
 def test_the_lookup_walks_free_documents_and_falls_back_to_the_focus():
+    """Shape only; the behaviour is executed in
+    test_bridge_record_names_one_file.py."""
     body = strip_comments(_main()["FindOpenServerDoc"])
-    exact = _at(body, "Client.GetDocumentByPath(FilePath)")
-    walk = _at(body, "Workspace.DM_FreeDocumentsProject")
-    focus = _at(body, "FocusedServerDoc(0)")
-    assert exact < walk < focus, "exact lookup, then the walk, then the focus"
-    assert "DocPathsMatch(Full, FilePath)" in body
-    assert "If NameHits = 1 Then" in body, (
-        "a bare name matching several open files must not be guessed")
+    assert "Workspace.DM_FreeDocumentsProject" in body
+    assert "NameHits := DocNameCount(FilePath);" in body, (
+        "a bare name must be counted over the LISTING before any lookup")
     assert "FindDocVia := 'ambiguous_name';" in body
+    assert "DocPathsMatch" not in body, "a name match must never answer an absolute path"
     assert "View.OwnerDocument" in _main()["FocusedServerDoc"]
 
 
@@ -294,8 +279,9 @@ def test_obj_modify_reports_the_read_back_not_a_constant(name):
     assert "',\"mark\":' + MarkJson + HintJson" in body
     assert "If Not Marked Then" in body
     assert "MarkSaveHint(False, False)" in body
-    assert "',\"pending_save\":' + BoolToJsonStr(IsMutating)" in body, (
-        "the edit is pending a save whether or not the flag registered")
+    assert "',\"pending_save\":' + BoolToJsonStr(IsMutating And (TotalMatched > 0))" \
+        in body, ("the edit is pending a save whether or not the flag "
+                  "registered, and only when the call changed something")
 
 
 def test_the_save_hint_names_the_routes_that_still_write():
@@ -342,27 +328,33 @@ def test_lib_save_library_says_whether_the_bridge_edited_it():
 # ---------------------------------------------------------------------------
 
 def test_the_mark_records_the_path_even_when_the_lookup_misses():
+    """An ABSOLUTE path goes on the record before the lookup; a bare name
+    only when nothing resolved (review 2026-10-11: a bare entry matched
+    every file of that name)."""
     body = strip_comments(_main()["MarkDocDirty"])
-    assert _at(body, "RecordBridgeEdit(FilePath);") < \
+    early = _at(body, "If LooksAbsolutePath(Trim(FilePath)) Then")
+    assert early < _at(body, "RecordBridgeEdit(FilePath);") < \
         _at(body, "FindOpenServerDoc(FilePath)"), (
-            "a document the lookup cannot find must still be on the record")
+            "an absolute path the lookup cannot find must still be on the record")
     assert "RecordBridgeEdit(DiskName);" in body
 
 
 def test_the_record_overrides_a_clean_read_in_the_save_pass():
     body = strip_comments(_main()["SaveOneDocByDocRef"])
-    rec = _at(body, "InRecord := BridgeEditRecorded(Doc.DM_FullPath) "
+    rec = _at(body, "InRecord := BridgeEditRecorded(DocPath) "
                     "Or BridgeEditRecorded(DiskPath);")
     override = _at(body, "If Skip And InRecord Then")
     skip = _at(body, "If Skip Then")
     assert rec < override < skip, (
         "the record must be consulted before the skip decides")
     assert "ByRecord := True;" in body[override:skip]
-    write = _at(body, "Try ServerDoc.DoFileSave(''); Except End;")
-    moved = _at(body, "Moved := (AgeAfter <> -1) And (AgeAfter <> AgeBefore);")
-    assert write < moved < _at(body, "ForgetBridgeEdit(Doc.DM_FullPath);")
-    assert "SaveBridgeRecordPaths := SaveBridgeRecordPaths + DiskPath;" in body
-    assert "SaveBridgeRecordUnwritten := SaveBridgeRecordUnwritten + DiskPath;" in body
+    assert "WriteDocAndNote(ServerDoc, DiskPath, DocPath, InRecord, ByRecord)" in body
+    note = strip_comments(_main()["WriteDocAndNote"])
+    write = _at(note, "Try ServerDoc.DoFileSave(''); Except End;")
+    moved = _at(note, "Moved := (AgeAfter <> -1) And (AgeAfter <> AgeBefore);")
+    assert write < moved < _at(note, "ForgetBridgeEdit(DocPath);")
+    assert "PathListWith(SaveBridgeRecordPaths, DiskPath)" in note
+    assert "PathListWith(SaveBridgeRecordUnwritten, DiskPath)" in note
 
 
 def test_save_all_reports_what_it_wrote_from_the_record():
@@ -373,7 +365,7 @@ def test_save_all_reports_what_it_wrote_from_the_record():
                 '"bridge_record_pending":'):
         assert key in body, key
     assert "PipeListToJsonArray(SaveBridgeRecordPaths)" in body
-    assert "If SaveBridgeRecordUnwritten <> '' Then" in body
+    assert "If (SaveBridgeRecordUnwritten <> '') Or (SaveBridgeRecordClosed <> '') Then" in body
     branches = body.split("Result := BuildSuccessResponse(")[1:]
     assert len(branches) == 5
     for b in branches:
@@ -400,11 +392,18 @@ def test_free_documents_are_aged_by_the_save_check():
 def test_helpers_are_declared_before_their_callers():
     text = (_ALTIUM / "Main.pas").read_text(encoding="utf-8")
     order = ["Function LooksAbsolutePath(", "Function DocPathKey(",
-             "Function DocPathsMatch(", "Function FindOpenServerDoc(",
-             "Function BridgeEditRecorded(", "Procedure RecordBridgeEdit(",
-             "Procedure ForgetBridgeEdit(", "Function MarkDocDirty(",
+             "Function DocNameKey(", "Function ServerDocFileName(",
+             "Function FocusedServerDoc(", "Function ListedDocKey(",
+             "Function DocNameCount(", "Function FindOpenServerDoc(",
+             "Function FileAgeOrNone(", "Function BridgeEntryKey(",
+             "Function BridgeEntryStamp(", "Function BridgeRecordWithout(",
+             "Function PathListWith(", "Function BridgeEditRecorded(",
+             "Procedure RecordBridgeEdit(", "Procedure ForgetBridgeEdit(",
+             "Function BridgeRecordKeys(", "Function MarkDocDirty(",
              "Procedure MarkDocDirtyByPath(", "Function DocIsModified(",
-             "Procedure SaveOneDocByDocRef(", "Function WorkspaceDocPaths("]
+             "Function ListedServerDoc(", "Function WriteDocAndNote(",
+             "Procedure SaveOneDocByDocRef(", "Function WorkspaceDocPaths(",
+             "Procedure SaveAllDirty(", "Function SaveBridgeRecordSweep("]
     at = [text.index(n) for n in order]
     assert at == sorted(at), "DelphiScript has no forward declarations"
 

@@ -323,14 +323,18 @@ def test_the_save_pass_can_skip_an_unmodified_library():
     assert "'.SCHLIB'" in body and "'.PCBLIB'" in body
     assert "SaveSkipCleanLibs" in body and "SaveSkipCleanSheets" in body
     skip = _at(body, "If Skip Then")
-    forced = _at(body, "ServerDoc.SetModified(True)")
+    # The write itself lives in WriteDocAndNote since 2026-10-11 (shared
+    # with the record sweep); its call is what must sit on the branch.
+    forced = _at(body, "WriteDocAndNote(ServerDoc, DiskPath, DocPath, InRecord, ByRecord)")
     assert forced > _at(body[skip:], "Else") + skip, (
         "the forced write (SetModified(True) + DoFileSave) must be on the "
         "NOT-skipped branch; otherwise a skipped library is still written "
         "and its mtime still moves")
+    write = _main()["WriteDocAndNote"]
+    assert _at(write, "ServerDoc.SetModified(True)") < _at(write, "ServerDoc.DoFileSave('')")
     assert "SaveSkippedPaths" in body, "a skip must be recorded, not silent"
     # One entry per file: a library open in two projects is reached twice.
-    dedup = _at(body, "If Pos('|' + UpperCase(Doc.DM_FullPath) + '|', "
+    dedup = _at(body, "If Pos('|' + UpperCase(DocPath) + '|', "
                       "'|' + UpperCase(SaveSkippedPaths) + '|') = 0 Then")
     assert dedup < _at(body, "SaveSkipped := SaveSkipped + 1;"), (
         "the skip count must sit behind the already-listed check, or a "

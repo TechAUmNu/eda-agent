@@ -378,6 +378,13 @@ Begin
     AddStringParameter('FileName', LibPath);
     RunProcess('WorkspaceManager:CloseObject');
 
+    { Closed, it holds no edits: the reopen below reads the FILE, so a record }
+    { entry left over from a flush the editor declined (or one in the same    }
+    { 2 s FileAge tick) would make the next save-all rewrite the clean        }
+    { library - the 2026-10-06 harm (review 2026-10-11, F4). Only if the      }
+    { close took: CloseObject has been seen to act on another document.       }
+    ForgetBridgeEditsIfClosed(LibPath);
+
     ResetParameters;
     AddStringParameter('ObjectKind', 'Document');
     AddStringParameter('FileName', LibPath);

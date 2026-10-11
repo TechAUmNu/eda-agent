@@ -278,11 +278,21 @@ End;
 { request, and file_unchanged_on_disk (FileAge before and after, null when  }
 { the file cannot be aged) says whether the close wrote anything: true is   }
 { the proof a discard did not slip through as a save.                       }
+{                                                                            }
+{ THE BRIDGE'S RECORD IS A WITNESS HERE TOO (review 2026-10-11). The refusal }
+{ consulted only the flag, which the 2026-10-10 field run measured reading  }
+{ false with '*' on the tab, so a document this bridge had edited was closed }
+{ without discard, its edits lost, and the reply said discarded:false. Then  }
+{ the record - the one witness that knew - was thrown away. Now a document  }
+{ on the record (edited by this bridge, not written since) counts as        }
+{ modified for the refusal and for discarded, and bridge_edited says so;    }
+{ modified_read stays the raw flag. The record is let go only on a discard   }
+{ or a close of a document that holds no edits.                              }
 Function App_CloseDocument(Params : String; RequestId : String) : String;
 Var
     FilePath, DiscardedJson, UnchangedJson, DiskPath : String;
     ServerDoc, Again : IServerDocument;
-    WasModified, Discard : Boolean;
+    WasModified, Discard, FlagRead, BridgeEdited : Boolean;
     AgeBefore, AgeAfter : Integer;
 Begin
     FilePath := ExtractJsonValue(Params, 'file_path');
@@ -298,18 +308,28 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NOT_LOADED', 'Document not loaded: ' + FilePath);
         Exit;
     End;
-    WasModified := False;
-    Try WasModified := ServerDoc.Modified; Except WasModified := False; End;
-    If WasModified And Not Discard Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'MODIFIED',
-            'The document has unsaved changes, so it was not closed: ' + FilePath);
-        Exit;
-    End;
     DiskPath := FilePath;
     Try
         If ServerDoc.FileName <> '' Then DiskPath := ServerDoc.FileName;
     Except End;
+    FlagRead := False;
+    Try FlagRead := ServerDoc.Modified; Except FlagRead := False; End;
+    BridgeEdited := BridgeEditRecorded(FilePath) Or BridgeEditRecorded(DiskPath);
+    WasModified := FlagRead Or BridgeEdited;
+    If WasModified And Not Discard Then
+    Begin
+        If BridgeEdited And Not FlagRead Then
+            Result := BuildErrorResponse(RequestId, 'MODIFIED',
+                'This bridge edited the document and the edit has not been '
+                + 'written (its modified flag reads clean, which has been '
+                + 'measured to miss edits), so it was not closed: ' + FilePath
+                + '. Save it first (app_save_all, lib_save_library or '
+                + 'proj_save) or close with discard_changes=true.')
+        Else
+            Result := BuildErrorResponse(RequestId, 'MODIFIED',
+                'The document has unsaved changes, so it was not closed: ' + FilePath);
+        Exit;
+    End;
     AgeBefore := -1;
     Try AgeBefore := FileAge(DiskPath); Except AgeBefore := -1; End;
     If Discard Then
@@ -338,7 +358,8 @@ Begin
     Result := BuildSuccessResponse(RequestId, '{"closed":' + BoolToJsonStr(Again = Nil)
         + ',"discarded":' + DiscardedJson
         + ',"discard_requested":' + BoolToJsonStr(Discard)
-        + ',"modified_read":' + BoolToJsonStr(WasModified)
+        + ',"modified_read":' + BoolToJsonStr(FlagRead)
+        + ',"bridge_edited":' + BoolToJsonStr(BridgeEdited)
         + ',"file_unchanged_on_disk":' + UnchangedJson
         + ',"file_path":"' + EscapeJsonString(FilePath) + '"}');
 End;
@@ -710,7 +731,7 @@ End;
 { is shared with callers that must keep writing everything.                    }
 Function App_SaveAll(Params : String; RequestId : String) : String;
 Var
-    StillDirty, Seen, Written, P : Integer;
+    StillDirty, Seen, Written, P, SweepOutside : Integer;
     Paths, AgesBefore, AgesAfter : String;
     Remaining, OnePath, SkippedJson, Policy : String;
     LibSkippedJson, Ext : String;
@@ -740,14 +761,23 @@ Begin
         SaveSkippedPaths := '';
         SaveBridgeRecordPaths := '';
         SaveBridgeRecordUnwritten := '';
+        SaveBridgeRecordSameTick := '';
+        SaveBridgeRecordClosed := '';
+        SaveAttemptedKeys := '';
+        SaveUnresolvedPaths := '';
         SaveSkipCleanLibs := Not IncludeLibs;
         SaveSkipCleanSheets := OnlyModified;
         SaveAllDirty(0);
         SaveSkipCleanLibs := False;
         SaveSkipCleanSheets := False;
+        { The record entries the walk did not reach (a free document whose }
+        { bare DM_FullPath resolves to nothing - the 2026-10-10 field case) }
+        { are written from their absolute keys; ones no longer open are     }
+        { dropped and reported. See SaveBridgeRecordSweep.                  }
+        SweepOutside := SaveBridgeRecordSweep(Paths);
 
         AgesAfter := AgesForPaths(Paths);
-        Written := CountChangedAges(AgesBefore, AgesAfter);
+        Written := CountChangedAges(AgesBefore, AgesAfter) + SweepOutside;
         StillDirty := CountDirtyDocuments(0);
 
         SkippedJson := '';
@@ -800,14 +830,30 @@ Begin
             + ',"libraries_skipped":[' + LibSkippedJson + ']'
             + ',"written_by_bridge_record":' + PipeListToJsonArray(SaveBridgeRecordPaths)
             + ',"bridge_record_not_written":' + PipeListToJsonArray(SaveBridgeRecordUnwritten)
-            + ',"bridge_record_pending":' + PipeListToJsonArray(BridgeEditedPaths);
-        If SaveBridgeRecordUnwritten <> '' Then
+            + ',"bridge_record_same_tick":' + PipeListToJsonArray(SaveBridgeRecordSameTick)
+            + ',"bridge_record_closed":' + PipeListToJsonArray(SaveBridgeRecordClosed)
+            + ',"free_documents_not_reached":' + PipeListToJsonArray(SaveUnresolvedPaths)
+            + ',"bridge_record_pending":' + PipeListToJsonArray(BridgeRecordKeys(0));
+        { not_written is a failure (the flag still reads modified after the }
+        { save, or the file's last write was before this 2 s tick, so a     }
+        { real write would have moved it: the editor declined). same_tick   }
+        { is NOT: last written inside this tick and the flag reads clean,   }
+        { so FileAge could not move. closed: the edit's document is gone.   }
+        If (SaveBridgeRecordUnwritten <> '') Or (SaveBridgeRecordClosed <> '') Then
             Policy := Policy + ',"bridge_record_warning":"a document this '
-                + 'bridge edited read unmodified, was written from the '
-                + 'record, and its file did NOT get newer (see '
-                + 'bridge_record_not_written). Its edit may not be on disk: '
-                + 'save a library with lib_save_library, a sheet with '
-                + 'proj_save, and check the file."';
+                + 'bridge edited may not be on disk. bridge_record_not_written: '
+                + 'written to and its file did NOT get newer, while its flag '
+                + 'still reads modified or the file was last written before '
+                + 'the current 2 s FileAge tick, so a real write would have '
+                + 'moved it (the editor declined; unwind any active command '
+                + 'and retry, or save a library with lib_save_library, a '
+                + 'sheet with proj_save). bridge_record_closed: no open '
+                + 'document holds the edit any more and its file was never '
+                + 'written after it, so the edit is lost unless you saved it '
+                + 'yourself. bridge_record_same_tick is not a failure: the '
+                + 'file was written within the 2 s resolution of FileAge of '
+                + 'its previous write, so its age could not move; it stays on '
+                + 'the record and the next save-all writes it once more."';
         If LibSkipped > 0 Then
             Policy := Policy + ',"warning":"' + IntToStr(LibSkipped)
                 + ' library file(s) read unmodified and were NOT written '

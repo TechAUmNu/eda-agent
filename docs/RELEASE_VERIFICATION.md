@@ -68,7 +68,7 @@ works elsewhere cannot be an undeclared identifier:
 | 37, an already-current footprint switched away and back | `LibParkCurrentElsewhere` (LibraryIterator walk + `CurrentComponent`) | yes, `Lib_DeleteFootprintPrimitives` and `Lib_DeleteFootprintPads` (their park-current option) | low: shipped members; new is running it on the DEFAULT path (`footprint_name` empty) of a height write (37.2b) |
 | 37, component_description | `ComponentParamFieldsJson`, which READS DM_Description on IComponent (a read, so the property column names the new routine that makes it) | no, nowhere: shipped code reads DM_Description only on IProjectVariant | HIGH: an unknown member stops the bridge loop on the first component-info call. Read only with with_parameters (the default, so the orchestrator's and the dashboard's calls reach it); run 37.6 FIRST |
 | 37, does the part carry a Description parameter | `SchDescriptionParamState`, which reads DM_LogicalDesignator, then GetSchDocumentByPath and the eParameter walk | no, nowhere as a routine; every member it reads is shipped (DM_LogicalDesignator in the Generic.pas sheet snapshot, the walk and name test in ModifyCompParamIfPresent) | low; reached only when the part has exactly one Description entry equal to its component description |
-| 38, the dirty mark also on the focused document | `SetModified` on the focused view's owner document (Client.GetCurrentView, then OwnerDocument, both read by GetPCBBoardAnywhere already) | yes, `SaveOneDocByDocRef` (on every document it writes) | low: shipped members; new is marking and reading the focused document when it is the marked file, and the save pass writing a document the bridge recorded although its flag reads clean |
+| 38, the dirty mark also on the focused document | `SetModified` on the focused view's owner document (Client.GetCurrentView, then OwnerDocument, both read by GetPCBBoardAnywhere already) | yes, `WriteDocAndNote` (every document the save walk and the record sweep write) | low: shipped members; new is marking and reading the focused document when it is the marked file, and the save pass writing a document the bridge recorded although its flag reads clean |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -2748,37 +2748,71 @@ documents under a Temp path. `MarkDocDirtyByPath` looked the document up with
 swallowed a failing `SetModified`; a free document's `DocumentName` /
 `DM_FullPath` is a bare name, which is what `obj_modify` passed.
 
-Now (Main.pas, Utils.pas, Generic.pas, Library.pas, Application.pas):
+Now (Main.pas, Utils.pas, Generic.pas, Library.pas, Project.pas,
+Application.pas):
 
 * `MarkDocDirty` (wrapped by `MarkDocDirtyByPath`) RETURNS the flag read back
-  after the mark. Its lookup, `FindOpenServerDoc`, tries the exact path, then
-  every project and the free documents compared case- and slash-insensitively
-  (a bare name only when it matches exactly one open file), then the FOCUSED
-  view's own document. It also marks and reads the focused document when that
-  is the same file (the object whose tab shows `*`). `DocIsModified` uses the
-  same lookup, so the read cannot consult a different object from the one the
-  mark wrote.
+  after the mark. Its lookup, `FindOpenServerDoc`, answers the two kinds of
+  request by different rules and NEVER with a namesake (review 2026-10-11,
+  F1: the first version let a free scratch copy's bare name resolve to the
+  project's same-named sheet). An ABSOLUTE path is answered only by THAT
+  file (the exact lookup, then a listed document whose `DM_FullPath` or own
+  `FileName` has the same key, then the focused document on the same key). A
+  BARE name (what `obj_modify` passes for the current sheet) is answered by
+  the focused document when its file name matches, otherwise only when
+  exactly ONE listed document carries that name (`DocNameCount`, counted
+  from the listing before any lookup, closed project members included);
+  several, and it is refused as `ambiguous_name`. It also marks and reads
+  the focused document when that is the same file by key. `DocIsModified`
+  uses the same lookup, so a closed project member no longer reads the flag
+  of an open free copy that shares its name.
 * Every reply that claims `marked_modified` carries `mark`: `{path,
   file_name, found, via (path | walk | walk_name | focused | ambiguous_name
   | none), modified_read, focused_modified_read (null when the focused
   document is another file), recorded_for_save_all, problem}`.
+  `recorded_for_save_all` is true when the mark put the file on the record
+  under an ABSOLUTE path, the only kind `app_save_all` writes from (it was a
+  constant true before the review, F8).
 * `obj_modify` reports the read-back (no longer a constant), `pending_save`
-  follows the edit, and a `save_hint` (app_save_all WITHOUT only_modified,
-  or lib_save_library) appears when the flag did not register. Project scope
-  counts `sheets_marked` only for flags that read back and lists the rest in
-  `marks_not_read_back`. `obj_batch_modify` rows carry each op's
-  `marked_modified`, plus `ops_mark_not_read_back` and a `save_hint`.
-  `lib_set_footprint_height` and the two footprint delete handlers carry
-  `mark`.
-* THE BRIDGE'S OWN RECORD. Every path a bridge edit marks goes on
-  `BridgeEditedPaths`. `app_save_all` writes a recorded document even when
-  its flag reads clean (default libraries and `only_modified` sheets
-  included), lists it in `written_by_bridge_record` when its file got newer
-  (`bridge_record_not_written` and a `bridge_record_warning` when it did not)
-  and drops it from the record once it is on disk; `bridge_record_pending` is
-  what the record still holds. Documents nobody edited are still left alone.
-  `lib_save_library` reports `bridge_edited` and also clears the record on a
-  write; a close clears it too.
+  follows what the call changed (false when nothing matched, F6), and a
+  `save_hint` (app_save_all WITHOUT only_modified, or lib_save_library)
+  appears when the flag did not register. Only a sheet the call changed is
+  marked: project scope counts `sheets_marked` only for sheets that matched
+  and whose flags read back, and lists the rest in `marks_not_read_back`.
+  `obj_batch_modify` rows carry each op's `marked_modified`, plus
+  `ops_mark_not_read_back` and a `save_hint`. `lib_set_footprint_height` and
+  the two footprint delete handlers carry `mark`.
+* THE BRIDGE'S OWN RECORD (`BridgeEditedPaths`). One entry per FILE, keyed
+  by its resolved ABSOLUTE path and stamped with the file's age at the mark
+  (F2, F4); a bare name is kept only when nothing resolved, and answers
+  only while exactly one listed document has that name. `app_save_all`
+  writes a recorded document even when its flag reads clean (default
+  libraries and `only_modified` sheets included); one the project walk
+  cannot reach (a free document whose bare `DM_FullPath` resolves to
+  nothing - the field case, F3) is written afterwards from its absolute
+  path. When its file got newer it is listed in `written_by_bridge_record`
+  and dropped. When it did not: `bridge_record_not_written` plus a
+  `bridge_record_warning` if the flag still reads modified OR the file was
+  last written before the current 2 s FileAge tick (a real write would
+  have moved it, whatever the flag says); `bridge_record_same_tick`, NOT a
+  failure, if the file was last written inside the current tick and the
+  flag reads clean (F7 - FileAge has 2 s resolution; the entry stays for
+  one more write). A recorded document no longer open is dropped and
+  listed in `bridge_record_closed` with the warning.
+  `free_documents_not_reached` lists free documents whose bare name the walk could not resolve
+  to exactly one open document (it refuses to guess). Any write of the
+  file by any route (the user's Ctrl+S, `sch_reload_document`, a library
+  refresh) moves its age and retires the entry; a close
+  (`app_close_document`, `proj_close`, `proj_delete_sheet`, the reload and the refresh)
+  retires it too. `bridge_record_pending` is what the record still holds.
+  Documents nobody edited are still left alone. `lib_save_library` reports
+  `bridge_edited` and also clears the record on a write.
+* `app_close_document` treats a bridge-edited, unwritten document as
+  modified (F5): without `discard_changes` it is refused `MODIFIED`, the
+  reply carries `bridge_edited`, `modified_read` stays the raw flag, and the
+  record is let go only on a discard or a clean close. `proj_delete_sheet`
+  (without `discard`) and `sch_reload_document` (with `save=false`) refuse
+  the same way.
 * `documents_seen` / `documents_written` now include free documents (the
   timestamp check walked project members only).
 * `lib_read_pcblib_file` reports each footprint's `height_raw`,
@@ -2786,18 +2820,23 @@ Now (Main.pas, Utils.pas, Generic.pas, Library.pas, Application.pas):
 
 **Not run live.** SCRIPT_VERSION is `2026.10.11.01`. Use scratch copies only:
 a scratch sheet opened as a free document, a scratch PROJECT copy with at
-least one sheet, and a byte copy of a .PcbLib opened on its own.
+least one sheet, a byte copy of one of that project's sheets saved under the
+SAME FILE NAME in another folder (opened as a free document), and a byte copy
+of a .PcbLib opened on its own.
 
 1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.01`,
    `version_match` true.
 2. **Read-back on a FREE document.** On the free scratch sheet (focused),
    `obj_modify` one property (say a part's `Location.X`). Expect
    `marked_modified: true`, `pending_save: true`, NO `save_hint`, and `mark`
-   with `found: true`, `modified_read: true`, `recorded_for_save_all: true`,
-   `problem` empty; record `mark.via` and `mark.focused_modified_read`.
-   `app_get_active_document` then reads `modified: true`. Then
-   `lib_set_footprint_height` on a non-current footprint of the free library
-   copy: `marked_modified: true`, `mark.found: true`.
+   with `found: true`, `modified_read: true`, `recorded_for_save_all: true`
+   (the mark resolved the bare name to the sheet's ABSOLUTE path:
+   `mark.file_name` is that path), `problem` empty; record `mark.via` and
+   `mark.focused_modified_read`. `app_get_active_document` then reads
+   `modified: true`. Then `lib_set_footprint_height` on a non-current
+   footprint of the free library copy: `marked_modified: true`,
+   `mark.found: true`. An `obj_modify` whose filter matches nothing:
+   `matched: 0`, `pending_save: false`, `mark: null`.
    IF `marked_modified` IS STILL FALSE, record the whole `mark`: `found:
    false` means the lookup missed (`via` says how far it got); `found: true`
    with `modified_read: false` and `focused_modified_read: true` means the
@@ -2808,32 +2847,47 @@ least one sheet, and a byte copy of a .PcbLib opened on its own.
 3. **Read-back on a PROJECT document.** In the scratch project copy, the same
    `obj_modify` with `scope` `doc:<sheet path>` while ANOTHER document is
    focused: `marked_modified: true`, `mark.found: true`, `mark.via: path`,
-   `mark.focused_modified_read: null`. With `scope` `project`:
-   `sheets_marked` = `sheets_processed`, `marks_not_read_back: []`. One
-   `obj_batch_modify` op on that sheet: its row reads `marked_modified:
-   true`, `ops_mark_not_read_back: 0`, no `save_hint`.
+   `mark.focused_modified_read: null`. With `scope` `project` and a filter
+   that matches on ONE sheet only: `sheets_marked` 1, `marks_not_read_back:
+   []`, and the other sheets do not read modified. One `obj_batch_modify` op
+   on that sheet: its row reads `marked_modified: true`,
+   `ops_mark_not_read_back: 0`, no `save_hint`.
 4. **app_save_all writes a bridge-edited document whose flag reads clean.**
    Needs an edit whose `marked_modified` reads FALSE: step 2's height write
    if it still does, else `lib_add_footprint_tracks` or
    `lib_modify_footprint_pads` (both read `modified:false` on earlier builds).
    If no bridge edit reads false on this build, record that and skip: the
    record path is then unreachable in practice. Otherwise, after such an edit
-   on the library copy: `app_save_all` with NO arguments. Expect the copy NOT
-   in `libraries_skipped`, listed in `written_by_bridge_record`, absent from
-   `bridge_record_pending`, its mtime NEWER, and `lib_read_pcblib_file` on it
-   showing the new `height_mm`. Then `app_save_all` again with nothing
-   edited: the copy is back in `libraries_skipped` and its mtime does not
-   move (the record let go). For a sheet: the same with `only_modified=true`
-   after a sheet edit that reads `marked_modified: false`; the sheet is
-   listed in `written_by_bridge_record`.
+   on the library copy, FOCUS ANOTHER DOCUMENT (so the walk cannot reach the
+   free copy through the focus) and wait at least 3 s (FileAge has 2 s
+   resolution; a write inside the tick of the file's previous write cannot
+   move its age). `app_save_all` with NO arguments. Expect the copy NOT in
+   `libraries_skipped`, listed in `written_by_bridge_record`, absent from
+   `bridge_record_pending`, `bridge_record_not_written` and
+   `bridge_record_same_tick` empty, its mtime NEWER, and
+   `lib_read_pcblib_file` on it showing the new `height_mm`. Record
+   `documents_attempted`, `bridge_record_pending` and
+   `free_documents_not_reached` (the copy may be listed there - the walk
+   could not reach it - while the record wrote it). Then `app_save_all`
+   again with nothing edited: the copy is back in `libraries_skipped` and
+   its mtime does not move (the record let go). For a sheet: the same with
+   `only_modified=true` after a sheet edit that reads `marked_modified:
+   false`; the sheet is listed in `written_by_bridge_record`. IF the copy
+   is in `bridge_record_same_tick` instead, the save landed inside the 2 s
+   tick: record it, wait 3 s and repeat - it must not appear in
+   `bridge_record_not_written`.
 5. **lib_save_library says what the flag cannot.** After a bridge edit on the
    library copy, `lib_save_library`: `bridge_edited: true`,
    `written_to_disk: true`. A second call straight after: `bridge_edited:
-   false`.
+   false`. Then a new bridge edit and, WITHIN 2 s, `app_save_all`: the copy
+   may land in `bridge_record_same_tick` (not a failure, no
+   `bridge_record_warning`) or in `written_by_bridge_record`; it must not be
+   in `bridge_record_not_written`. Record which.
 6. **A pass that writes only free documents counts them.** With only the
    free scratch sheet edited, `app_save_all`: `documents_written` at least 1
    and `saved: true` (before this build such a pass could read "not one got
-   newer on disk").
+   newer on disk"). Record `documents_attempted` and `bridge_record_pending`
+   (expected `[]`).
 7. **Nothing unedited is written.** Then, with nothing edited,
    `app_save_all only_modified=true`: `documents_attempted: 0`,
    `written_by_bridge_record: []`, `bridge_record_pending: []`, no mtime
@@ -2843,6 +2897,34 @@ least one sheet, and a byte copy of a .PcbLib opened on its own.
    `ADM6-60-01_5-L-4-2-A-TR`: `height_raw` `130.7087mil`, `height_mils`
    130.7087, `height_mm` 3.32; every one of its 108 footprints reports a
    height. Needs no Altium.
+9. **A namesake is never marked or written (F1, F2).** Open the scratch
+   project (its sheet `X.SchDoc` loaded) AND the same-named byte copy of
+   `X.SchDoc` from the other folder as a free document; focus the free
+   copy. `obj_modify` one property: `mark.file_name` is the FREE COPY's
+   path, `mark.via` `focused`; the project sheet reads `modified: false`.
+   `app_save_all only_modified=true`: the project sheet's mtime does not
+   move and it is not in `written_by_bridge_record`; `bridge_record_pending`
+   names no project path. Then focus a third document and repeat the
+   `obj_modify` passing `scope` `doc:X.SchDoc` (bare): refused or
+   `mark.found: false` with `mark.via: ambiguous_name`, and NEITHER file
+   reads modified.
+10. **A close does not throw a bridge edit away (F5).** After an edit whose
+    `marked_modified` reads FALSE on the library copy (as step 4),
+    `app_close_document` on it WITHOUT `discard_changes`: refused
+    `MODIFIED` (the message names the bridge edit), the copy still open.
+    Then with `discard_changes=true`: `closed: true`, `discarded: true`,
+    `bridge_edited: true`, `modified_read: false`,
+    `file_unchanged_on_disk: true`. If no edit reads false on this build,
+    record that and skip.
+11. **A file written outside the record is not rewritten (F4).** Bridge
+    edit on the library copy, then save it in Altium by hand (Ctrl+S on its
+    tab), wait 3 s, then `app_save_all` with no arguments: the copy is in
+    `libraries_skipped`, NOT in `written_by_bridge_record`, its mtime is the
+    Ctrl+S one, and `bridge_record_pending` is `[]`.
+12. **A close that wrote nothing retires the entry.** In the scratch project,
+    a bridge edit on a sheet, then `proj_close` with `save=false`, then
+    `proj_open` it again and `app_save_all only_modified=true`: the sheet's
+    mtime does not move and `bridge_record_pending` is `[]`.
 
 ---
 

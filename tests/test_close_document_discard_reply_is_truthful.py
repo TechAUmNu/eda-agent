@@ -75,9 +75,13 @@ def test_no_discard_asked_says_false():
 
 def test_the_reply_carries_the_evidence():
     body = _body()
+    # modified_read is the RAW flag; WasModified also counts the bridge's
+    # record since 2026-10-11 (bridge_edited), see
+    # test_bridge_record_names_one_file.py.
     for field in ('"discarded":\' + DiscardedJson',
                   '"discard_requested":\' + BoolToJsonStr(Discard)',
-                  '"modified_read":\' + BoolToJsonStr(WasModified)',
+                  '"modified_read":\' + BoolToJsonStr(FlagRead)',
+                  '"bridge_edited":\' + BoolToJsonStr(BridgeEdited)',
                   '"file_unchanged_on_disk":\' + UnchangedJson'):
         assert field in body, field
 
@@ -125,7 +129,7 @@ _GEN = Path(__file__).resolve().parents[1] / "scripts" / "altium" / \
 
 
 def _delete_discarded(discard: bool, loaded: bool, closed: bool,
-                      modified_read: bool):
+                      modified_read: bool, bridge_edited: bool = False):
     """``discarded`` from Gen_DeleteSheet, from its source. Review: after
     the fix above the sheet delete still replied ``Discard And
     WasModified``, the same false built from a floor, so one field name
@@ -135,14 +139,17 @@ def _delete_discarded(discard: bool, loaded: bool, closed: bool,
         return discard and modified_read
     m = re.search(
         r"If \(Not DiscardRan\) Or \(Not Closed\) Then DiscardedJson := "
-        r"'(\w+)'\s*Else If WasModified Then DiscardedJson := '(\w+)'\s*"
+        r"'(\w+)'\s*Else If WasModified( Or BridgeEdited)? Then "
+        r"DiscardedJson := '(\w+)'\s*"
         r"Else DiscardedJson := '(\w+)';", body)
     assert m, "the discarded decision is not in a shape this test reads"
     ran = discard and loaded          # DiscardRan is set beside SetModified
+    # Since 2026-10-11 the bridge's record counts as modified too (F5).
+    modified = modified_read or (bridge_edited and m.group(2) is not None)
     if not ran or not closed:
         word = m.group(1)
     else:
-        word = m.group(2) if modified_read else m.group(3)
+        word = m.group(3) if modified else m.group(4)
     return {"true": True, "false": False, "null": None}[word]
 
 
@@ -154,6 +161,13 @@ def test_the_sheet_delete_uses_the_same_three_values():
     # was discarded, whatever was asked.
     assert _delete_discarded(True, False, True, False) is False
     assert _delete_discarded(True, True, False, True) is False
+
+
+def test_a_sheet_delete_discarding_a_bridge_edit_says_true():
+    """Review 2026-10-11 (F5 on the sheet delete): a bridge edit whose flag
+    read clean was discarded and the reply said null ("unknown"), although
+    the record knew there was an edit."""
+    assert _delete_discarded(True, True, True, False, bridge_edited=True) is True
 
 
 def test_the_sheet_delete_sets_its_flag_beside_the_clear():

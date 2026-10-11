@@ -431,13 +431,29 @@ def register_application_tools(mcp):
         ``obj_modify`` on a free scratch sheet, the document read modified
         false while its tab showed '*', so the default (libraries) and
         ``only_modified`` (sheets) would have left those edits unwritten.
-        Every document a bridge edit marks goes on the bridge's own record;
-        this call writes a recorded document even when its flag reads
-        clean, lists it in ``written_by_bridge_record`` when its file got
-        newer (``bridge_record_not_written`` plus a
-        ``bridge_record_warning`` when it did not), and drops it from the
-        record once it is on disk. Documents nobody edited are still left
-        alone. ``bridge_record_pending`` is what the record still holds.
+        Every document a bridge edit marks goes on the bridge's own record,
+        under its resolved ABSOLUTE path (never a bare name, which would
+        match every file of that name) stamped with the file's age; this
+        call writes a recorded document even when its flag reads clean,
+        including a free document the project walk cannot reach (written
+        from its absolute path), lists it in ``written_by_bridge_record``
+        when its file got newer, and drops it from the record once it is
+        on disk. Any write of the file by any route (Ctrl+S, a reload, a
+        library refresh) or a close also drops it, so a clean file is
+        never rewritten from a stale entry. When the file did NOT get
+        newer: ``bridge_record_not_written`` plus a
+        ``bridge_record_warning`` (the editor declined, or the file was
+        last written before the current 2 s FileAge tick, so a real write
+        would have moved it); ``bridge_record_same_tick`` when the file
+        was last written inside the current tick and the flag reads clean
+        (probably written - FileAge has 2 s resolution - and it stays on
+        the record for one more write); ``bridge_record_closed`` (with the
+        warning) when no open document holds the edit any more.
+        Documents nobody edited are still left alone.
+        ``bridge_record_pending`` is what the record still holds.
+        ``free_documents_not_reached`` lists free documents whose bare
+        name the walk could not resolve to exactly one open document; it
+        refuses to guess rather than write a namesake.
 
         Args:
             include_libraries: also write .SchLib / .PcbLib documents that
@@ -456,7 +472,9 @@ def register_application_tools(mcp):
             per file), ``libraries_skipped`` (the library paths among them)
             with a ``warning`` whenever that is non-empty,
             ``written_by_bridge_record`` / ``bridge_record_not_written`` /
-            ``bridge_record_pending`` (see above), and a ``reason`` /
+            ``bridge_record_same_tick`` / ``bridge_record_closed`` /
+            ``bridge_record_pending`` / ``free_documents_not_reached``
+            (see above), and a ``reason`` /
             ``note`` when documents remain unsaved or nothing was written.
             Free documents (open outside any project) are counted in
             ``documents_seen`` and ``documents_written`` too.
@@ -542,8 +560,9 @@ def register_application_tools(mcp):
 
         Unlike closing through the workspace manager, which acts on the
         FOCUSED object, this closes the named document itself. It refuses a
-        document that reads modified, and says whether it is really gone
-        afterwards. The modified read can miss edits held in the editor, so
+        document that reads modified OR that this bridge edited and has not
+        written yet (the flag has been measured reading clean after such an
+        edit), and says whether it is really gone afterwards. The modified read can miss edits held in the editor, so
         save anything you care about first; a close of an edited document
         may still raise Altium's save prompt.
 
@@ -557,9 +576,12 @@ def register_application_tools(mcp):
 
         Returns:
             ``{"closed", "discarded", "discard_requested", "modified_read",
-            "file_unchanged_on_disk", "file_path"}``; an error when the
-            path is not open, or when the document reads modified and
-            ``discard_changes`` is not set.
+            "bridge_edited", "file_unchanged_on_disk", "file_path"}``; an
+            error when the path is not open, or when the document reads
+            modified (or ``bridge_edited``) and ``discard_changes`` is not
+            set. ``bridge_edited`` is true when the bridge's own record
+            holds an unwritten edit to this file; it counts as modified for
+            the refusal and for ``discarded``.
 
             ``discarded`` is three-valued because the modified read is a
             floor. ``true``: discard was asked and the document read

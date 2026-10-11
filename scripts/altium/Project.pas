@@ -433,7 +433,7 @@ End;
 Function Proj_Close(Params : String; RequestId : String) : String;
 Var
     ProjectPath, Discarded, StillDirty, More : String;
-    ClosedInstead, BeforeClose, Why : String;
+    ClosedInstead, BeforeClose, Why, MemberPaths : String;
     SaveFirst, Closed : Boolean;
     Attempts : Integer;
     Workspace : IWorkspace;
@@ -503,6 +503,9 @@ Begin
             { project, the first close was abandoned after its prompt was    }
             { answered and a second completed. Not retried when saving,      }
             { where the likely cause is a prompt cancelled on purpose.       }
+            { The members, read while the project object is still good: the }
+            { bridge's record lets go of each one that is gone afterwards.    }
+            MemberPaths := ProjectMemberPaths(Project);
             Attempts := 0;
             Closed := False;
             ClosedInstead := '';
@@ -537,6 +540,10 @@ Begin
                     End;
                 End;
             End;
+            { A closed member holds no edits; a stale record entry would make }
+            { the next save-all rewrite it when it is reopened clean (review  }
+            { 2026-10-11, F4). Members still open keep theirs.                }
+            ForgetBridgeEditsIfClosed(MemberPaths);
 
             If Closed And (ClosedInstead = '') Then
                 Result := BuildSuccessResponse(RequestId,

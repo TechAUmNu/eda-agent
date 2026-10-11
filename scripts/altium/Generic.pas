@@ -1603,7 +1603,7 @@ Var
     Doc : IDocument;
     SchDoc : ISch_Document;
     ServerDoc : IServerDocument;
-    I, TotalMatched, SheetsProcessed, SheetsMarked : Integer;
+    I, TotalMatched, SheetsProcessed, SheetsMarked, SheetMatchedBefore : Integer;
     FilePath, JsonItems, MarkMissedJson : String;
     IsMutating : Boolean;
 Begin
@@ -1651,10 +1651,16 @@ Begin
         SchDoc := SchServer.GetSchDocumentByPath(FilePath);
         If SchDoc = Nil Then Continue;
 
+        SheetMatchedBefore := TotalMatched;
         JsonItems := JsonItems + ProcessSchDocObjects(SchDoc, ObjTypeInt,
             FilterStr, PropsStr, SetStr, Mode, FilePath, TotalMatched, Limit);
 
-        If IsMutating Then
+        { ONLY A SHEET THIS CALL CHANGED IS MARKED (review 2026-10-11). Every }
+        { loaded sheet was marked whether or not anything matched on it, and  }
+        { each mark now puts the file on the bridge's record, which           }
+        { app_save_all writes even when the flag reads clean: an untouched    }
+        { sheet would have been rewritten and counted in sheets_marked.       }
+        If IsMutating And (TotalMatched > SheetMatchedBefore) Then
         Begin
             Try SchDoc.GraphicallyInvalidate; Except End;
             // MARKS THE DOCUMENT, it does not write. The flush is
@@ -1723,7 +1729,11 @@ Begin
     Marked := False;
     MarkJson := 'null';
     HintJson := '';
-    If IsMutating Then
+    { Marked only when something matched: a mark puts the file on the      }
+    { bridge's record, and a document nobody edited must not be rewritten  }
+    { by app_save_all from it (review 2026-10-11). Nothing matched, nothing }
+    { is pending a save.                                                    }
+    If IsMutating And (TotalMatched > 0) Then
     Begin
         Try SchDoc.GraphicallyInvalidate; Except End;
         { marked_modified IS THE FLAG READ BACK, not a constant. MEASURED   }
@@ -1755,12 +1765,13 @@ Begin
         { sheets_marked; Lib_DeleteFootprint's pending_save/written_to_disk    }
         { are the house fields for a deferred write.                           }
         { pending_save: the edit is in memory and not on disk whether or   }
-        { not the flag registered, so it follows the mutation, not Marked.  }
+        { not the flag registered, so it follows what the call changed,     }
+        { not Marked.                                                       }
         If Marked Then MarkedStr := 'true' Else MarkedStr := 'false';
         Result := BuildSuccessResponse(RequestId,
             '{"matched":' + IntToStr(TotalMatched) + ',"saved":false'
             + ',"marked_modified":' + MarkedStr
-            + ',"pending_save":' + BoolToJsonStr(IsMutating)
+            + ',"pending_save":' + BoolToJsonStr(IsMutating And (TotalMatched > 0))
             + ',"written_to_disk":false'
             + ',"mark":' + MarkJson + HintJson
             + ModifyOutcomeJson(0) + '}');
@@ -1803,7 +1814,11 @@ Begin
     Marked := False;
     MarkJson := 'null';
     HintJson := '';
-    If IsMutating Then
+    { Marked only when something matched: a mark puts the file on the      }
+    { bridge's record, and a document nobody edited must not be rewritten  }
+    { by app_save_all from it (review 2026-10-11). Nothing matched, nothing }
+    { is pending a save.                                                    }
+    If IsMutating And (TotalMatched > 0) Then
     Begin
         Try SchDoc.GraphicallyInvalidate; Except End;
         { marked_modified IS THE FLAG READ BACK, not a constant. MEASURED   }
@@ -1835,12 +1850,13 @@ Begin
         { sheets_marked; Lib_DeleteFootprint's pending_save/written_to_disk    }
         { are the house fields for a deferred write.                           }
         { pending_save: the edit is in memory and not on disk whether or   }
-        { not the flag registered, so it follows the mutation, not Marked.  }
+        { not the flag registered, so it follows what the call changed,     }
+        { not Marked.                                                       }
         If Marked Then MarkedStr := 'true' Else MarkedStr := 'false';
         Result := BuildSuccessResponse(RequestId,
             '{"matched":' + IntToStr(TotalMatched) + ',"saved":false'
             + ',"marked_modified":' + MarkedStr
-            + ',"pending_save":' + BoolToJsonStr(IsMutating)
+            + ',"pending_save":' + BoolToJsonStr(IsMutating And (TotalMatched > 0))
             + ',"written_to_disk":false'
             + ',"mark":' + MarkJson + HintJson
             + ModifyOutcomeJson(0) + '}');
@@ -3506,6 +3522,7 @@ Var
     I, SchCount, AgeBefore, AgeAfter : Integer;
     Found, FoundOther, Discard, SaveProject, DeleteIt : Boolean;
     WasLoaded, WasModified, StillMember, Closed, NameMatches, DiscardRan : Boolean;
+    BridgeEdited : Boolean;
     FocusedStillOpen, ProjectSaved, ListedOnDisk, FileStillOnDisk, Deleted : Boolean;
     Success, FileChecked, WasFocusedProject : Boolean;
     FileState : Integer;
@@ -3611,7 +3628,10 @@ Begin
     WasModified := False;
     If WasLoaded Then
         Try WasModified := ServerDoc.Modified; Except WasModified := False; End;
-    If WasModified And Not Discard Then
+    { The bridge's record is a witness too (review 2026-10-11, F5): a bridge }
+    { edit whose flag reads clean is unsaved work all the same.              }
+    BridgeEdited := WasLoaded And BridgeEditRecorded(MemberPath);
+    If (WasModified Or BridgeEdited) And Not Discard Then
     Begin
         Result := BuildErrorResponse(RequestId, 'MODIFIED',
             'The sheet has unsaved changes, so nothing was removed or closed: '
@@ -3666,6 +3686,9 @@ Begin
                 Why := 'the sheet is still loaded after Client.CloseDocument';
         End;
     End;
+    { Gone from memory: the record lets go, so a re-add reopened clean is   }
+    { not rewritten from a stale entry (review 2026-10-11, F4).             }
+    If Closed Then ForgetBridgeEdit(MemberPath);
 
     FocusedStillOpen := True;
     If (FocusedBefore <> '') And (UpperCase(FocusedBefore) <> UpperCase(MemberPath)) Then
@@ -3744,7 +3767,7 @@ Begin
     { false. false = nothing was discarded: discard not asked, the sheet   }
     { was not loaded, or the named document was not the one closed.       }
     If (Not DiscardRan) Or (Not Closed) Then DiscardedJson := 'false'
-    Else If WasModified Then DiscardedJson := 'true'
+    Else If WasModified Or BridgeEdited Then DiscardedJson := 'true'
     Else DiscardedJson := 'null';
     Data := '{"success":' + BoolToJsonStr(Success)
         + ',"removed":true,"still_member":false'
@@ -3754,6 +3777,7 @@ Begin
         + ',"discarded":' + DiscardedJson
         + ',"discard_requested":' + BoolToJsonStr(Discard)
         + ',"modified_read":' + BoolToJsonStr(WasModified)
+        + ',"bridge_edited":' + BoolToJsonStr(BridgeEdited)
         + ',"previously_focused":"' + EscapeJsonString(FocusedBefore) + '"'
         + ',"previously_focused_still_open":' + BoolToJsonStr(FocusedStillOpen)
         + ',"project_path":"' + EscapeJsonString(ProjFile) + '"'
@@ -12560,11 +12584,14 @@ Begin
             Exit;
         End;
     End
-    Else If WasModified Then
+    Else If WasModified Or BridgeEditRecorded(FilePath) Then
     Begin
+        { The record counts as a witness (review 2026-10-11, F5): a bridge   }
+        { edit whose flag reads clean would otherwise be reloaded away.      }
         Result := BuildErrorResponse(RequestId, 'MODIFIED',
-            FilePath + ' has unsaved changes and save=false, so it was not '
-            + 'closed. Pass save=true to write them first.');
+            FilePath + ' has unsaved changes (or a bridge edit not yet '
+            + 'written) and save=false, so it was not closed. Pass save=true '
+            + 'to write them first.');
         Exit;
     End;
 
@@ -12581,6 +12608,10 @@ Begin
             + 'Check app_list_open_dialogs.');
         Exit;
     End;
+    { Closed: the reopen reads the file, so the record lets go (a save in    }
+    { the same 2 s FileAge tick leaves the age stamp unmoved, and the next   }
+    { save-all would rewrite the reopened sheet; review 2026-10-11, F4).     }
+    ForgetBridgeEdit(FilePath);
 
     { 3. Reopen it. }
     ResetParameters;

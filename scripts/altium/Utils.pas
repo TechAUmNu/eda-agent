@@ -596,8 +596,10 @@ End;
 { exited silently when its lookup missed. This says which document was found }
 { (via: path | walk | walk_name | focused | ambiguous_name | none), whether  }
 { its flag reads modified afterwards, the focused document's own flag when   }
-{ it is the same file (null when it is not), whether app_save_all will write }
-{ it from the bridge's record regardless, and why the mark did not take.     }
+{ it is the same file (null when it is not), whether the mark put an        }
+{ ABSOLUTE key on the bridge's record (recorded_for_save_all: the only kind  }
+{ app_save_all writes from; a bare name never counts), and why the mark did  }
+{ not take.                                                                  }
 {..............................................................................}
 Function MarkOutcomeJson(Dummy : Integer) : String;
 Var
@@ -612,7 +614,7 @@ Begin
         + ',"via":"' + EscapeJsonString(MarkLastVia) + '"'
         + ',"modified_read":' + BoolToJsonStr(MarkLastModified)
         + ',"focused_modified_read":' + FocusedJson
-        + ',"recorded_for_save_all":' + BoolToJsonStr(BridgeEditRecorded(MarkLastPath))
+        + ',"recorded_for_save_all":' + BoolToJsonStr(MarkLastRecorded)
         + ',"problem":"' + EscapeJsonString(MarkLastError) + '"}';
 End;
 

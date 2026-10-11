@@ -1527,6 +1527,11 @@ Begin
     BridgeEditedPaths := '';
     SaveBridgeRecordPaths := '';
     SaveBridgeRecordUnwritten := '';
+    SaveBridgeRecordSameTick := '';
+    SaveBridgeRecordClosed := '';
+    SaveAttemptedKeys := '';
+    SaveUnresolvedPaths := '';
+    MarkLastRecorded := False;
     MarkLastPath := '';
     MarkLastFile := '';
     FindDocVia := 'none';
