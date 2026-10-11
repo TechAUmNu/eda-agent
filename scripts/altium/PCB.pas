@@ -12208,23 +12208,87 @@ Begin
 End;
 
 {..............................................................................}
-{ PCB_NormalizeVias - snap every via's diameter + hole to its dominant routing }
-{ via-style rule's preferred values.                                          }
+{ ViaRuleValue - the value of "(Key=<number><unit>)" in a rule DESCRIPTOR, as  }
+{ a coordinate. 0 when the key is absent, the number does not parse, or the    }
+{ unit is neither mil nor mm (a bare number is NOT guessed at).                }
 {                                                                              }
-{ NO CONSTRAINT MEMBER IS READ OFF AN IPCB_Rule. FindDominantRuleForObject     }
-{ answers a base IPCB_Rule, and PreferedWidth / PreferedHoleWidth live on the  }
-{ via-style subtype; a constraint member read through an IPCB_Rule-bound      }
-{ reference is the MEASURED room-rule failure (PCB_GetRoomRules: BoundingRect }
-{ was an "Undeclared identifier" per rule). That is the engine's halt, not an }
-{ exception: the old Try + RecordCaughtException + per-rule latch could never }
-{ see it, and PCBServer.PreProcess was open around it. Every board has a      }
-{ default RoutingVias rule, so any free via reached it.                       }
-{ NOW: the values are read in a rule-iterator pass whose local is assigned    }
-{ straight from the iterator (the measured cure: LmRulesSection,              }
-{ PCB_SetRuleProperties, PCB_GetRoomRules), cached by rule NAME, BEFORE the   }
-{ PreProcess. The dominant rule is asked only for its Name (a base member) and}
-{ looked up in that cache. A via whose rule has no cached values is left      }
-{ alone and counted in "no_rule_values".                                      }
+{ The key must follow "(" and be followed (spaces allowed) by "=", matched     }
+{ case-insensitively, so PreferedWidth never matches inside PreferedHoleWidth. }
+{ Only the first "(Key" is looked at. Strings, Pos/Copy and StrToFloatDef      }
+{ only: nothing here can be an undeclared identifier.                          }
+{..............................................................................}
+Function ViaRuleValue(RuleDesc : String; Key : String) : TCoord;
+Var
+    LowDesc, NumStr, Ch, UnitStr : String;
+    P, I, N : Integer;
+    V : Double;
+Begin
+    Result := 0;
+    If (RuleDesc = '') Or (Key = '') Then Exit;
+    LowDesc := LowerCase(RuleDesc);
+    N := Length(LowDesc);
+    P := Pos('(' + LowerCase(Key), LowDesc);
+    If P <= 0 Then Exit;
+    I := P + Length(Key) + 1;
+    While (I <= N) And (Copy(LowDesc, I, 1) = ' ') Do I := I + 1;
+    If Copy(LowDesc, I, 1) <> '=' Then Exit;
+    I := I + 1;
+    While (I <= N) And (Copy(LowDesc, I, 1) = ' ') Do I := I + 1;
+    NumStr := '';
+    While I <= N Do
+    Begin
+        Ch := Copy(LowDesc, I, 1);
+        If ((Ch >= '0') And (Ch <= '9')) Or (Ch = '.') Or (Ch = '-') Then
+        Begin
+            NumStr := NumStr + Ch;
+            I := I + 1;
+        End
+        Else
+            Break;
+    End;
+    If NumStr = '' Then Exit;
+    While (I <= N) And (Copy(LowDesc, I, 1) = ' ') Do I := I + 1;
+    UnitStr := Copy(LowDesc, I, 3);
+    V := StrToFloatDef(NumStr, -1);
+    If V <= 0 Then Exit;
+    If UnitStr = 'mil' Then
+        Result := MilsToCoordF(V)
+    Else If Copy(UnitStr, 1, 2) = 'mm' Then
+        Result := MMToCoord(V);
+End;
+
+{..............................................................................}
+{ PCB_NormalizeVias - snap every free via's diameter + hole to its dominant    }
+{ routing via-style rule's preferred values.                                   }
+{                                                                              }
+{ ONLY IDENTIFIERS THAT HAVE ALREADY RUN IN THIS REPO. An identifier the       }
+{ script engine does not know is its "Undeclared identifier" halt: no Try      }
+{ catches it and the polling loop dies (the 2026-10-11 class). So:             }
+{ * No constraint member is read off any rule. FindDominantRuleForObject       }
+{   answers a base IPCB_Rule, where PreferedWidth / PreferedHoleWidth do not   }
+{   exist (the measured room-rule failure, PCB_GetRoomRules), and no typed     }
+{   via-style read has ever run here: 6ff9e36's IPCB_RoutingViaStyleRule       }
+{   local and its PreferedWidth reads were all unproven, and they ran for      }
+{   EVERY rule on EVERY board, before any via check.                           }
+{ * The values come from Rule.Descriptor, a base member proven by              }
+{   PCB_GetRuleProperties / pcb_get_design_rules, parsed by ViaRuleValue for   }
+{   (PreferedWidth=..) / (PreferedHoleWidth=..) and the double-r spellings.    }
+{   THE VIA DESCRIPTOR FORMAT IS NOT MEASURED: pcb_get_rule_properties' own    }
+{   docstring shows a template form ("Routing Via (Templates Used To Check     }
+{   Via: ...)"), which carries no numbers. Then nothing is cached, every via   }
+{   counts in "no_rule_values", nothing changes, and the reply says so         }
+{   ("via_rule_values": 0). Honest and harmless, never a halt.                 }
+{ * The rule kind is the LITERAL 11, not eRule_RoutingViaStyle, which has      }
+{   never run here (PCB_SetRuleProperties' house rule: literals for rule       }
+{   kinds). 11 is RoutingViaStyle's place in the published TRuleKind order,    }
+{   the order that gives the 2 / 24 / 42 this file already uses. NOT YET       }
+{   MEASURED (RELEASE_VERIFICATION P23 reads rule_kind off the default         }
+{   RoutingVias rule). A wrong ordinal answers a rule of another kind, whose   }
+{   name is not in the cache: "no_rule_values", never a halt.                  }
+{ * The rule pass runs only when there is at least one FREE via, so a board    }
+{   without one reads no rule at all.                                          }
+{ The dominant rule is asked its Name only; values are cached by name BEFORE   }
+{ the PreProcess.                                                              }
 {..............................................................................}
 Function PCB_NormalizeVias(Params : String; RequestId : String) : String;
 Var
@@ -12233,12 +12297,12 @@ Var
     Obj, Prim : IPCB_Primitive;
     Via : IPCB_Via;
     Rule : IPCB_Rule;
-    ViaRule : IPCB_RoutingViaStyleRule;
     Matches : TInterfaceList;
     StyleNames, StyleSizes, StyleHoles : TStringList;
-    RuleName, StyleName : String;
-    I, Idx, Kind, Checked, Changed, NoValues, NewSize, NewHole : Integer;
-    StyleSize, StyleHole : Integer;
+    RuleName, StyleName, RuleDesc : String;
+    I, Idx, ViaStyleKind, Checked, Changed, NoValues, NewSize, NewHole : Integer;
+    StyleSize, StyleHole, StyleCount : Integer;
+    IsFree : Boolean;
 Begin
     Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then
@@ -12250,10 +12314,15 @@ Begin
     Checked := 0;
     Changed := 0;
     NoValues := 0;
+    StyleCount := 0;
+    { TRuleKind's RoutingViaStyle, by ordinal (see the header). }
+    ViaStyleKind := 11;
 
     { Collect first, THEN modify -- mutating primitives while the BoardIterator
       is walking corrupts the iterator. Collect as the base IPCB_Primitive and
-      never Free the list (releasing board-interface refs faults in oleaut32). }
+      never Free the list (releasing board-interface refs faults in oleaut32).
+      Only FREE vias are collected: a via owned by a component footprint,
+      polygon, or dimension is a child primitive and modifying it faults. }
     Matches := CreateObject(TInterfaceList);
     Iter := Board.BoardIterator_Create;
     Try
@@ -12264,46 +12333,51 @@ Begin
         While Obj <> Nil Do
         Begin
             Checked := Checked + 1;
-            Matches.Add(Obj);
+            IsFree := Not (Obj.InComponent Or Obj.InPolygon Or Obj.InDimension);
+            If IsFree Then Matches.Add(Obj);
             Obj := Iter.NextPCBObject;
         End;
     Finally
         Board.BoardIterator_Destroy(Iter);
     End;
 
-    { The via-style values, one typed pass, before any edit. ViaRule is      }
-    { assigned straight from the iterator, which is where DelphiScript       }
-    { narrows a rule; RuleKind and Name are base members. The Try is a      }
-    { fault-only backstop for an ordinary raise.                             }
+    { The via-style values, by rule NAME, from base members only (Name,     }
+    { Descriptor), and only when there is a free via to apply them to.       }
     StyleNames := TStringList.Create;
     StyleSizes := TStringList.Create;
     StyleHoles := TStringList.Create;
-    Iter := Board.BoardIterator_Create;
-    Try
-        Iter.AddFilter_ObjectSet(MkSet(eRuleObject));
-        Iter.AddFilter_LayerSet(AllLayers);
-        Iter.AddFilter_Method(eProcessAll);
-        ViaRule := Iter.FirstPCBObject;
-        While ViaRule <> Nil Do
-        Begin
-            Kind := -1;
-            Try Kind := ViaRule.RuleKind; Except Kind := -1; End;
-            If Kind = eRule_RoutingViaStyle Then
+    If Matches.Count > 0 Then
+    Begin
+        Iter := Board.BoardIterator_Create;
+        Try
+            Iter.AddFilter_ObjectSet(MkSet(eRuleObject));
+            Iter.AddFilter_LayerSet(AllLayers);
+            Iter.AddFilter_Method(eProcessAll);
+            Rule := Iter.FirstPCBObject;
+            While Rule <> Nil Do
             Begin
-                Try
-                    StyleName := ViaRule.Name;
-                    StyleSize := ViaRule.PreferedWidth;
-                    StyleHole := ViaRule.PreferedHoleWidth;
+                StyleName := '';
+                RuleDesc := '';
+                Try StyleName := Rule.Name; Except StyleName := ''; End;
+                Try RuleDesc := Rule.Descriptor; Except RuleDesc := ''; End;
+                StyleSize := ViaRuleValue(RuleDesc, 'PreferedWidth');
+                If StyleSize <= 0 Then
+                    StyleSize := ViaRuleValue(RuleDesc, 'PreferredWidth');
+                StyleHole := ViaRuleValue(RuleDesc, 'PreferedHoleWidth');
+                If StyleHole <= 0 Then
+                    StyleHole := ViaRuleValue(RuleDesc, 'PreferredHoleWidth');
+                If (StyleName <> '') And (StyleSize > 0) And (StyleHole > 0) Then
+                Begin
                     StyleNames.Add(StyleName);
                     StyleSizes.Add(IntToStr(StyleSize));
                     StyleHoles.Add(IntToStr(StyleHole));
-                Except
+                    StyleCount := StyleCount + 1;
                 End;
+                Rule := Iter.NextPCBObject;
             End;
-            ViaRule := Iter.NextPCBObject;
+        Finally
+            Board.BoardIterator_Destroy(Iter);
         End;
-    Finally
-        Board.BoardIterator_Destroy(Iter);
     End;
 
     PCBServer.PreProcess;
@@ -12312,17 +12386,18 @@ Begin
         Begin
             Prim := Matches.Items[I];
             If Prim = Nil Then Continue;
-            { Only free vias -- a via owned by a component footprint, polygon,
-              or dimension is a child primitive; modifying it faults. }
-            If Prim.InComponent Or Prim.InPolygon Or Prim.InDimension Then Continue;
             Rule := Nil;
             Try
                 Via := Prim;
-                Rule := Board.FindDominantRuleForObject(Via, eRule_RoutingViaStyle);
+                Rule := Board.FindDominantRuleForObject(Via, ViaStyleKind);
             Except
                 Rule := Nil;
             End;
-            If Rule = Nil Then Continue;
+            If Rule = Nil Then
+            Begin
+                Inc(NoValues);
+                Continue;
+            End;
 
             { Name only: a base IPCB_Rule member. }
             RuleName := '';
@@ -12362,7 +12437,9 @@ Begin
     MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId,
         '{"checked":' + IntToStr(Checked) + ',"changed":' + IntToStr(Changed)
-        + ',"no_rule_values":' + IntToStr(NoValues) + '}');
+        + ',"free":' + IntToStr(Matches.Count)
+        + ',"no_rule_values":' + IntToStr(NoValues)
+        + ',"via_rule_values":' + IntToStr(StyleCount) + '}');
 End;
 
 {..............................................................................}

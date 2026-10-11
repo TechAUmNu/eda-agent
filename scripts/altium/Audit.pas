@@ -4184,6 +4184,77 @@ End;
 { 2=left(-x) 3=down(-y).                                                      }
 {..............................................................................}
 
+{..............................................................................}
+{ PinOwnerDesignatorAt - the designator of the placed component that owns a    }
+{ pin with designator PinNum at (PX, PY) on Sheet; '' when none does.          }
+{                                                                              }
+{ THROUGH THE COMPONENT, NOT THE PIN. This used to read                        }
+{ Pin.OwnerSchComponent.Designator.Text: an identifier that had run nowhere    }
+{ else in this repo, and a property accessor handing back a component the      }
+{ script never obtained itself - the CurrentSchComponent class, whose          }
+{ members are the engine's uncatchable "Undeclared identifier" halt (the       }
+{ 2026-10-11 dead loop; RELEASE_VERIFICATION carried it as probe P36). The     }
+{ shape here is the proven one (Generic.pas, the pin listing by designator):   }
+{ a sheet iterator over components, each component's own SchIterator_Create    }
+{ over its pins, Pin.Location and Pin.Designator, and the designator off       }
+{ that NARROWED component. Called only for a label already found on a pin's    }
+{ connection end, which is rare, so the walk costs nothing on a clean sheet.   }
+{..............................................................................}
+Function PinOwnerDesignatorAt(Sheet : ISch_Document; PX : Integer; PY : Integer;
+    PinNum : String) : String;
+Var
+    CompIter, PinIter : ISch_Iterator;
+    Comp : ISch_Component;
+    Pin : ISch_Pin;
+    Num, Desig : String;
+    AtX, AtY : Integer;
+    Found : Boolean;
+Begin
+    Result := '';
+    If Sheet = Nil Then Exit;
+    Found := False;
+    CompIter := Sheet.SchIterator_Create;
+    If CompIter = Nil Then Exit;
+    Try
+        CompIter.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Comp := CompIter.FirstSchObject;
+        While (Comp <> Nil) And (Not Found) Do
+        Begin
+            PinIter := Comp.SchIterator_Create;
+            If PinIter <> Nil Then
+            Begin
+                Try
+                    PinIter.AddFilter_ObjectSet(MkSet(ePin));
+                    Pin := PinIter.FirstSchObject;
+                    While Pin <> Nil Do
+                    Begin
+                        Num := '';
+                        AtX := 0;
+                        AtY := 0;
+                        Try Num := Pin.Designator; Except End;
+                        Try AtX := Pin.Location.X; Except End;
+                        Try AtY := Pin.Location.Y; Except End;
+                        If (Num = PinNum) And (AtX = PX) And (AtY = PY) Then
+                        Begin
+                            Desig := '';
+                            Try Desig := Comp.Designator.Text; Except End;
+                            Result := Desig;
+                            Found := True;
+                            Break;
+                        End;
+                        Pin := PinIter.NextSchObject;
+                    End;
+                Finally
+                    Comp.SchIterator_Destroy(PinIter);
+                End;
+            End;
+            If Not Found Then Comp := CompIter.NextSchObject;
+        End;
+    Finally
+        Sheet.SchIterator_Destroy(CompIter);
+    End;
+End;
+
 Function Audit_FindNetLabelConflicts(Params, RequestId : String) : String;
 Var
     Workspace : IWorkspace;
@@ -4364,7 +4435,11 @@ Begin
                                         Begin
                                             FoundRoot := True;
                                             Try PinNum := Pin.Designator; Except End;
-                                            Try OwnerDesig := Pin.OwnerSchComponent.Designator.Text; Except End;
+                                            { The owner through a component  }
+                                            { iterator, never the pin's own  }
+                                            { OwnerSchComponent accessor     }
+                                            { (PinOwnerDesignatorAt).        }
+                                            OwnerDesig := PinOwnerDesignatorAt(Sheet, PX, PY, PinNum);
                                         End;
                                     End;
                                 Except End;

@@ -2249,7 +2249,13 @@ def register_library_tools(mcp):
                   default.
             component_name: The symbol to edit, by library reference,
                 in the active SchLib. It becomes the held (current)
-                symbol, as ``lib_set_current_component`` does. Omit to
+                symbol for later calls without a name. Unlike
+                ``lib_set_current_component`` it is found without
+                reopening the library (a symbol made this session and
+                no longer the last one made may need
+                ``lib_set_current_component`` first), and the edit
+                lands on the part the editor displays, or on part 1
+                when the symbol reports none. Omit to
                 edit the symbol held from ``lib_create_symbol`` /
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
@@ -2328,7 +2334,13 @@ def register_library_tools(mcp):
             border_color: Border color index
             component_name: The symbol to edit, by library reference,
                 in the active SchLib. It becomes the held (current)
-                symbol, as ``lib_set_current_component`` does. Omit to
+                symbol for later calls without a name. Unlike
+                ``lib_set_current_component`` it is found without
+                reopening the library (a symbol made this session and
+                no longer the last one made may need
+                ``lib_set_current_component`` first), and the edit
+                lands on the part the editor displays, or on part 1
+                when the symbol reports none. Omit to
                 edit the symbol held from ``lib_create_symbol`` /
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
@@ -2388,7 +2400,13 @@ def register_library_tools(mcp):
                   single-part symbols.
             component_name: The symbol to edit, by library reference,
                 in the active SchLib. It becomes the held (current)
-                symbol, as ``lib_set_current_component`` does. Omit to
+                symbol for later calls without a name. Unlike
+                ``lib_set_current_component`` it is found without
+                reopening the library (a symbol made this session and
+                no longer the last one made may need
+                ``lib_set_current_component`` first), and the edit
+                lands on the part the editor displays, or on part 1
+                when the symbol reports none. Omit to
                 edit the symbol held from ``lib_create_symbol`` /
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
@@ -2492,7 +2510,13 @@ def register_library_tools(mcp):
                 coarse grid or 0/1 to disable snapping.
             component_name: The symbol to edit, by library reference,
                 in the active SchLib. It becomes the held (current)
-                symbol, as ``lib_set_current_component`` does. Omit to
+                symbol for later calls without a name. Unlike
+                ``lib_set_current_component`` it is found without
+                reopening the library (a symbol made this session and
+                no longer the last one made may need
+                ``lib_set_current_component`` first), and the edit
+                lands on the part the editor displays, or on part 1
+                when the symbol reports none. Omit to
                 edit the symbol held from ``lib_create_symbol`` /
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
@@ -5826,7 +5850,13 @@ def register_library_tools(mcp):
                 25 (e.g. inductor coils). Pass 100 for coarse, 0/1 for none.
             component_name: The symbol to edit, by library reference,
                 in the active SchLib. It becomes the held (current)
-                symbol, as ``lib_set_current_component`` does. Omit to
+                symbol for later calls without a name. Unlike
+                ``lib_set_current_component`` it is found without
+                reopening the library (a symbol made this session and
+                no longer the last one made may need
+                ``lib_set_current_component`` first), and the edit
+                lands on the part the editor displays, or on part 1
+                when the symbol reports none. Omit to
                 edit the symbol held from ``lib_create_symbol`` /
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
@@ -5872,7 +5902,13 @@ def register_library_tools(mcp):
                 pass 100 for coarse or 0/1 to disable snapping.
             component_name: The symbol to edit, by library reference,
                 in the active SchLib. It becomes the held (current)
-                symbol, as ``lib_set_current_component`` does. Omit to
+                symbol for later calls without a name. Unlike
+                ``lib_set_current_component`` it is found without
+                reopening the library (a symbol made this session and
+                no longer the last one made may need
+                ``lib_set_current_component`` first), and the edit
+                lands on the part the editor displays, or on part 1
+                when the symbol reports none. Omit to
                 edit the symbol held from ``lib_create_symbol`` /
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the

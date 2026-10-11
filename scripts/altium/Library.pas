@@ -155,6 +155,27 @@ Begin
     Try Result := Component.DisplayMode; Except Result := 0; End;
 End;
 
+{ The owner fields of a new component-level PARAMETER (Lib_BatchSetParams).    }
+{ A parameter belongs to the WHOLE component, not to one part, so the clamp    }
+{ OwnerPartIdOf applies to graphical primitives does not apply: the part is    }
+{ CurrentPartID exactly as read, 0 included, which is what 3aca481 wrote       }
+{ (SetOwnerPart(NewParam, Component)). LookupLibComponent can reopen the       }
+{ library, which is exactly when CurrentPartID reads 0, and the clamp would    }
+{ have pinned the parameter to part 1 of a multi-part symbol. A read that      }
+{ raises writes no part (the factory default stays), as 3aca481's counted      }
+{ Try did. Component must be NARROWED (a library lookup).                      }
+Procedure SetParamOwnerPart(Param : ISch_GraphicalObject; Component : ISch_Component);
+Var
+    Part : Integer;
+Begin
+    If (Param = Nil) Or (Component = Nil) Then Exit;
+    Part := -1;
+    Try Part := Component.CurrentPartID; Except Part := -1; End;
+    If Part >= 0 Then
+        Try Param.OwnerPartId := Part; Except End;
+    Try Param.OwnerPartDisplayMode := OwnerDisplayModeOf(Component); Except End;
+End;
+
 {..............................................................................}
 { THE HELD LIBRARY COMPONENT, AND WHEN IT IS DEAD.                             }
 {                                                                              }
@@ -377,8 +398,9 @@ Begin
         Result := LastCreatedLibComponentName;
 End;
 
-{ The NO_COMPONENT message for an edit that found no target: by name when a   }
-{ name was given, otherwise the two ways to name one.                         }
+{ The NO_COMPONENT message for a call that found no target symbol (edits and   }
+{ the nameless readers alike): by name when a name was given, otherwise the    }
+{ two ways to name one.                                                        }
 Function NoEditComponentMessage(Name : String) : String;
 Begin
     If Name <> '' Then
@@ -386,8 +408,8 @@ Begin
             + '. A symbol created this session that is no longer the last one '
             + 'made can be selected with lib_set_current_component first.'
     Else
-        Result := 'No library component is held for this edit (or the one '
-            + 'held is in another library). Pass component_name, or call '
+        Result := 'No library component is held (or the one held is in '
+            + 'another library). Pass component_name, or call '
             + 'lib_set_current_component (or lib_create_symbol) first. The '
             + 'symbol selected in the editor is never used: its members cannot '
             + 'be read safely from a script.';
@@ -466,20 +488,36 @@ Begin
     { component too, and process pending paint messages so the new state     }
     { surfaces immediately.                                                  }
     Try SchLib.GraphicallyInvalidate; Except End;
-    { THE HELD COMPONENT, never the editor's CurrentSchComponent. Its       }
-    { GraphicallyInvalidate used to be read off CurrentSchComponent inside a }
-    { Try that "counted" a failure, but a member that does not resolve on  }
-    { that reference is the engine's "Undeclared identifier" halt, not an   }
-    { exception (the 2026-10-11 dead loop): nothing is counted and the     }
-    { polling loop stops. The held reference is narrowed, and after an     }
-    { edit through GetTargetLibComponent / ResolveEditLibComponent it IS   }
-    { the component the edit targeted. Only while it lives and only in     }
-    { THIS library; otherwise the component invalidate is skipped and the  }
-    { library invalidate above stays.                                      }
-    If LastCreatedLibIsLive(0) Then
-        If SameLibAsRemembered(SchLib) Then
-            Try LastCreatedLibComponent.GraphicallyInvalidate; Except End;
+    { NO COMPONENT IS TOUCHED HERE. The component the editor shows is       }
+    { redrawn by MarkLibDirtyComp below, from the reference the HANDLER     }
+    { just edited, never from a reference this shared path did not obtain:  }
+    {   3aca481  SchLib.CurrentSchComponent.GraphicallyInvalidate - a member }
+    {            of the editor's own selection, the engine's "Undeclared     }
+    {            identifier" halt (the 2026-10-11 dead loop), no Except runs;}
+    {   6ff9e36  LastCreatedLibComponent.GraphicallyInvalidate on every      }
+    {            library edit, gated only by LastCreatedLibIsLive, which is  }
+    {            CONSERVATIVE (True whenever it is unsure, Needs-probe for a }
+    {            close-and-reopen done outside the bridge): a held reference }
+    {            freed behind its back would have halted EVERY later edit in }
+    {            that library, by-name edits of other symbols included.     }
     Try Application.ProcessMessages; Except End;
+End;
+
+{ MarkLibDirty, plus a redraw of the component the handler just EDITED.        }
+{ Comp must be the reference the handler itself resolved and wrote into        }
+{ (ResolveEditLibComponent / LookupLibComponent / the factory): narrowed,      }
+{ and live by construction, because the handler has just called a member       }
+{ of it. The SchLib editor renders its CURRENT component, so the library       }
+{ invalidate alone can leave the new primitives undrawn until the symbol       }
+{ is reopened; this restores the redraw 3aca481 got from CurrentSchComponent   }
+{ for the symbol actually edited, without reading a reference the handler      }
+{ did not obtain. Nil = MarkLibDirty exactly.                                  }
+Procedure MarkLibDirtyComp(SchLib : ISch_Lib; Comp : ISch_Component);
+Begin
+    If SchLib = Nil Then Exit;
+    If Comp <> Nil Then
+        Try Comp.GraphicallyInvalidate; Except End;
+    MarkLibDirty(SchLib);
 End;
 
 { True when the resolved SchLib really IS the document at WantPath. Guards the  }
@@ -717,16 +755,19 @@ End;
 { Name empty: GetTargetLibComponent (the held component while it lives and is }
 { in THIS library, else Nil). Name given: found through the library by       }
 { FindLibComponentInMemory (the index, the walk, the held one; NEVER the      }
-{ reopening lookup, because the caller edits SchLib next), then made current }
-{ and HELD exactly as                                                         }
-{ lib_set_current_component does (SelectLibComponentPart: the setter, then   }
-{ RememberLibComponent), so MarkLibDirty redraws it and the next call without }
-{ a name lands on it too. Every route answers a NARROWED reference: no member }
-{ is ever read off the editor's CurrentSchComponent. Call it BEFORE the       }
-{ handler's PreProcess, with everything else that reads the component.       }
+{ reopening lookup, because the caller edits SchLib next - so a symbol made    }
+{ this session that is no longer the last one made can miss here, where        }
+{ lib_set_current_component's reopening lookup would find it), then made       }
+{ current and HELD (the setter, then RememberLibComponent), so the next        }
+{ call without a name lands on it too. Its part: the displayed one, or 1       }
+{ (display mode 0) when it reads below 1 - lib_set_current_component always    }
+{ selects part 1. Every route answers a NARROWED reference: no member is       }
+{ ever read off the editor's CurrentSchComponent. Call it BEFORE the           }
+{ handler's PreProcess, with everything else that reads the component.         }
 Function ResolveEditLibComponent(SchLib : ISch_Lib; Name : String) : ISch_Component;
 Var
     Comp : ISch_Component;
+    PartNow : Integer;
 Begin
     Result := Nil;
     If Name = '' Then
@@ -745,6 +786,22 @@ Begin
     If Comp = Nil Then Exit;
     Try SchLib.CurrentSchComponent := Comp; Except End;
     RememberLibComponent(SchLib, Comp, Name);
+    { A VISIBLE PART, and only when there is none. SelectLibComponentPart  }
+    { records that after a fresh open CurrentPartID can read 0 (no part):  }
+    { OwnerPartIdOf already clamps each new primitive's owner to 1, but the }
+    { component itself stayed on part 0, so the editor and the SchLib      }
+    { iterator (which follow the DISPLAYED part) could still show nothing - }
+    { "added with success, nothing drawn" from the editor side. The same   }
+    { writes SelectLibComponentPart makes, but only below 1: a multi-part  }
+    { symbol already on part N stays on part N, display mode untouched.    }
+    { Comp is narrowed (the index, the walk or the held reference).        }
+    PartNow := 1;
+    Try PartNow := Comp.CurrentPartID; Except PartNow := 1; End;
+    If PartNow < 1 Then
+    Begin
+        Try Comp.CurrentPartID := 1; Except End;
+        Try Comp.DisplayMode := 0; Except End;
+    End;
     Result := Comp;
 End;
 
@@ -949,7 +1006,7 @@ Begin
         // Refresh the library editor view so the new component is visible.
         Try SchLib.GraphicallyInvalidate; Except End;
 
-        MarkLibDirty(SchLib);
+        MarkLibDirtyComp(SchLib, Component);
 
         { VERIFY. This used to return success with part_count ECHOED from the }
         { request. Measured on AD26: part_count=3 produced NO COMPONENT AT     }
@@ -1541,7 +1598,7 @@ Begin
         SchRegisterObject(Component, Pin);
         SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
 
-        MarkLibDirty(SchLib);
+        MarkLibDirtyComp(SchLib, Component);
         Result := BuildSuccessResponse(RequestId, '{"success":true,"designator":"' + EscapeJsonString(Designator) + '"}');
     End
     Else
@@ -1633,7 +1690,7 @@ Begin
         SchRegisterObject(Component, Rect);
         SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
 
-        MarkLibDirty(SchLib);
+        MarkLibDirtyComp(SchLib, Component);
         Try SchLib.GraphicallyInvalidate; Except End;
         Result := BuildSuccessResponse(RequestId, '{"success":true}');
     End
@@ -1707,7 +1764,7 @@ Begin
         SchRegisterObject(Component, Line);
         SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
 
-        MarkLibDirty(SchLib);
+        MarkLibDirtyComp(SchLib, Component);
         { Force the lib editor to redraw -- without this, primitives are    }
         { committed but not visible until the user closes and reopens the   }
         { symbol. Same fix applied to other lib_add_symbol_* helpers.       }
@@ -8539,9 +8596,12 @@ Begin
                         NewParam.Name := ParamName;
                         NewParam.Text := ParamValue;
                         { Component came from LookupLibComponent: a library
-                          lookup, NARROWED, so its part may be read here. }
-                        SetOwnerPart(NewParam, OwnerPartIdOf(Component),
-                            OwnerDisplayModeOf(Component));
+                          lookup, NARROWED, so its part may be read here. A
+                          PARAMETER belongs to the whole component, so its
+                          owner part is CurrentPartID as read, 0 included -
+                          not OwnerPartIdOf's primitive clamp to 1, which
+                          would pin it to part 1 (SetParamOwnerPart). }
+                        SetParamOwnerPart(NewParam, Component);
                         Component.AddSchObject(NewParam);
                         SchRegisterObject(Component, NewParam);
                         Inc(Created);
@@ -8871,7 +8931,7 @@ Begin
         SchRegisterObject(Component, Arc);
         SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
 
-        MarkLibDirty(SchLib);
+        MarkLibDirtyComp(SchLib, Component);
         Result := BuildSuccessResponse(RequestId, '{"success":true}');
     End
     Else
@@ -8984,7 +9044,7 @@ Begin
             SchRegisterObject(Component, Polygon);
             SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
 
-            MarkLibDirty(SchLib);
+            MarkLibDirtyComp(SchLib, Component);
             Result := BuildSuccessResponse(RequestId,
                 '{"success":true,"vertices":' + IntToStr(XValues.Count) + '}');
         End
@@ -9036,7 +9096,7 @@ Begin
     SchEndModify(Component);
     SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
 
-    MarkLibDirty(SchLib);
+    MarkLibDirtyComp(SchLib, Component);
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"component":"' + EscapeJsonString(CompName) +
         '","description":"' + EscapeJsonString(Description) + '"}');
@@ -9135,7 +9195,7 @@ Begin
 
     After := -1;
     Try After := Component.ComponentKind; Except End;
-    MarkLibDirty(SchLib);
+    MarkLibDirtyComp(SchLib, Component);
 
     Details := '{"library_path":"' + EscapeJsonString(LibPath) + '"'
         + ',"component":"' + EscapeJsonString(CompName) + '"'
@@ -9626,7 +9686,7 @@ Begin
         SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
     End;
 
-    MarkLibDirty(SchLib);
+    MarkLibDirtyComp(SchLib, Component);
 
     Result := BuildSuccessResponse(RequestId,
         '{"added":' + IntToStr(Added) + ',"failed":' + IntToStr(Failed)
@@ -9779,7 +9839,7 @@ Begin
         SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
     End;
 
-    MarkLibDirty(SchLib);
+    MarkLibDirtyComp(SchLib, Component);
 
     Result := BuildSuccessResponse(RequestId,
         '{"added":' + IntToStr(Added) + ',"failed":' + IntToStr(Failed)
@@ -9880,7 +9940,7 @@ Begin
         SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
     End;
 
-    MarkLibDirty(SchLib);
+    MarkLibDirtyComp(SchLib, Component);
 
     Result := BuildSuccessResponse(RequestId,
         '{"added":' + IntToStr(Added) + ',"failed":' + IntToStr(Failed)
@@ -11495,7 +11555,7 @@ Begin
         SchServer.ProcessControl.PostProcess(SchLib, '');
     End;
 
-    MarkLibDirty(SchLib);
+    MarkLibDirtyComp(SchLib, Component);
 
     Result := BuildSuccessResponse(RequestId,
         '{"component":"' + EscapeJsonString(WantName) +
@@ -11791,7 +11851,7 @@ Begin
         SchServer.ProcessControl.PostProcess(SchLib, 'Set pin properties');
     End;
 
-    If PinsChanged > 0 Then MarkLibDirty(SchLib);
+    If PinsChanged > 0 Then MarkLibDirtyComp(SchLib, Component);
 
     Details := '{"library_path":"' + EscapeJsonString(LibPath) + '"'
         + ',"component":"' + EscapeJsonString(CompName) + '"'

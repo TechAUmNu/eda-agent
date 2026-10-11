@@ -9723,6 +9723,7 @@ Var
     Op, Scope, ObjTypeStr, PropsStr : String;
     ObjTypeInt : Integer;
     SchDoc : ISch_Document;
+    SchLib : ISch_Lib;
     Component : ISch_Component;
     NewObj : ISch_GraphicalObject;
     ActiveDoc : ISch_Document;
@@ -9755,13 +9756,26 @@ Begin
     { (the 2026-10-11 class). Now the held component or the one named by    }
     { component_name, found through the library; Nil answers NO_COMPONENT   }
     { per item, as before.                                                   }
+    { THROUGH AN ISch_Lib-TYPED LOCAL, assigned straight from               }
+    { GetCurrentSchDocument (the per-op shape this replaced, and the one     }
+    { Gen_CreateObject and every Lib_* handler use). ActiveDoc is typed      }
+    { ISch_Document, and the named route reads ISch_Lib-only members        }
+    { (GetState_SchComponentByLibRef, SchLibIterator_Create, the             }
+    { CurrentSchComponent setter): a typed COPY does not narrow in           }
+    { DelphiScript (PCB.pas PCB_SetRuleProperties), so handing ActiveDoc to  }
+    { an ISch_Lib parameter risked the uncatchable "Undeclared identifier"   }
+    { halt that kills the polling loop - the very class this resolves away. }
     IsLib := False;
     Component := Nil;
+    SchLib := Nil;
     LibCompName := ExtractJsonValue(Params, 'component_name');
     If ActiveDoc <> Nil Then
         IsLib := (ActiveDoc.ObjectId = eSchLib);
     If IsLib Then
-        Component := ResolveEditLibComponent(ActiveDoc, LibCompName);
+    Begin
+        SchLib := SchServer.GetCurrentSchDocument;
+        Component := ResolveEditLibComponent(SchLib, LibCompName);
+    End;
 
     If ActiveDoc <> Nil Then
         SchServer.ProcessControl.PreProcess(ActiveDoc, '');

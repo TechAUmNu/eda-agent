@@ -283,6 +283,33 @@ def _last_fault_summary(workspace) -> Optional[dict]:
     }
     return out
 
+def _loop_note(fault: dict) -> str:
+    """``loop_note`` for a recorded fault, worded by its kind.
+
+    It says what was FOUND and when, not that the loop is down now: a
+    success through another server, or one running older code, may not
+    have removed the record, and a ``stuck_handler`` loop may only have
+    been busy. ``app_ping`` settles it either way.
+    """
+    kind = fault.get("fault") or "unknown"
+    when = fault.get("when") or ""
+    at = f" at {when}" if when else ""
+    if kind == "dead_loop":
+        found = (f"the polling loop was found NOT ANSWERING{at} (no reply "
+                 f"and no heartbeat, or a script-engine fatal error on "
+                 f"screen)")
+    elif kind == "stuck_handler":
+        found = (f"a handler was found STUCK{at}: busy past its heartbeat "
+                 f"limit, so the loop may only have been busy, or may have "
+                 f"died since")
+    else:
+        found = f"a fault ({kind}) was recorded{at}"
+    return (f"A fault is recorded ({kind}): " + found + ". 'attached' says nothing "
+            "about the loop. Any call that succeeds removes this record, so "
+            "it stands until one does; app_ping settles it, and the "
+            "recovery steps are in last_fault.steps.")
+
+
 class AltiumBridge:
     """Handles communication with Altium Designer via file-based IPC.
 
@@ -322,22 +349,36 @@ class AltiumBridge:
         self._stale_fault_checked = False
 
     def _note_fault(self, workspace_dir, guidance: dict) -> None:
-        """Persist a fault for the dashboard recovery banner (best-effort)."""
+        """Persist a fault for the dashboard recovery banner (best-effort).
+
+        Stamped with the local time it was diagnosed (ISO 8601, seconds), so
+        ``app_get_status``'s ``last_fault.when`` says WHEN the loop was found
+        down. Both call sites used to pass no time, and ``when`` was always
+        ''.
+        """
+        from datetime import datetime
         from .fault_state import record_fault
-        record_fault(workspace_dir, guidance)
+        record_fault(workspace_dir, guidance,
+                     when=datetime.now().isoformat(timespec="seconds"))
         self._fault_recorded = True
 
     def _clear_fault_if_any(self, workspace_dir) -> None:
         """A command succeeded: the loop is alive; drop any banner state.
 
-        Clears when THIS instance recorded a fault, and once at first success
-        to sweep a stale ``last_fault.json`` left by a previous process (the
-        recovery flow can involve restarting the server). After that first
-        sweep the in-memory flag alone gates it, so healthy steady-state calls
-        touch no disk.
+        Clears whenever ``last_fault.json`` EXISTS, whoever wrote it. It used
+        to clear only a fault THIS instance recorded (or once, at the first
+        success), so a fault recorded by ANOTHER MCP server process sharing
+        the workspace - the multi-agent case - outlived every later success
+        here, and ``app_get_status`` kept saying the loop was down while this
+        very call proved it alive. The existence check is one stat, no
+        handle, so a healthy call still opens nothing.
         """
-        if self._fault_recorded or not self._stale_fault_checked:
-            from .fault_state import clear_fault
+        from .fault_state import FAULT_FILE, clear_fault
+        try:
+            present = (Path(workspace_dir) / FAULT_FILE).exists()
+        except OSError:
+            present = True
+        if self._fault_recorded or present:
             clear_fault(workspace_dir)
             self._fault_recorded = False
         self._stale_fault_checked = True
@@ -439,16 +480,11 @@ class AltiumBridge:
         # never read as "the polling loop is alive". attached says only that
         # THIS server attached; live 2026-10-11 it stayed true for twenty
         # minutes while the loop was dead after a script-engine halt. The
-        # file is written when a fault is diagnosed and removed by the next
-        # call that succeeds, so its presence means the loop's last known
-        # state is down.
+        # file is written when a fault is diagnosed and removed by any call
+        # that succeeds afterwards (through a server running this code).
         common["last_fault"] = _last_fault_summary(workspace)
         if common["last_fault"]:
-            common["loop_note"] = (
-                "A fault is recorded (" + common["last_fault"]["fault"]
-                + "): the polling loop was down at the last call and no call "
-                "has succeeded since, whatever 'attached' says. app_ping "
-                "settles it; the recovery steps are in last_fault.steps.")
+            common["loop_note"] = _loop_note(common["last_fault"])
         if selection.process:
             return {
                 "running": True,
@@ -747,6 +783,16 @@ class AltiumBridge:
                         f"after={waited:.1f}s "
                         f"summary={early.get('summary', '')[:120]}",
                     )
+                    # A SCRIPT-ENGINE FATAL BOX IS A DEAD LOOP ALREADY. OK
+                    # does not resume the engine (dialog_report.
+                    # SCRIPT_FATAL_NOTE), so record dead_loop now: otherwise
+                    # app_get_status answered last_fault None with attached
+                    # true right after the box, and after OK, until some
+                    # later call happened to time out on the DEAD_LOOP
+                    # branch below.
+                    if "script_fatal" in (early.get("kinds") or []):
+                        self._note_fault(workspace_dir,
+                                         recovery_guidance(DEAD_LOOP))
                     raise AltiumTimeoutError(
                         f"Altium is showing a modal dialog {waited:.0f}s into "
                         f"this call, so the handler cannot run and waiting for "
@@ -891,8 +937,14 @@ class AltiumBridge:
             flying = read_in_flight(workspace_dir)
             mine = [f for f in flying if f.get("request_id") == request_id]
             in_flight = (mine or flying or [None])[0]
-            self._note_fault(workspace_dir,
-                             recovery_guidance(STUCK_HANDLER, in_flight))
+            # A script_fatal box on screen means the engine HALTED: record a
+            # dead loop, not a busy handler, so last_fault names the right
+            # recovery (Stop + rerun StartMCPServer, not "wait").
+            if probe and "script_fatal" in (probe.get("kinds") or []):
+                self._note_fault(workspace_dir, recovery_guidance(DEAD_LOOP))
+            else:
+                self._note_fault(workspace_dir,
+                                 recovery_guidance(STUCK_HANDLER, in_flight))
             # PAST TENSE, because that is all the evidence supports. This
             # message used to say "Altium IS responding to keepalives ...
             # likely stuck in an infinite loop", present tense, as a fixed

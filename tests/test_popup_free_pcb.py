@@ -791,85 +791,201 @@ def test_set_mech_layer_kind_goes_through_the_pair_helper():
 
 
 # ---------------------------------------------------------------------------
-# PCB_NormalizeVias: a rule whose members did not read is not read again
+# PCB_NormalizeVias: no rule member past Name / Descriptor, kind by literal
 # ---------------------------------------------------------------------------
 
 class _ViaBoardIter(_Iter):
     """The board iterator, filtered: vias for eViaObject, rules for
     eRuleObject (PCB_NormalizeVias walks both)."""
 
-    def __init__(self, vias, rules):
+    def __init__(self, vias, rules, walks):
         super().__init__([])
         self.by = {OIDS["eViaObject"]: vias, OIDS["eRuleObject"]: rules}
+        self.walks = walks
 
     def AddFilter_ObjectSet(self, s):
         for k in s:
+            self.walks.append(k)
             self.items = list(self.by.get(k, []))
 
 
 class _ViaBoard(Fx):
     @property
     def BoardIterator_Create(self):
-        return _ViaBoardIter(self.vias, self.rules)
+        return _ViaBoardIter(self.vias, self.rules, self.walks)
 
 
-def _vias_ns(popups, vias, rule_of, msgs, rules=()):
-    board = _ViaBoard(popups, vias=vias, rules=list(rules),
+#: The via-style members that do not exist on a base IPCB_Rule binding (and
+#: the typed via-style read that has never run here).
+_VIA_MEMBERS = ["PreferedWidth", "PreferedHoleWidth", "RuleKind"]
+
+_VIA_DESC = ("Routing Via (MinHoleWidth=10mil) (MaxHoleWidth=10mil) "
+             "(PreferredHoleWidth=10mil) (MinWidth=20mil) (MaxWidth=20mil) "
+             "(PreferedWidth=20mil) (All)")
+
+
+def _vias_ns(popups, vias, rule_of, msgs, rules=(), kinds=None):
+    walks: list = []
+    kinds = kinds if kinds is not None else []
+
+    def dominant(v, k):
+        kinds.append(k)
+        return rule_of(v)
+
+    board = _ViaBoard(popups, vias=vias, rules=list(rules), walks=walks,
                       BoardIterator_Destroy=lambda i: None,
-                      FindDominantRuleForObject=lambda v, k: rule_of(v),
+                      FindDominantRuleForObject=dominant,
                       FileName="b.PcbDoc")
-    return _ns(popups, GetPCBBoardAnywhere=lambda d: board,
-               eRule_RoutingViaStyle="viastyle",
-               PCBServer=_server(popups, msgs))
+    ns = _ns(popups, GetPCBBoardAnywhere=lambda d: board,
+             PCBServer=_server(popups, msgs), Round=round,
+             CreateObject=lambda cls: _IList(), TInterfaceList=None)
+    ns["_walks"] = walks
+    return ns
 
 
-def _via(popups, n):
-    return Fx(popups, InComponent=False, InPolygon=False, InDimension=False,
-              I_ObjectAddress=f"V{n}", Size=1, HoleSize=1)
+class _IList(list):
+    def Add(self, o):
+        self.append(o)
+
+    @property
+    def Count(self):
+        return len(self)
+
+    @property
+    def Items(self):
+        return self
 
 
-def test_normalize_vias_never_reads_a_constraint_off_the_dominant_rule():
-    """FindDominantRuleForObject answers a base IPCB_Rule; PreferedWidth on
-    it was read inside a Try that 'counted' it. A constraint member through
-    an IPCB_Rule binding is the measured room-rule failure, and on the
-    engine that is a halt no Except sees. The values now come from a
-    rule-iterator pass, by rule NAME; the dominant rule is asked its Name
-    only, and nothing is counted."""
+def _vias_build(ns):
+    _run(["ViaRuleValue", "MilsToCoordF", "MMToCoord", "PCB_NormalizeVias"],
+         ns)
+
+
+def _via(popups, n, free=True):
+    return Fx(popups, InComponent=not free, InPolygon=False,
+              InDimension=False, I_ObjectAddress=f"V{n}", Size=1, HoleSize=1)
+
+
+def test_normalize_vias_reads_no_constraint_member_off_any_rule():
+    """3aca481 read PreferedWidth off the dominant base IPCB_Rule inside a
+    'counted' Try; 6ff9e36 moved it to an IPCB_RoutingViaStyleRule local
+    (a type name, two members and eRule_RoutingViaStyle that had never run
+    here, for every rule on every board). Now the values are parsed from
+    Rule.Descriptor (a proven base member), the rule kind is the literal 11,
+    and no rule is asked anything but Name and Descriptor."""
     popups = Popups()
     msgs: list = []
+    kinds: list = []
     vias = [_via(popups, n) for n in range(3)]
-    dominant = Fx(popups, ["PreferedWidth", "PreferedHoleWidth"],
-                  Name="RoutingVias")
-    typed = Fx(popups, RuleKind="viastyle", Name="RoutingVias",
-               PreferedWidth=200, PreferedHoleWidth=100)
-    ns = _vias_ns(popups, vias, lambda v: dominant, msgs, rules=[typed])
-    _run(["PCB_NormalizeVias"], ns)
+    dominant = Fx(popups, _VIA_MEMBERS, Name="RoutingVias")
+    listed = Fx(popups, _VIA_MEMBERS, Name="RoutingVias", Descriptor=_VIA_DESC)
+    clear = Fx(popups, _VIA_MEMBERS, Name="Clearance",
+               Descriptor="Clearance Constraint (Gap=10mil) (All),(All)")
+    ns = _vias_ns(popups, vias, lambda v: dominant, msgs,
+                  rules=[clear, listed], kinds=kinds)
+    _vias_build(ns)
     assert ns["PCB_NormalizeVias"]({}, "r") == (
-        "OK", '{"checked":3,"changed":3,"no_rule_values":0}')
+        "OK", '{"checked":3,"changed":3,"free":3,"no_rule_values":0,'
+              '"via_rule_values":1}')
     assert popups == [], popups
     assert ns["_caught"] == []
+    assert kinds == [11, 11, 11], "the rule kind must be the literal 11"
     assert msgs == ["Begin", "End"] * 3
-    assert all(v.Size == 200 and v.HoleSize == 100 for v in vias)
+    assert all(v.Size == 200000 and v.HoleSize == 100000 for v in vias)
 
 
-def test_normalize_vias_leaves_a_via_whose_rule_was_not_read():
+def test_normalize_vias_leaves_a_via_whose_rule_gave_no_values():
     popups = Popups()
     msgs: list = []
     vias = [_via(popups, n) for n in range(3)]
-    thin = Fx(popups, ["PreferedWidth"], Name="Thin")
-    other = Fx(popups, ["PreferedWidth"], Name="Unlisted")
-    typed = Fx(popups, RuleKind="viastyle", Name="Thin",
-               PreferedWidth=200, PreferedHoleWidth=100)
+    thin = Fx(popups, _VIA_MEMBERS, Name="Thin")
+    other = Fx(popups, _VIA_MEMBERS, Name="Unlisted")
+    listed = Fx(popups, _VIA_MEMBERS, Name="Thin", Descriptor=_VIA_DESC)
     ns = _vias_ns(popups, vias,
                   lambda v: other if v.I_ObjectAddress == "V1" else thin,
-                  msgs, rules=[typed])
-    _run(["PCB_NormalizeVias"], ns)
+                  msgs, rules=[listed])
+    _vias_build(ns)
     assert ns["PCB_NormalizeVias"]({}, "r") == (
-        "OK", '{"checked":3,"changed":2,"no_rule_values":1}')
-    assert [(v.Size, v.HoleSize) for v in vias] == [(200, 100), (1, 1),
-                                                     (200, 100)]
+        "OK", '{"checked":3,"changed":2,"free":3,"no_rule_values":1,'
+              '"via_rule_values":1}')
+    assert [(v.Size, v.HoleSize) for v in vias] == [
+        (200000, 100000), (1, 1), (200000, 100000)]
     assert msgs == ["Begin", "End", "Begin", "End"]
     assert popups == []
+
+
+def test_normalize_vias_with_a_template_descriptor_changes_nothing_and_says_so():
+    """pcb_get_rule_properties' own docstring records a via descriptor in
+    the TEMPLATE form, which carries no numbers. Then nothing is cached,
+    no via changes, and the reply says why (via_rule_values 0)."""
+    popups = Popups()
+    msgs: list = []
+    vias = [_via(popups, n) for n in range(2)]
+    dominant = Fx(popups, _VIA_MEMBERS, Name="RoutingVias")
+    listed = Fx(popups, _VIA_MEMBERS, Name="RoutingVias",
+                Descriptor="Routing Via (Templates Used To Check Via: "
+                           "v30h10m0mx0) (All)")
+    ns = _vias_ns(popups, vias, lambda v: dominant, msgs, rules=[listed])
+    _vias_build(ns)
+    assert ns["PCB_NormalizeVias"]({}, "r") == (
+        "OK", '{"checked":2,"changed":0,"free":2,"no_rule_values":2,'
+              '"via_rule_values":0}')
+    assert [(v.Size, v.HoleSize) for v in vias] == [(1, 1), (1, 1)]
+    assert msgs == [] and popups == []
+
+
+def test_normalize_vias_reads_no_rule_on_a_board_without_free_vias():
+    """6ff9e36 walked every rule (RuleKind, then the via-style members) on
+    every board before looking at a single via. A board whose vias are all
+    inside components now never creates the rule iterator at all."""
+    popups = Popups()
+    msgs: list = []
+    vias = [_via(popups, n, free=False) for n in range(2)]
+    poison = Fx(popups, _VIA_MEMBERS + ["Name", "Descriptor"])
+    ns = _vias_ns(popups, vias, lambda v: poison, msgs, rules=[poison])
+    _vias_build(ns)
+    assert ns["PCB_NormalizeVias"]({}, "r") == (
+        "OK", '{"checked":2,"changed":0,"free":0,"no_rule_values":0,'
+              '"via_rule_values":0}')
+    assert OIDS["eRuleObject"] not in ns["_walks"]
+    assert popups == [] and msgs == []
+
+
+@pytest.mark.parametrize("desc,key,want", [
+    ("(PreferedWidth=20mil)", "PreferedWidth", 200000),
+    ("x (preferedwidth = 20 mil)", "PreferedWidth", 200000),   # spaces
+    ("(PreferedWidthX=20mil)", "PreferedWidth", 0),            # not the key
+    ("(PreferedHoleWidth=0.254mm)", "PreferedHoleWidth", 100000),
+    ("(PreferedHoleWidth=10mil)", "PreferedWidth", 0),          # never inside
+    ("(PreferedWidth=20)", "PreferedWidth", 0),                 # no unit
+    ("(PreferedWidth=abc)", "PreferedWidth", 0),
+    ("(PreferedWidth=-5mil)", "PreferedWidth", 0),
+    ("", "PreferedWidth", 0),
+    ("ROUTING VIA (PREFEREDWIDTH=1.5MIL)", "PreferedWidth", 15000),
+])
+def test_via_rule_value_parses_only_a_keyed_number_with_a_unit(desc, key,
+                                                             want):
+    popups = Popups()
+
+    def float_def(s, d):
+        try:
+            return float(s)
+        except ValueError:
+            return d
+
+    ns = _ns(popups, Round=round, StrToFloatDef=float_def)
+    _run(["ViaRuleValue", "MilsToCoordF", "MMToCoord"], ns)
+    assert ns["ViaRuleValue"](desc, key) == want
+
+
+def test_normalize_vias_names_no_unproven_identifier():
+    """The class, not the site: the handler and its parser name none of
+    the identifiers that had never run in this repo."""
+    for fname in ("PCB_NormalizeVias", "ViaRuleValue"):
+        code = strip_comments(_pcb()[fname])
+        for ident in ("IPCB_RoutingViaStyleRule", "eRule_RoutingViaStyle",
+                      ".PreferedWidth", ".PreferedHoleWidth", ".RuleKind"):
+            assert ident not in code, f"{fname} names {ident}"
 
 
 # ---------------------------------------------------------------------------

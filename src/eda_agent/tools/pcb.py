@@ -1147,11 +1147,22 @@ def register_pcb_tools(mcp):
     async def pcb_normalize_vias() -> dict[str, Any]:
         """Snap every via to its dominant routing-via-style rule.
 
-        Sets each via's diameter and hole to the rule's preferred values, so a
-        board with mixed/hand-edited via sizes conforms to the design rules.
+        Sets each FREE via's diameter and hole to the rule's preferred values,
+        so a board with mixed/hand-edited via sizes conforms to the design
+        rules. Vias inside components, polygons or dimensions are left alone.
+
+        The preferred values are parsed from each rule's ``descriptor``
+        (``PreferedWidth=`` / ``PreferedHoleWidth=``, mil or mm), because no
+        constraint member can be read safely off a rule from the script. A
+        descriptor that carries no numbers (the "Templates Used To Check
+        Via" form) yields none: ``via_rule_values`` is then 0, every free via
+        counts in ``no_rule_values``, and nothing changes.
 
         Returns:
-            {"checked": N, "changed": M}.
+            {"checked": vias seen, "changed": M, "free": free vias,
+             "no_rule_values": free vias left alone because their dominant
+             rule gave no values, "via_rule_values": rules whose descriptor
+             gave both values}.
         """
         bridge = get_bridge()
         return await bridge.send_command_async("pcb.normalize_vias", {})

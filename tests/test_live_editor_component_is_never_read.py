@@ -29,15 +29,17 @@ them), and each test fails on 3aca481.
   PreProcess.
 * The owner part is read ONCE from the narrowed component BEFORE the
   PreProcess; SetOwnerPart takes plain integers and reads no component.
-* MarkLibDirty invalidates the held component (live, same library), never
-  CurrentSchComponent.
+* MarkLibDirty touches no component at all; MarkLibDirtyComp redraws the
+  component the handler itself edited (review of 6ff9e36: the shared path
+  dereferenced the held global on every library edit).
 * obj_create / obj_batch_create container=component and the library
   parameter delete take the same route.
-* PCB_NormalizeVias reads no constraint member off the IPCB_Rule that
-  FindDominantRuleForObject answers.
+* PCB_NormalizeVias reads no constraint member off any rule (values from
+  the Descriptor; tests/test_popup_free_pcb.py has the full set).
 * A static guard: no unit reads, copies or passes the CurrentSchComponent
   GETTER (only setters and Nil compares remain), and no IPCB_Rule-typed
-  variable is read past the base interface.
+  variable, parameter or rule-returning call is read past the base
+  interface.
 """
 from __future__ import annotations
 
@@ -197,7 +199,7 @@ _HANDLERS = {
 
 _LIB_HELPERS = ["SetOwnerPart", "OwnerPartIdOf", "OwnerDisplayModeOf",
                 "NoEditComponentMessage", "ResolveEditLibComponent",
-                "MarkLibDirty"]
+                "MarkLibDirty", "MarkLibDirtyComp", "SetParamOwnerPart"]
 
 
 def _edit_ns(lib, client, queue=None):
@@ -411,7 +413,7 @@ def test_no_set_owner_part_caller_hands_it_a_component():
 
 
 # ---------------------------------------------------------------------------
-# 4. MarkLibDirty redraws the held component, never the editor's
+# 4. MarkLibDirty touches no component; MarkLibDirtyComp the edited one
 # ---------------------------------------------------------------------------
 
 def test_mark_lib_dirty_never_touches_the_editor_selection():
@@ -424,22 +426,37 @@ def test_mark_lib_dirty_never_touches_the_editor_selection():
     assert client.docs[A.upper()].modified == 1
 
 
-def test_mark_lib_dirty_redraws_the_held_component_only_in_its_library():
+def test_mark_lib_dirty_never_dereferences_the_held_component():
+    """Review of 6ff9e36: MarkLibDirty read
+    LastCreatedLibComponent.GraphicallyInvalidate on EVERY library edit,
+    gated only by LastCreatedLibIsLive, which answers True whenever it is
+    unsure. A held symbol freed behind its back (closed and reopened outside
+    the bridge, the Needs-probe case) then halted every later edit in that
+    library. Here the held reference is Dead while its library still looks
+    open: nothing may touch it."""
     events: list[str] = []
     client = _client()
     lib_a = EditLib(A, events=events)
     ns = _edit_ns(lib_a, client)
-    held = NComp("MADE", events)
-    _held(ns, lib_a, held, "MADE")
+    _held(ns, lib_a, Comp("MADE"), "MADE")
+    ns["LastCreatedLibComponent"] = Dead()     # freed, liveness unsure
+    assert ns["LastCreatedLibIsLive"](0) is True
     ns["MarkLibDirty"](lib_a)
-    assert "invalidate:MADE" in events
+    assert events == ["lib_invalidate"]
+    assert client.docs[A.upper()].modified == 1
+
+
+def test_mark_lib_dirty_comp_redraws_the_component_it_is_handed():
+    events: list[str] = []
+    client = _client()
+    lib_a = EditLib(A, events=events)
+    ns = _edit_ns(lib_a, client)
+    ns["LastCreatedLibComponent"] = Dead()     # never consulted
+    edited = NComp("X", events)
+    ns["MarkLibDirtyComp"](lib_a, edited)
+    assert events == ["invalidate:X", "lib_invalidate"]
     events.clear()
-    ns["MarkLibDirty"](EditLib(B, events=events))
-    assert "invalidate:MADE" not in events
-    client.docs.pop(A.upper())             # its library closed
-    ns["LastCreatedLibComponent"] = Dead()
-    events.clear()
-    ns["MarkLibDirty"](EditLib(B, events=events))
+    ns["MarkLibDirtyComp"](lib_a, None)
     assert events == ["lib_invalidate"]
 
 
@@ -553,27 +570,27 @@ def test_library_parameter_delete_with_nothing_held_matches_nothing_and_says_why
 
 
 # ---------------------------------------------------------------------------
-# 6. PCB_NormalizeVias: no constraint member off an IPCB_Rule
+# 6. PCB_NormalizeVias: no constraint member off any rule
 # ---------------------------------------------------------------------------
 
 class BaseRule:
-    """What FindDominantRuleForObject answers: an IPCB_Rule binding. Its
-    base Name resolves; a via-style member does not, and on the engine that
-    is the uncatchable halt (the measured room-rule failure)."""
+    """What FindDominantRuleForObject or the rule iterator answers: an
+    IPCB_Rule binding. Its base Name and Descriptor resolve; a via-style
+    member does not, and on the engine that is the uncatchable halt (the
+    measured room-rule failure)."""
 
-    def __init__(self, name):
+    def __init__(self, name, descriptor=""):
         object.__setattr__(self, "_name", name)
+        object.__setattr__(self, "_desc", descriptor)
 
     def __getattribute__(self, attr):
         if attr == "Name":
             return object.__getattribute__(self, "_name")
+        if attr == "Descriptor":
+            return object.__getattribute__(self, "_desc")
         if attr.startswith("__"):
             return object.__getattribute__(self, attr)
-        raise AssertionError(f"constraint member {attr} read off an IPCB_Rule")
-
-
-class TypedRule(SimpleNamespace):
-    """A rule as the board's RULE ITERATOR hands it over (narrowed)."""
+        raise AssertionError(f"member {attr} read off an IPCB_Rule")
 
 
 class _It:
@@ -626,6 +643,7 @@ class Board:
         pass
 
     def FindDominantRuleForObject(self, via, kind):
+        assert kind == 11, "the rule kind must be the literal 11"
         return self.dominant(via)
 
 
@@ -660,39 +678,43 @@ def _vias_run(board):
         "RecordCaughtException": caught.append,
         "MkSet": lambda *a: list(a), "eViaObject": "via",
         "eRuleObject": "rule", "AllLayers": None, "eProcessAll": None,
-        "eRule_RoutingViaStyle": "viastyle",
         "CreateObject": lambda cls: _IList(), "TInterfaceList": None,
         "TStringList": _StrListClass(), "PCBServer": Server(),
         "c_Broadcast": 0, "c_NoEventData": 0,
         "PCBM_BeginModify": "Begin", "PCBM_EndModify": "End",
+        "MilsToCoordF": lambda m: round(m * 10000),
+        "MMToCoord": lambda mm: round(mm * 10000000 / 25.4),
+        "StrToFloatDef": lambda s, d: float(s) if s else d,
     }
-    build(_PCB, ["PCB_NormalizeVias"], ns)
+    build(_PCB, ["ViaRuleValue", "PCB_NormalizeVias"], ns)
     return ns["PCB_NormalizeVias"]({}, "r"), msgs, caught, pre
 
 
-def test_normalize_vias_reads_values_from_the_rule_iterator_not_the_dominant_rule():
+_DESC = ("Routing Via (PreferredHoleWidth=10mil) (MinWidth=20mil) "
+         "(PreferedWidth=20mil) (All)")
+
+
+def test_normalize_vias_reads_values_from_the_descriptor_not_a_rule_member():
     vias = [_via(n) for n in range(3)]
-    rules = [TypedRule(RuleKind="clearance", Name="Clear"),
-             TypedRule(RuleKind="viastyle", Name="RoutingVias",
-                       PreferedWidth=200, PreferedHoleWidth=100)]
+    rules = [BaseRule("Clear", "Clearance Constraint (Gap=10mil) (All)"),
+             BaseRule("RoutingVias", _DESC)]
     board = Board(vias, rules, lambda v: BaseRule("RoutingVias"))
     reply, msgs, caught, pre = _vias_run(board)
     assert reply[0] == "OK"
     assert '"changed":3' in reply[1] and '"no_rule_values":0' in reply[1]
-    assert [(v.Size, v.HoleSize) for v in vias] == [(200, 100)] * 3
+    assert [(v.Size, v.HoleSize) for v in vias] == [(200000, 100000)] * 3
     assert caught == [] and pre == ["pre", "post"]
 
 
 def test_normalize_vias_leaves_a_via_whose_rule_has_no_values():
     vias = [_via(n) for n in range(2)]
-    rules = [TypedRule(RuleKind="viastyle", Name="Thin",
-                       PreferedWidth=200, PreferedHoleWidth=100)]
+    rules = [BaseRule("Thin", _DESC)]
     board = Board(vias, rules,
                   lambda v: BaseRule("Thin" if v.I_ObjectAddress == "V0"
                                      else "Unlisted"))
     reply, msgs, _caught, _pre = _vias_run(board)
     assert '"changed":1' in reply[1] and '"no_rule_values":1' in reply[1]
-    assert [(v.Size, v.HoleSize) for v in vias] == [(200, 100), (1, 1)]
+    assert [(v.Size, v.HoleSize) for v in vias] == [(200000, 100000), (1, 1)]
     assert msgs == ["Begin", "End"]
 
 
@@ -812,22 +834,74 @@ _RULE_BASE = {"Name", "RuleKind", "Enabled", "Priority", "Scope1Expression",
               "Scope2Expression", "Descriptor", "Comment", "DRCEnabled",
               "I_ObjectAddress", "UniqueId"}
 
+#: Calls whose answer is a base IPCB_Rule binding: a member read chained
+#: straight onto one is the same read as through an IPCB_Rule variable.
+_RULE_CALLS = ("FindDominantRuleForObject", "PCB_FindRuleByName")
+
+
+def _rule_names(code):
+    """Every name declared IPCB_Rule in a routine: Var-block locals AND
+    parameters, however the declaration is laid out (``A, B : IPCB_Rule``
+    in a Var block, ``(Board : IPCB_Board; Rule : IPCB_Rule)`` in a header,
+    with or without a trailing ``;`` or ``)``)."""
+    head = code.split("\nBegin", 1)[0]
+    names = set()
+    for m in re.finditer(r"([\w ,]+?)\s*:\s*IPCB_Rule\s*[;)]", head, re.I):
+        decl = m.group(1)
+        decl = re.split(r"[(;]", decl)[-1]
+        decl = re.sub(r"^\s*(?:Var|Const)\b", "", decl, flags=re.I)
+        names.update(v.strip() for v in decl.split(",") if v.strip())
+    return names
+
+
+def _rule_reads(code):
+    """``Name.Member`` past the base interface through an IPCB_Rule name,
+    and ``Call(...).Member`` chained on a rule-returning call."""
+    bad = []
+    for v in _rule_names(code):
+        for m in re.finditer(rf"\b{re.escape(v)}\.(\w+)", code):
+            if m.group(1) not in _RULE_BASE:
+                bad.append(f"{v}.{m.group(1)}")
+    for call in _RULE_CALLS:
+        for m in re.finditer(rf"\b{call}\s*\(", code):
+            depth, i = 1, m.end()
+            while i < len(code) and depth:
+                depth += {"(": 1, ")": -1}.get(code[i], 0)
+                i += 1
+            chained = re.match(r"\s*\.(\w+)", code[i:])
+            if chained and chained.group(1) not in _RULE_BASE:
+                bad.append(f"{call}(...).{chained.group(1)}")
+    return bad
+
 
 def test_no_ipcb_rule_typed_variable_is_read_past_the_base_interface():
     """A constraint member through an IPCB_Rule binding is the measured
     room-rule failure (PCB_GetRoomRules); 3aca481 read PreferedWidth /
-    PreferedHoleWidth that way in PCB_NormalizeVias."""
+    PreferedHoleWidth that way in PCB_NormalizeVias. Locals, parameters and
+    reads chained onto a rule-returning call are all covered."""
     bad = []
     for path in _UNITS:
         for fname, body in load(path, minimum=1).items():
-            code = strip_comments(body)
-            head = code.split("\nBegin", 1)[0]
-            names = set()
-            for m in re.finditer(r"^\s*([\w ,]+?)\s*:\s*IPCB_Rule\s*;", head,
-                                 re.M | re.I):
-                names.update(v.strip() for v in m.group(1).split(","))
-            for v in names:
-                for m in re.finditer(rf"\b{re.escape(v)}\.(\w+)", code):
-                    if m.group(1) not in _RULE_BASE:
-                        bad.append(f"{path.name} {fname}: {v}.{m.group(1)}")
+            for hit in _rule_reads(strip_comments(body)):
+                bad.append(f"{path.name} {fname}: {hit}")
     assert bad == []
+
+
+@pytest.mark.parametrize("src,hit", [
+    ("Function F(Board : IPCB_Board; Rule : IPCB_Rule) : Integer;\n"
+     "Begin\n    Result := Rule.Gap;\nEnd;", "Rule.Gap"),
+    ("Function F(R : IPCB_Rule) : Integer;\nBegin\n"
+     "    Result := R.PreferedWidth;\nEnd;", "R.PreferedWidth"),
+    ("Function F(B : IPCB_Board) : Integer;\nVar\n    A, B2 : IPCB_Rule;\n"
+     "Begin\n    Result := B2.MinWidth(1);\nEnd;", "B2.MinWidth"),
+    ("Function F(B : IPCB_Board) : Integer;\nBegin\n    Result := "
+     "B.FindDominantRuleForObject(V, 11).PreferedWidth;\nEnd;",
+     "FindDominantRuleForObject(...).PreferedWidth"),
+    ("Function F(B : IPCB_Board) : Integer;\nBegin\n    Result := "
+     "PCB_FindRuleByName(B, 'X').Gap;\nEnd;", "PCB_FindRuleByName(...).Gap"),
+])
+def test_the_rule_guard_sees_parameters_and_chained_reads(src, hit):
+    """The guard itself, on the shapes the review named: a parameter typed
+    IPCB_Rule and a member chained onto a rule-returning call."""
+    assert hit in _rule_reads(src)
+    assert _rule_reads(src.replace(hit.split(".")[-1], "Name")) == []
