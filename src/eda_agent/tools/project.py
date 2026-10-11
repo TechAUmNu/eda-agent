@@ -1283,7 +1283,9 @@ def register_project_tools(mcp):
         Args:
             container_name: Name of the output container to execute
             outjob_path: Path to the .OutJob file. If omitted, uses the
-                         first OutJob found in the focused project.
+                         first OutJob found in the focused project. A
+                         path that is not an .OutJob is refused
+                         ``NO_OUTJOB`` before anything is opened.
             fresh_window_seconds: files modified up to this many seconds
                 before the run started still count as written, for file
                 systems with coarse timestamps. Default 5s.

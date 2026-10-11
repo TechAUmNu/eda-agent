@@ -8663,6 +8663,13 @@ Begin
     { placement can't silently land on the wrong (focused) board. Empty      }
     { board_path falls back to the current/focused board.                    }
     BoardPathStr := ExtractJsonValue(Params, 'board_path');
+    { A .PcbLib never reaches ResolvePCBBoard (BoardPathLibraryRefusal). }
+    If BoardPathLibraryRefusal(BoardPathStr) <> '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BOARD_PATH_IS_LIBRARY',
+            BoardPathLibraryRefusal(BoardPathStr));
+        Exit;
+    End;
     Board := ResolvePCBBoard(BoardPathStr);
     If Board = Nil Then
     Begin
@@ -8840,6 +8847,13 @@ Var
 Begin
     BoardPathStr  := ExtractJsonValue(Params, 'board_path');
     PlacementsStr := ExtractJsonValue(Params, 'placements');
+    { A .PcbLib never reaches ResolvePCBBoard (BoardPathLibraryRefusal). }
+    If BoardPathLibraryRefusal(BoardPathStr) <> '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BOARD_PATH_IS_LIBRARY',
+            BoardPathLibraryRefusal(BoardPathStr));
+        Exit;
+    End;
     Board := ResolvePCBBoard(BoardPathStr);
     If Board = Nil Then
     Begin
@@ -8973,6 +8987,13 @@ Var
     BoardPathStr : String;
 Begin
     BoardPathStr := ExtractJsonValue(Params, 'board_path');
+    { A .PcbLib never reaches ResolvePCBBoard (BoardPathLibraryRefusal). }
+    If BoardPathLibraryRefusal(BoardPathStr) <> '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BOARD_PATH_IS_LIBRARY',
+            BoardPathLibraryRefusal(BoardPathStr));
+        Exit;
+    End;
     Board := ResolvePCBBoard(BoardPathStr);
     If Board = Nil Then
     Begin

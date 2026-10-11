@@ -359,7 +359,11 @@ def register_pcb_tools(mcp):
         directly.)
 
         Args:
-            board_path: Absolute path to the .PcbDoc to focus.
+            board_path: Absolute path to the .PcbDoc to focus. A .PcbLib is
+                refused ``BOARD_PATH_IS_LIBRARY`` before anything is opened
+                (Altium answers that open with its own modal box); a
+                library is edited with the library tools
+                (``lib_create_footprint`` and the rest).
 
         Returns:
             Dict with ``focused`` and the resolved ``board`` file name.
@@ -5620,7 +5624,10 @@ def register_pcb_tools(mcp):
                 rotation, layer, unique_id, and pad_nets
                 (``{pad_name: net_name}``); omit unique_id/pad_nets for
                 geometry-only, include them for a synced placement.
-            board_path: Absolute .PcbDoc path to place onto (optional).
+            board_path: Absolute .PcbDoc path to place onto (optional). A
+                .PcbLib is refused ``BOARD_PATH_IS_LIBRARY`` before anything
+                is opened; edit a library with the library tools
+                (``lib_create_footprint`` and the rest).
 
         Returns:
             Dict with ``placed`` (count), ``failed`` (count), ``total``.

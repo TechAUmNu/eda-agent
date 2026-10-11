@@ -444,20 +444,24 @@ def _resolve(client):
     return ns
 
 
-def test_an_existing_pcblib_board_path_is_opened_as_before():
-    """A PcbLib is a PCB-server document: today's open answers the
-    library's board. Skipping it would target some other open board."""
+def test_an_existing_pcblib_board_path_is_never_opened():
+    """WITHDRAWN PREMISE (live 2026-10-11): this test said a PcbLib "is a
+    PCB-server document: today's open answers the library's board". It is
+    not what Altium does: OpenDocument('PCB', <a .PcbLib>) shows Altium's
+    OWN modal 'File type not recognised.', which no Except sees, and the
+    bridge blocked (it did the same at eec334c). Skipping it must not
+    target another board either, so it answers Nil and the handlers refuse
+    BOARD_PATH_IS_LIBRARY first."""
     lib = r"C:\x\lib.PcbLib"
     client = _BoardClient(on_disk={lib})
     got = _resolve(client)["ResolvePCBBoard"](lib)
-    assert client.opened == [lib]
-    assert got.FileName == lib
+    assert client.opened == []
+    assert got is None
 
 
-def test_a_missing_pcblib_board_path_still_falls_back_without_opening():
+def test_a_missing_pcblib_board_path_is_not_opened_and_does_not_fall_back():
     client = _BoardClient()
-    assert _resolve(client)["ResolvePCBBoard"](r"C:\x\gone.PcbLib") == \
-        "ANYWHERE"
+    assert _resolve(client)["ResolvePCBBoard"](r"C:\x\gone.PcbLib") is None
     assert client.opened == []
 
 

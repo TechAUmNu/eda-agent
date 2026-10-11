@@ -2898,6 +2898,19 @@ Begin
         Exit;
     End;
 
+    { THE FILE TYPE BEFORE THE OPEN. outjob_path comes from the caller, and   }
+    { OpenDocument('OUTPUTJOB', <another file type>) is answered by Altium's  }
+    { OWN message box, not an exception (the 'File type not recognised.'     }
+    { modal ResolvePCBBoard met live on 2026-10-11): no Except or counter    }
+    { sees it and the polling loop waits on it. Only an .OutJob is opened.   }
+    If UpperCase(ExtractFileExt(Trim(OutJobPath))) <> '.OUTJOB' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_OUTJOB',
+            'outjob_path does not name an .OutJob file, so nothing was opened '
+            + 'or run: ' + OutJobPath);
+        Exit;
+    End;
+
     { Open/focus the OutJob document. outjob_path comes from the caller, and }
     { a typo or a stale path handed Client.OpenDocument a file that is not   }
     { there; OpenDocumentIfPresent asks first and answers Nil, which is what }

@@ -1750,6 +1750,26 @@ Begin
 End;
 
 {..............................................................................}
+{ A board_path that names a PCB LIBRARY. Client.OpenDocument('PCB', <a       }
+{ .PcbLib>) does not raise and does not answer Nil: Altium shows its OWN     }
+{ modal 'Warning - File type not recognised.' inside the call (live          }
+{ 2026-10-11, AD 26.10.1.5; the same at eec334c). That box is not an         }
+{ exception, so no Except and no counter ever sees it, and the polling loop  }
+{ waits on it. Falling back to another board instead would edit a board the  }
+{ caller did not name, so the handlers that take board_path refuse first     }
+{ with BOARD_PATH_IS_LIBRARY and this message; '' when the path is not a     }
+{ library. By extension only: a library is the file type, open or not.       }
+Function BoardPathLibraryRefusal(Path : String) : String;
+Begin
+    Result := '';
+    If UpperCase(ExtractFileExt(Trim(Path))) <> '.PCBLIB' Then Exit;
+    Result := 'board_path names a PCB library, not a board: ' + Path
+        + '. Nothing was opened or changed. A library is edited with the lib_ '
+        + 'tools (lib_create_footprint, lib_add_footprint_pad, '
+        + 'lib_get_footprints and the rest), which take library_path; '
+        + 'board_path takes a .PcbDoc.';
+End;
+
 { ResolvePCBBoard - get a SPECIFIC board by path when several PcbDocs are     }
 { open. GetPCBBoardAnywhere returns the focused/current board, which is the   }
 { WRONG one when the caller meant a different (e.g. newly created) board.     }
@@ -1778,12 +1798,16 @@ Begin
     { CONSERVATIVE: the skip is the same GetPCBBoardAnywhere(0) a Nil       }
     { ServerDoc takes, and a bare name is not judged (it keeps today's      }
     { attempt), so only an open that could not have produced a board is    }
-    { skipped. A .PcbLib is a PCB-SERVER document: opening it loads the     }
-    { server and GetCurrentPCBBoard answers the library's board, so it      }
-    { keeps today's open - skipping it would silently target a DIFFERENT    }
-    { open board.                                                           }
+    { skipped.                                                              }
+    { A .PcbLib NEVER reaches OpenDocument('PCB', ...): Altium answers it   }
+    { with its own 'File type not recognised.' message box, which is not an }
+    { exception (live 2026-10-11; see BoardPathLibraryRefusal). The         }
+    { handlers refuse such a path before calling this; here it answers Nil  }
+    { rather than the fallback, because the fallback would edit a DIFFERENT }
+    { board than the one named.                                             }
     Ext := UpperCase(ExtractFileExt(Trim(Path)));
-    If ((Ext <> '.PCBDOC') And (Ext <> '.PCB') And (Ext <> '.PCBLIB')) Or
+    If Ext = '.PCBLIB' Then Exit;
+    If ((Ext <> '.PCBDOC') And (Ext <> '.PCB')) Or
        (LooksAbsolutePath(Path) And (Not DocumentPresent(Path))) Then
     Begin
         Result := GetPCBBoardAnywhere(0);

@@ -273,12 +273,24 @@ def _resolve(client):
 
 
 @pytest.mark.parametrize("path", [r"C:\nope.PcbDoc", r"C:\x\sheet.SchDoc",
-                                  r"C:\x\gone.PcbLib", r"\\srv\gone.PcbDoc"])
+                                  r"\\srv\gone.PcbDoc"])
 def test_resolve_pcb_board_falls_back_without_opening_what_cannot_be_a_board(
         path):
     client = _Client(on_disk={r"C:\x\sheet.SchDoc", r"C:\x\lib.PcbLib"})
     ns = _resolve(client)
     assert ns["ResolvePCBBoard"](path) == "ANYWHERE"
+    assert client.opened == [], "OpenDocument was handed " + path
+
+
+@pytest.mark.parametrize("path", [r"C:\x\gone.PcbLib", r"C:\x\lib.PcbLib"])
+def test_resolve_pcb_board_answers_nil_for_any_pcb_library(path):
+    """2026.10.11.02: a .PcbLib, on disk or not, is never opened as a board
+    (OpenDocument('PCB', <a library>) is Altium's own 'File type not
+    recognised.' modal, live 2026-10-11) and never falls back to another
+    board. The handlers refuse it first (BOARD_PATH_IS_LIBRARY)."""
+    client = _Client(on_disk={r"C:\x\lib.PcbLib"})
+    ns = _resolve(client)
+    assert ns["ResolvePCBBoard"](path) is None
     assert client.opened == [], "OpenDocument was handed " + path
 
 
