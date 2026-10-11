@@ -1,4 +1,4 @@
-# Release verification: 2026.10.11.01
+# Release verification: 2026.10.11.02
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by the linter (and by FPC where a section says so) but **not
@@ -289,7 +289,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.11.01`, `version_match` =
+Expect `altium_script_version` = `2026.10.11.02`, `version_match` =
 `true`, and `mcp_server_version` = `0.6.1`. On a freshly started loop
 `caught_exceptions` is `0` and `last_caught` null (section 39): note both,
 since every later section is read against them.
@@ -1217,7 +1217,7 @@ that they arrived:
   with its layer, its net and its regions. A plane's net is read from
   there because `LayerObj.Net` on a stack layer faulted live as an
   undeclared identifier. `pcb_set_plane_net` no longer touches
-  `LayerObj.Net` at all (2026.10.11.01): after its refusals it answers
+  `LayerObj.Net` at all (since the first 2026-10-11 build): after its refusals it answers
   `success: false`, `applied: false`, an empty `net_readback` and a note
   pointing at the Layer Stack Manager, writes nothing and raises no
   dialog. Tying a plane through the split-plane objects is unverified and
@@ -2077,7 +2077,7 @@ sheets, `A`, `B` and `STUBS`, all saved and loaded, plus one open
 library `<lib>` (a scratch copy) that has not been edited. Confirm
 `app_ping` answers after each call.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.01`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.02`.
 
 2. **The default save-all leaves an unedited library alone.** Note
    `<lib>`'s mtime. `app_save_all` with no arguments. Expect
@@ -2245,7 +2245,7 @@ compile is what is new.
 Work on the live project only if the .PrjPcb is committed (the check is a
 `git diff`), or on a copy. Focus some other sheet `A` first.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.01`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.02`.
 
 2. **A default add writes the project.** Note the .PrjPcb's mtime and two
    SchDoc mtimes. `proj_add_sheet name=ZZ33`. Expect `success: true,
@@ -2330,7 +2330,7 @@ confirm it) and write the project only for a sheet that is on disk.
 
 Focus some other sheet `A` of the focused project first.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.01`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.02`.
 
 2. **The add still takes the document save.** `proj_add_sheet name=ZZ35`:
    as step 33's step 2, plus `project_save_route: document_save`.
@@ -2403,7 +2403,7 @@ after `MarkDocDirtyByPath`. They now answer `saved: false` with
 `marked_modified`, `pending_save` and `written_to_disk: false` (the fields
 `lib_delete_footprint` already uses). No Altium call changed; only the reply.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.01`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.02`.
 2. **The reply is honest.** Focus a sheet, `obj_modify` a net label to its
    own current text. Expect `saved: false, marked_modified: true,
    pending_save: true, written_to_disk: false`, and the sheet's mtime
@@ -2460,7 +2460,7 @@ only from the new handler, and every sender reports its absence (the tool as
 a `warning`, the plan paths as a note), so step 2 below detects a stale
 script by itself.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.01`
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.02`
    (the 2026-10-08 build is the one the results below were measured on),
    `version_match` true.
 2. **Exact values.** On a scratch sheet with a placed part (say `R1`) that has
@@ -2647,7 +2647,7 @@ section): the heights reach the file and the discard reply holds, but
 (section 38). On any re-run, run 37.6 FIRST: it is the step that can stop
 the loop.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.01`,
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.02`,
    `version_match` true.
 2. **Heights survive the save.** On a COPY of a .PcbLib with at least three
    footprints, focus footprint A, then `lib_set_footprint_height` on B and C
@@ -2770,7 +2770,7 @@ this build: section 38.
 
 ---
 
-## 38. A dirty mark that says whether it took, and a save-all that writes what the bridge edited (UNVERIFIED-LIVE)
+## 38. A dirty mark that says whether it took, and a save-all that writes what the bridge edited (run live 2026-10-11 on the first 2026-10-11 build, results at the end; re-check on 2026.10.11.02)
 
 Found by section 37's live run (2026-10-10, the 2026-10-10 build): the
 library's modified flag read false after every `lib_set_footprint_height`
@@ -2893,13 +2893,58 @@ Application.pas):
 * `lib_read_pcblib_file` reports each footprint's `height_raw`,
   `height_mils` and `height_mm` from the file (Python, offline).
 
-**Not run live.** SCRIPT_VERSION is `2026.10.11.01`. Use scratch copies only:
+**2026.10.11.02, after the 2026-10-11 live run** (results at the end of
+this section; the fixes, each with an executed test that fails on the
+first 2026-10-11 build, are in `tests/test_live_2026_10_11_findings.py`):
+
+* **THE FLAG IS READ AS A REAL BOOLEAN (D1, the root cause).** Live, after
+  `SetModified(True)`, `IServerDocument.Modified` read as NEITHER true NOR
+  false: `If X` and `If Not X` were both false. Every mark answered
+  `marked_modified: false` while the tab showed `*`, and the branches that
+  test the NEGATION never fired either (no `save_hint` on `obj_modify`,
+  `mark.problem` empty, the generic close refusal). The likely value is a
+  Boolean variant holding 1 rather than True's -1. Every read of the flag,
+  in every unit, now goes through `ModifiedFlagOf` (Main.pas): Nil is
+  false, a read that raises is true (doubt writes, counted), anything else
+  is true when it is NOT 0 - a numeric compare, never `If X` or `= True`.
+  It uses operators only: no Variant routine (`VarType`, `VarIsNull`, ...)
+  has ever run in this codebase, and an undeclared one would fault inside
+  the polling loop. So on this build a bridge mark is expected to read
+  `marked_modified: true`.
+* **The diagnostic that settles it.** Every `mark` now carries `flag_raw`
+  (`-1`, `0`, `1`, `other`; `unreadable`; empty when nothing was found)
+  and `flag_tests` (`if=..,not=..,eq_true=..,eq_false=..,ne_zero=..`, 1 or
+  0 each), read right after `SetModified(True)`. A normal True reads
+  `-1` / `if=1,not=0,eq_true=1,eq_false=0,ne_zero=1`; the hypothesis reads
+  `1` / `if=0,not=0,eq_true=0,eq_false=0,ne_zero=1`. Record both on the
+  first mark of the run.
+* **One visit per file per save pass (D2).** The walk reached a file once
+  per listing (a project member and the Free Documents listing of the same
+  file, or two slash spellings) and, after writing it on the first visit,
+  filed it under `skipped_unmodified` / `libraries_skipped` on the second.
+  A file the pass has attempted is not looked at again, and the skip list
+  is deduped by `DocPathKey`. A document whose flag reads modified is
+  written by the walk itself, so it is NOT listed in
+  `written_by_bridge_record` (that list is for recorded documents whose
+  flag reads clean) - with D1 fixed that is the normal case.
+* **A one-op `obj_batch_modify` works (D3).** The client joined ops with
+  `~~`, so one op had none and the bridge picked its legacy positional
+  parser (`unknown_object_type`, `object_type` `object_type=eSchComponent`).
+  The bridge now takes any `key=value` framed payload as tilde framing,
+  and the client also ends every payload with `~~`.
+* **A zero-match op is not a failed mark (D4).** Its row reads
+  `marked_modified: null` and `ops_mark_not_read_back` counts only ops
+  that matched.
+* **The close refusal names the bridge edit whenever there is one (D5).**
+
+The steps below are the 2026-10-11 procedure with the .02 expectations.
+SCRIPT_VERSION is `2026.10.11.02`. Use scratch copies only:
 a scratch sheet opened as a free document, a scratch PROJECT copy with at
 least one sheet, a byte copy of one of that project's sheets saved under the
 SAME FILE NAME in another folder (opened as a free document), and a byte copy
 of a .PcbLib opened on its own.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.01`,
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.02`,
    `version_match` true.
 2. **Read-back on a FREE document.** On the free scratch sheet (focused),
    `obj_modify` one property (say a part's `Location.X`). Expect
@@ -2907,7 +2952,9 @@ of a .PcbLib opened on its own.
    with `found: true`, `modified_read: true`, `recorded_for_save_all: true`
    (the mark resolved the bare name to the sheet's ABSOLUTE path:
    `mark.file_name` is that path), `problem` empty; record `mark.via` and
-   `mark.focused_modified_read`. `app_get_active_document` then reads
+   `mark.focused_modified_read`, and `mark.flag_raw` / `mark.flag_tests`
+   (the D1 diagnostic: see above; record them whatever they say).
+   `app_get_active_document` then reads
    `modified: true`. Then `lib_set_footprint_height` on a non-current
    footprint of the free library copy: `marked_modified: true`,
    `mark.found: true`. An `obj_modify` whose filter matches nothing:
@@ -2918,21 +2965,35 @@ of a .PcbLib opened on its own.
    path lookup reaches a different object from the focused tab; both false
    means `IServerDocument.Modified` does not reflect `SetModified` on this
    Altium at all. Either way the reply now SAYS so (`save_hint`), and step 4
-   is the safety net.
+   is the safety net. On 2026.10.11.02 a false here, with `flag_raw` `0`,
+   means the raw value compares equal to 0 (an unassigned value would; the
+   helper cannot tell it from False without a Variant routine) - record
+   `flag_tests` exactly.
 3. **Read-back on a PROJECT document.** In the scratch project copy, the same
    `obj_modify` with `scope` `doc:<sheet path>` while ANOTHER document is
    focused: `marked_modified: true`, `mark.found: true`, `mark.via: path`,
    `mark.focused_modified_read: null`. With `scope` `project` and a filter
    that matches on ONE sheet only: `sheets_marked` 1, `marks_not_read_back:
    []`, and the other sheets do not read modified. One `obj_batch_modify` op
-   on that sheet: its row reads `marked_modified: true`,
-   `ops_mark_not_read_back: 0`, no `save_hint`.
+   on that sheet (ONE op, nothing else in the batch: the first 2026-10-11
+   build refused every one-op batch `unknown_object_type`): its row reads
+   `object_type` `eSchComponent`, `marked_modified: true`,
+   `ops_mark_not_read_back: 0`, no `save_hint`. Then two ops, the second
+   matching nothing: the second row reads `matched: 0`,
+   `marked_modified: null`, and `ops_mark_not_read_back` stays 0.
 4. **app_save_all writes a bridge-edited document whose flag reads clean.**
    Needs an edit whose `marked_modified` reads FALSE: step 2's height write
    if it still does, else `lib_add_footprint_tracks` or
    `lib_modify_footprint_pads` (both read `modified:false` on earlier builds).
    If no bridge edit reads false on this build, record that and skip: the
-   record path is then unreachable in practice. Otherwise, after such an edit
+   record path is then unreachable in practice. ON 2026.10.11.02 THAT IS
+   THE EXPECTED OUTCOME (D1: a mark now reads true): record "no bridge edit
+   reads false" with the `flag_raw` / `flag_tests` of the edit tried, and
+   run instead the plain version - after a bridge edit that reads true,
+   `app_save_all` writes the copy, lists it in NEITHER `skipped_unmodified`
+   NOR `libraries_skipped` (the first 2026-10-11 build listed a file it had
+   just written there too, D2), and `written_by_bridge_record` may be `[]`
+   (the walk wrote it as a modified document). Otherwise, after such an edit
    on the library copy, FOCUS ANOTHER DOCUMENT (so the walk cannot reach the
    free copy through the focus) and wait at least 3 s (FileAge has 2 s
    resolution; a write inside the tick of the file's previous write cannot
@@ -2957,12 +3018,16 @@ of a .PcbLib opened on its own.
    false`. Then a new bridge edit and, WITHIN 2 s, `app_save_all`: the copy
    may land in `bridge_record_same_tick` (not a failure, no
    `bridge_record_warning`) or in `written_by_bridge_record`; it must not be
-   in `bridge_record_not_written`. Record which.
+   in `bridge_record_not_written`. Record which. On
+   2026.10.11.02, with the edit reading `marked_modified: true`, the walk
+   writes it as a modified document: it is counted in `documents_written`,
+   both lists may be empty, and it must NOT be in `libraries_skipped`.
 6. **A pass that writes only free documents counts them.** With only the
    free scratch sheet edited, `app_save_all`: `documents_written` at least 1
    and `saved: true` (before this build such a pass could read "not one got
    newer on disk"). Record `documents_attempted` and `bridge_record_pending`
-   (expected `[]`).
+   (expected `[]`). The sheet written is NOT also in `skipped_unmodified`
+   (it was, on the first 2026-10-11 build: D2).
 7. **Nothing unedited is written.** Then, with nothing edited,
    `app_save_all only_modified=true`: `documents_attempted: 0`,
    `written_by_bridge_record: []`, `bridge_record_pending: []`, no mtime
@@ -2976,7 +3041,9 @@ of a .PcbLib opened on its own.
    project (its sheet `X.SchDoc` loaded) AND the same-named byte copy of
    `X.SchDoc` from the other folder as a free document; focus the free
    copy. `obj_modify` one property: `mark.file_name` is the FREE COPY's
-   path, `mark.via` `focused`; the project sheet reads `modified: false`.
+   path, `mark.via` `focused` (or `path`: in the 2026-10-11 session free
+   documents reported an absolute path, so the exact lookup answered first;
+   either is a pass); the project sheet reads `modified: false`.
    `app_save_all only_modified=true`: the project sheet's mtime does not
    move and it is not in `written_by_bridge_record`; `bridge_record_pending`
    names no project path.
@@ -3011,14 +3078,16 @@ of a .PcbLib opened on its own.
       only_modified=true`: the project sheet is NOT in
       `written_by_bridge_record` and its mtime does not move;
       `bridge_record_pending` is `[]`.
-10. **A close does not throw a bridge edit away (F5).** After an edit whose
-    `marked_modified` reads FALSE on the library copy (as step 4),
-    `app_close_document` on it WITHOUT `discard_changes`: refused
-    `MODIFIED` (the message names the bridge edit), the copy still open.
-    Then with `discard_changes=true`: `closed: true`, `discarded: true`,
-    `bridge_edited: true`, `modified_read: false`,
-    `file_unchanged_on_disk: true`. If no edit reads false on this build,
-    record that and skip.
+10. **A close does not throw a bridge edit away (F5, D5).** After a bridge
+    edit on the library copy, `app_close_document` on it WITHOUT
+    `discard_changes`: refused `MODIFIED`, the message starts "This bridge
+    edited the document" WHATEVER the flag reads (the first 2026-10-11
+    build gave the generic "The document has unsaved changes" - D5), the
+    copy still open. Then with `discard_changes=true`: `closed: true`,
+    `discarded: true`, `bridge_edited: true`, `file_unchanged_on_disk:
+    true`, and `modified_read` the flag as `ModifiedFlagOf` reads it (`true`
+    on 2026.10.11.02 when the mark read true; `false` only when it did
+    not - record which).
 11. **A file written outside the record is not rewritten (F4).** Bridge
     edit on the library copy, then save it in Altium by hand (Ctrl+S on its
     tab), wait 3 s, then `app_save_all` with no arguments: the copy is in
@@ -3030,7 +3099,11 @@ of a .PcbLib opened on its own.
     mtime does not move and `bridge_record_pending` is `[]`.
 13. **A reload whose save is declined does not close the sheet.** After a
     bridge edit on the free scratch sheet whose `marked_modified` reads
-    FALSE (as step 4), start an interactive command on it (Place > Wire,
+    FALSE (as step 4; on 2026.10.11.02 a mark is expected to read true, so
+    run it with that edit and record the flag: a declined save then keeps
+    the flag reading modified, which is `SAVE_FAILED` too, and the final
+    save-all writes the sheet as a modified document rather than from the
+    record), start an interactive command on it (Place > Wire,
     leave it running) and call `sch_reload_document` on its absolute path:
     `SAVE_FAILED` with `still_modified` recorded, and the sheet still open
     with the edit visible. End the command (`app_exit_active_command`),
@@ -3039,9 +3112,42 @@ of a .PcbLib opened on its own.
     moved. If the save is not declined while the command runs on this
     build, record that and skip.
 
+### Results 2026-10-11 (the first 2026-10-11 build, AD 26.10.1.5)
+
+Run against scratch copies only, with the carrier project open throughout
+(the carrier folder was baselined before and after every save: unchanged).
+Because the carrier was open, every "app_save_all with NO arguments" ran
+as `only_modified=true` instead (marked SUB). `caught_exceptions` 0,
+`cast_errors` 0 and `last_caught` null before and after EVERY step.
+
+| Step | Verdict | What happened | On 2026.10.11.02 |
+|---|---|---|---|
+| 1 | PASS | version matched | re-check the new version |
+| 2 | FAIL | `marked_modified` false, `modified_read` false with `*` on the tab, NO `save_hint`, `mark.problem` empty; the no-match half passed | D1 fixed (`ModifiedFlagOf`); record `flag_raw` / `flag_tests` |
+| 3 | FAIL | doc: and project scope marks read false (`sheets_marked` 0); a ONE-op batch refused `unknown_object_type`; a two-op batch counted its no-match op in `ops_mark_not_read_back` | D1, D3, D4 fixed |
+| 4 | PARTIAL (SUB) | the edit WAS written (height on disk), but the reply listed the file in `skipped_unmodified` + `libraries_skipped` with the "NOT written" warning, `written_by_bridge_record` `[]`; the repeat passed | D2 fixed; the "reads false" precondition is not expected to arise (D1) |
+| 5 | PARTIAL (SUB) | `bridge_edited` true / `written_to_disk` true, then false: pass; the within-2 s save wrote it but listed it in `libraries_skipped` | D2 fixed |
+| 6 | PARTIAL (SUB) | `documents_written` 1, `saved` true; the written sheet also in `skipped_unmodified` | D2 fixed |
+| 7 | PASS | nothing attempted, no mtime moved | unchanged |
+| 8 | PASS | offline heights as documented | unchanged |
+| 9 main | PARTIAL | mark found the free copy, project sheet untouched; `mark.via` was `path`, not `focused` | the step now accepts `path` |
+| 9a, 9b, 9d | PASS | bare scopes refused before any edit; the mirror marked its doc_path copy | unchanged |
+| 9c | NOT RUN | needs a hand edit (owner session) | still owner-gated |
+| 10 | PARTIAL | refused `MODIFIED` and stayed open, but with the GENERIC message; the discard close passed every field | D5 fixed |
+| 11 | NOT RUN | needs a hand Ctrl+S (owner session) | still owner-gated |
+| 12 | PASS | the closed edit was not written; `bridge_record_pending` `[]` | unchanged |
+| 13 | NOT RUN | needs an interactive command left running (owner session) | still owner-gated |
+
+Why the replies contradicted the writes: the raw flag read neither true
+nor false, so `If Not WasModified` (the record's route) did not run and
+the walk wrote the file as if modified; a second visit of the same file
+(a free document also reached through `DM_Projects`, or the other slash
+spelling) then read the now-clean flag and listed it as skipped. Nothing
+was lost - only the replies were wrong.
+
 ---
 
-## 39. Popup-free run (2026.10.11.01, UNVERIFIED-LIVE)
+## 39. Popup-free run (run live 2026-10-11 on the first 2026-10-11 build, results at the end; re-check on 2026.10.11.02)
 
 **Why.** Altium's script engine shows an exception as a modal "press OK"
 dialog BEFORE the surrounding `Try/Except` runs, and the polling loop
@@ -3088,6 +3194,17 @@ record the section, the step, and `last_caught` (`where` names the site,
 every section, except a probe in 39.4 and step 2's first failure shape,
 which are listed because they may raise.
 
+**NO INCREASE DOES NOT MEAN NO DIALOG.** The counter sees the script
+engine's exception box only. Altium's OWN message boxes (class
+`TMessageForm`, e.g. title "Warning", text "File type not recognised.",
+which `Client.OpenDocument` put up live on 2026-10-11) are not exceptions
+at all: no `Except` runs and nothing is counted, before or after OK is
+pressed. While one is up the call never returns, `app_ping` answers "not
+responding" and its counters are unreadable. Only `app_get_status`
+(`in_flight` names the stuck call and its age) and `app_list_open_dialogs`
+(the box's title, class and text) see it. So after any call that does not
+return promptly, read both before concluding anything from the counter.
+
 ### 39.3 Calls that used to raise and must not now
 
 Each must answer with no dialog and leave `caught_exceptions` unchanged.
@@ -3101,9 +3218,18 @@ Each must answer with no dialog and leave `caught_exceptions` unchanged.
    `board_path` = `C:\nope.PcbDoc`, then with the absolute path of an
    existing `.SchDoc`. Each takes the same fallback a failed open always
    took (it does NOT refuse: a bad `board_path` still lands on whichever
-   board the fallback finds, so use a scratch board). An EXISTING absolute
-   `.PcbLib` as `board_path` is still opened, as before (a PcbLib is a
-   PCB-server document); a missing one takes the fallback.
+   board the fallback finds, so use a scratch board). A `.PcbLib` as
+   `board_path`, EXISTING OR MISSING, is refused `BOARD_PATH_IS_LIBRARY`
+   (the message names the `lib_` tools) with NOTHING opened, no board
+   changed and no dialog; the same for `pcb_focus_board`. CORRECTED after
+   the 2026-10-11 run: this item used to say an existing `.PcbLib` "is
+   still opened, as before". It is not what Altium does:
+   `Client.OpenDocument('PCB', <a .PcbLib>)` puts up Altium's OWN modal
+   "Warning - File type not recognised." inside the call - not an
+   exception, so uncounted - and the bridge blocks until somebody presses
+   OK. The "as before" was that same modal (the eec334c build behaved
+   identically). Count the components on the scratch board before and
+   after: unchanged.
 3. **A project that lists a board missing on disk.** Copy a scratch
    project without its `.PcbDoc`, open it, focus a sheet, run
    `app_get_preferences`: `"pcb": null` (or another open board).
@@ -3128,6 +3254,11 @@ Each must answer with no dialog and leave `caught_exceptions` unchanged.
    modal (`ResolveLibFootprint`, `FocusPcbLibForEdit`, `Lib_CopyFootprint`
    and the fifteen handlers that default the path to the focused
    document now ask `PcbLibMayBeCurrentAt` first).
+8. **An outjob path that is not an OutJob.** `proj_run_outjob
+   container_name=X outjob_path=<an existing scratch .PcbLib>`: refused
+   `NO_OUTJOB` ("does not name an .OutJob file"), nothing opened, no
+   dialog (it used to reach `OpenDocument('OUTPUTJOB', ...)`, the same
+   kind-mismatch box as item 2).
 
 The conversion guards (`StrToIntDef`, `StrToFloatDef`, `LoadMCPConfig`)
 are executed offline against the real source by
@@ -3147,7 +3278,7 @@ No conservative pre-check exists for these, so the `Try` stays and its
 | P1b | same | Open a PcbLib, close it, `app_exit_active_command` | `pcb_post_process: true` confirms a closed library leaves the server registered (why this site is NOT gated on an open PCB document) |
 | P2 | `dispatcher` (in `App_CreateDocument`) | `app_create_document kind=NOTAKIND file_path=<scratch>\x.dat add_to_project=false` | `CREATE_FAILED` = `OpenNewDocument` answers Nil, nothing to do; `INTERNAL_ERROR` + a dialog = it raises, and unknown kinds need a refusal |
 | P3 | `GetPCBBoardAnywhere:OwnerDocument` | 39.3 item 4 | 0 = the Nil test was enough; 1 = reading `OwnerDocument` itself raises on a non-document view |
-| P4 | `MechLayerFromNumber:LayerUtils.MechanicalLayer` | Any tool given the layer `Mechanical21` on a board or library (e.g. `pcb_get_mech_layer_names` on one using mechanical 17+) | 0 expected on AD26; on a pre-AD19 build, record the result (an undeclared `LayerUtils` would show as `dispatcher` or a stopped loop) |
+| P4 | `MechLayerFromNumber:LayerUtils.MechanicalLayer` | Any tool given the layer `Mechanical21` on a board or library (e.g. `pcb_get_mech_layer_names` on one using mechanical 17+), and `pcb_set_layer_visibility layer=Mechanical21` | 0 expected on AD26; on a pre-AD19 build, record the result (an undeclared `LayerUtils` would show as `dispatcher` or a stopped loop). 2026.10.11.02: the visibility reply echoes `"layer":"Mechanical21"` (the first 2026-10-11 build echoed `Unknown`; `GetLayerString` now names Mechanical17-64 by a verified `MechLayerFromNumber` lookup, only on AD19 and later) |
 | P5 | `ReadMechKind:Kind` | Only on a build below AD19: `pcb_get_mech_layer_names` | kinds read -1 and nothing is counted (the read is gated off below 19) |
 | P6 | `App_CreateDocument:DoFileSave`, `App_CreateDocument:SaveObject` | 39.3 item 5, and the same with a folder that exists but is read-only | 0 confirms the folder test is the whole story; a count means a save raises in an existing folder |
 | P6b | `ResolvePCBBoard:OpenDocument`, `GetPCBBoardAnywhere:OpenDocument` | A 0-byte file renamed `scratch.PcbDoc`: pass it as `pcb_place_components` `board_path`, then list it in a scratch project and run `app_get_preferences` with a sheet focused | These are the residual opens of a board that IS on disk; 0 = Altium answers Nil for a broken file, 1 = it raises (a genuine fault, now counted rather than silent) |
@@ -3192,10 +3323,45 @@ row itself names the pair that popped.
 
 Do not press OK straight away. First call `app_get_status`: `in_flight`
 must name the command and request that are blocked, and the status form
-must show the same command, request id and start time. Then press OK:
-the call returns `INTERNAL_ERROR` (or the site's own reply),
-`caught_exceptions` rises by 1, and `last_caught.where` names the site or
-`dispatcher`. Record all of it, including the dialog's text.
+must show the same command, request id and start time. Then
+`app_list_open_dialogs`, and tell the two kinds apart by it:
+
+* **The script engine's exception box.** Press OK: the call returns
+  `INTERNAL_ERROR` (or the site's own reply), `caught_exceptions` rises by
+  1, and `last_caught.where` names the site or `dispatcher`.
+* **Altium's OWN message box** (class `TMessageForm`, e.g. "Warning -
+  File type not recognised."). It is NOT counted, before or after OK:
+  `caught_exceptions` does not rise and `last_caught` does not change.
+  The handler resumes after OK with whatever the Altium call answered.
+  Record it as a dialog all the same - it is a defect: a path that can
+  reach it must be refused before the call.
+
+Record all of it, including the dialog's title, class and text.
+
+### Results 2026-10-11 (the first 2026-10-11 build, AD 26.10.1.5)
+
+39.1 PASS (0 / 0 / null, `in_flight` empty). Counters stayed 0 / 0 / null
+around every call up to the modal below.
+
+| Item | Verdict | What happened | On 2026.10.11.02 |
+|---|---|---|---|
+| 39.3 item 2, `C:\nope.PcbDoc` and an existing `.SchDoc` | PASS | each took the fallback to the focused scratch board (one part placed on it), no dialog | unchanged |
+| 39.3 item 2, an existing `.PcbLib` | FAIL | Altium's own modal "Warning - File type not recognised." inside `OpenDocument('PCB', ...)`; `in_flight` named the call, `caught_exceptions` unreadable while blocked, the library file unchanged. RUN STOPPED; the owner pressed OK | refused `BOARD_PATH_IS_LIBRARY` before any open (B1); the item's text corrected |
+| 39.3 item 2, a missing `.PcbLib` | NOT RUN | stopped | refused the same way |
+| 39.3 item 5 / P6 first half | PASS | `saved: false`, no folder created, no dialog | unchanged |
+| P2 | PASS | `OpenNewDocument` answered Nil for `NOTAKIND` (`CREATE_FAILED`), no dialog | unchanged |
+| P4 | PASS, echo defect | 0 catches with the scan to 64 and the `Mechanical21` name route; the reply echoed `"layer":"Unknown"` | echo fixed (L1) |
+| P6 second half | NOT RUN | the read-only folder was not set up | owner step |
+| P6b, P7, item 3, P1b | NOT RUN | the run stopped at the modal | run them |
+| P10-P33 | NOT RUN | still blocked by the modal | run them |
+| items 1, 4, 6, 7; P1, P3, P8, P9, P18 | NOT RUN | need an Altium restart, the Home page or hand actions (owner sessions) | owner-gated |
+
+Also fixed in 2026.10.11.02 from the same class as item 2 (a caller path
+handed to `OpenDocument` under a kind its file type does not have):
+`proj_run_outjob` refuses an `outjob_path` that is not an `.OutJob`
+(item 8). Every other `OpenDocument` / `OpenDocumentIfPresent` call takes
+a path from a project listing filtered by its document kind, not from the
+caller.
 
 ---
 
