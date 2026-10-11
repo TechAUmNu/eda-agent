@@ -267,12 +267,12 @@ for mid-session.
 | Step | What must be open, or on disk |
 |---|---|
 | 0, 1 | Altium running with `Altium_API` loaded and the loop started |
-| 2 | a SchLib, with a component selected |
+| 2 | a SchLib, and the name of a symbol in it (held with `lib_set_current_component` first: the editor's own selection is never used) |
 | 3 | a SchLib |
 | 4 | a PCB whose active variant has Not-Fitted parts |
 | 5 | a PcbLib with a footprint, plus a `.step` file |
 | 6 | a PcbLib, plus a KiCad `.kicad_mod` carrying `B.SilkS` text |
-| 7 | a SchLib for the pins, and a schematic sheet for the power ports |
+| 7 | a SchLib for the pins (a symbol held with `lib_set_current_component` first), and a schematic sheet for the power ports |
 | 22 | a COPY of a PcbLib built by the IPC generator, plus a maker STEP for one of its footprints |
 | 36.7 | a scratch sheet with an upright part and a part rotated 90 whose Comment label is horizontal |
 | 37 | a COPY of a PcbLib with three or more footprints, a scratch COPY of a sheet (and of a project holding a disposable sheet, for 37.4b), and a placed part carrying a Description parameter |
@@ -368,9 +368,15 @@ converters are in `scripts/altium/Utils.pas`.
 
 ## 2. Pin edge decorations (task #20)
 
-Needs a SchLib open with a component selected.
+Needs a SchLib open. Hold the symbol to edit FIRST: the symbol merely
+selected in the editor is never used (its members cannot be read safely
+from a script; reading one halted the bridge on 2026-10-11, section 39),
+so without this the call answers `NO_COMPONENT`, which is the intended
+behaviour, not a failure of this step. Passing `component_name=<symbol>`
+on the call itself does the same.
 
 ```
+lib_set_current_component(name="<a symbol in that library>")
 lib_add_pins(pins=[
   {"designator": "1", "name": "RESET", "x": -300, "y": 0,
    "symbol_outer_edge": "dot"},
@@ -590,9 +596,13 @@ The failure is silent. Each converter ends in an `Else` that picks a
 default, so a wrong or missing branch yields Passive, or a supply Bar,
 with no error reported.
 
-Place four pins with different electrical types, then read them back:
+Place four pins with different electrical types, then read them back.
+Hold the symbol first (or pass `component_name` to `lib_add_pins`): with
+nothing held the call answers `NO_COMPONENT` by design, since the editor's
+own selection is never used.
 
 ```
+lib_set_current_component(name="<a symbol in that library>")
 lib_add_pins(pins=[
   {"designator": "1", "name": "VIN",  "x": -300, "y":    0,
    "electrical_type": "power"},
@@ -672,8 +682,12 @@ Needs a SchLib open.
 lib_get_pin_list(component_name="<a symbol in that library>")
 ```
 
-Expect a pin list. Then call it again with no `component_name` and a
-symbol selected in the editor, which must also work.
+Expect a pin list. Then call it again with no `component_name` and
+nothing held: it must answer `NO_COMPONENT` (a by-name `lib_get_pin_list`
+does not hold the symbol, and the symbol selected in the editor is never
+used: its members cannot be read safely, which is this step's own crash).
+Then `lib_set_current_component(name="<the same symbol>")` and call it with
+no `component_name`: the same pin list.
 
 **This one is a fix for an observed crash, not a new feature.** The
 deployed script answered
@@ -3210,9 +3224,38 @@ popup-free build filed three sites as "counted, not guarded"
 editor's `CurrentSchComponent`) on the premise that a failure would be
 counted; live on the second build the first of them halted the loop (39
 results, P8). 2026.10.11.03 reads no member of that reference anywhere,
-and of the IPCB_Rule constraint read in `PCB_NormalizeVias` (P23). For
+and none of the IPCB_Rule constraint read in `PCB_NormalizeVias` (P23). For
 every site still counted below, "0 catches" means only "no ordinary
 raise": a dead loop is the undeclared-identifier answer.
+
+**So the editor's own selection is never a target any more.** Every
+symbol edit (and the nameless pin readers) acts on the symbol HELD from
+`lib_create_symbol` / `lib_set_current_component`, or on the one its
+`component_name` names, and answers `NO_COMPONENT` otherwise. Sections 2,
+7 and 9 hold a symbol first for that reason; a `NO_COMPONENT` from a
+nameless call with nothing held is the intended answer, not a FAIL.
+
+**Reviewed before deploy (same version, 2026.10.11.03).** A review of the
+first .03 draft found the same class in the fix itself, all closed with
+executed tests (`tests/test_review_fatal_class_followups.py`):
+`obj_batch_create component_name=` resolved through a local declared
+`ISch_Document` while the named route reads `ISch_Lib`-only members (a
+typed copy does not narrow) - it now uses an `ISch_Lib` local assigned
+straight from `GetCurrentSchDocument`, and a guard checks every resolver's
+argument type; `MarkLibDirty` read the HELD global on every library edit
+(a freed one would have halted every later edit) - it now touches no
+component, and the handlers redraw the component they edited
+(`MarkLibDirtyComp`); `PCB_NormalizeVias` had moved its read to a typed
+iterator local whose type name, members and `eRule_RoutingViaStyle` had
+never run, for every rule on every board - it now parses `Descriptor`
+(a proven base member), takes the rule kind as the literal 11, and reads
+no rule on a board without a free via; `Pin.OwnerSchComponent` (P36) is
+gone for the proven component-then-pin walk. Also: a symbol found by
+`component_name` on part 0 is moved to part 1 as
+`lib_set_current_component` would; a new parameter from
+`lib_batch_set_params` keeps the part as read (0 included); the bridge
+records `dead_loop` (with its time) the moment it sees a `script_fatal`
+box, and any successful call clears a fault another server recorded.
 
 What carries the count (all new in this build):
 
@@ -3364,8 +3407,8 @@ row itself names the pair that popped.
 | Probe | Site (`where`) | Setup and call | What settles it |
 |---|---|---|---|
 | P8 | (none: nothing is read off the editor's selection any more) | **FATAL-IF-WRONG; first in a session of its own, after every other section.** Restart Altium; open a SchLib by hand (a symbol is selected in the editor; nothing created through the bridge). WITHOUT component_name: `lib_add_symbol_lines lines=[{x1:0,y1:0,x2:100,y2:0}]`, `lib_add_pins` (two pins), `lib_add_symbol_rectangle`, `lib_get_pin_list`, `lib_split_pin_functions`, `obj_create object_type=eLine container=component`, `lib_link_footprint footprint_name=X` | Every one answers `NO_COMPONENT` (the edits' message names component_name and lib_set_current_component), no dialog, no count, the library file unchanged and not marked modified. On the second 2026-10-11 build the first call halted the loop ("Undeclared identifier: CurrentPartID", 39 results). A box now is class (b): stop the run and record the unit and line the Script IDE shows |
-| P9 | (none) | Same session, after P8. `lib_add_pins component_name=<the selected symbol>` with two pins, one carrying `owner_part_id=0`; then `lib_add_symbol_lines` and `lib_get_pin_list` WITHOUT a name | The pins land on that symbol (visible in the editor without reselecting it: MarkLibDirty redraws the held component), the symbol is now current, the explicit pin reads `owner_part_id` 0 and the other the symbol's current part (1 on a single-part symbol, never 0); the nameless calls act on the same symbol (it is now held). No dialog, no count. `NO_COMPONENT` for a name that exists = the index and the walk both missed it (record whether `lib_set_current_component` finds it) |
-| P10 | (none: the held component's liveness) | `lib_create_symbol X`, then close and reopen that SchLib in the UI, then `lib_add_pins` without a name | `NO_COMPONENT`, no dialog, no count: the held component was dropped when its library closed (`LastCreatedLibIsLive`), and the editor's selection is no longer a fallback. **FATAL-IF-WRONG**: a dialog = `Client.GetDocumentByPath` hands back the same interface after a reopen, so the freed held component was used (record which 39.5 class, and whether two lookups return the same object) |
+| P9 | (none) | Same session, after P8. `lib_add_pins component_name=<the selected symbol>` with two pins, one carrying `owner_part_id=0`; then `lib_add_symbol_lines` and `lib_get_pin_list` WITHOUT a name; then `obj_batch_create component_name=<another symbol> operations=[two eLine items with container=component]` | The pins land on that symbol (visible in the editor without reselecting it: `MarkLibDirtyComp` redraws the component the edit wrote into), the symbol is now current, the explicit pin reads `owner_part_id` 0 and the other the symbol's displayed part (1 on a single-part symbol, never 0: a symbol that reported part 0 is moved to part 1, display mode 0, as `lib_set_current_component` does); the nameless calls act on the same symbol (it is now held). The batch answers `created: 2` on the other symbol (it resolves through an `ISch_Lib` local: the first .03 draft passed its `ISch_Document`). No dialog, no count. `NO_COMPONENT` for a name that exists = the index and the walk both missed it (record whether `lib_set_current_component` finds it) |
+| P10 | (none: the held component's liveness) | `lib_create_symbol X`, then close and reopen that SchLib in the UI, then `lib_add_pins` without a name; then a by-name edit of ANOTHER symbol in that library: `lib_set_component_description component_name=<another symbol> description=p10`, and `lib_batch_set_params` on it | `NO_COMPONENT` for the nameless add, no dialog, no count: the held component was dropped when its library closed (`LastCreatedLibIsLive`), and the editor's selection is no longer a fallback. The by-name edits succeed with no dialog whatever the liveness answer: `MarkLibDirty` touches no component (the first .03 draft invalidated the held one on every edit). **FATAL-IF-WRONG**: a dialog on the nameless add = `Client.GetDocumentByPath` hands back the same interface after a reopen, so the freed held component was used (record which 39.5 class, and whether two lookups return the same object) |
 | P11 | `ApplyLabelFormat:write` | Scratch SchLib: `lib_set_label_formats ops=[{target: designator, orientation: 90}]`, then `[{target: designator, justification: 12}]` | 1 = an out-of-range ordinal raises, and both fields need a range refusal (0..3, 0..8); 0 = check with `lib_audit_styles` whether the value was stored as given |
 | P12 | `Lib_InstallLibrary:InstallLibrary`, `Lib_UninstallLibrary:UnInstallLibrary` | Install and uninstall a real scratch `.SchLib`; then install a RELATIVE name that does not exist; then uninstall a name that is installed under another spelling of its path | 0 for the real file; the relative and respelled cases are still asked and show whether either call raises (the absolute-missing and never-installed cases are refused before the call) |
 | P13 | `Lib_MoveFootprints:GetPCBLibraryByPath`, `Lib_CopyFootprint:GetPCBLibraryByPath` | `lib_copy_footprint` and `lib_move_footprints` into a destination `.PcbLib` that exists on disk but is NOT open | 0 = the lookup answers Nil for a closed library and the load route runs; 1 = it raises |
@@ -3378,7 +3421,7 @@ row itself names the pair that popped.
 | P20 | `Gen_PlaceHarnessConnector:HarnessType` | `sch_place_harness_connector` with `harness_type` set | 1 = the member does not exist; drop the write |
 | P21 | `Gen_PlaceCrossSheetConnector:Side` | `sch_place_cross_sheet_connector` with `side=left`, then `side=right` | 1 = the member does not exist; drop the write |
 | P22 | `ProcessSchDocObjects:owner-remove` | `obj_delete object_type=eSheetEntry` with a filter matching one entry on a hierarchical sheet | 0 and the entry gone = removal through the owning symbol works; 1 = the owner refused and the document-level fallback ran |
-| P23 | (none: the read is no longer counted) | **FATAL-IF-WRONG.** `pcb_normalize_vias` on a scratch board with one free via and only the default RoutingVias rule | `changed: 1`, `no_rule_values: 0`, the via at the rule's preferred size and hole. The values now come from a rule-iterator pass (a local assigned straight from the iterator, the measured room-rule cure) matched by the dominant rule's NAME, and the dominant `IPCB_Rule` is asked its `Name` only (the second 2026-10-11 build read `PreferedWidth` off it inside a counted `Try`, the measured room-rule failure, which is an engine halt, not a count). `no_rule_values: 1` = the iterator did not yield that rule name (record it). A box = class (b): the typed member is not `PreferedWidth` on this build |
+| P23 | (none: the read is no longer counted) | **FATAL-IF-WRONG (one unproven identifier left: `Board.FindDominantRuleForObject`, unchanged since before 2026-10-11 and never yet run).** First, zero-risk: `pcb_get_rule_properties name=RoutingVias` and record `rule_kind` and `descriptor`. Then `pcb_normalize_vias` on a scratch board with one free via and only the default RoutingVias rule; then on a board whose only vias are inside a component | Record the reply. Every rule is now asked only `Name` and `Descriptor` (both proven), the values are parsed from the descriptor (`PreferedWidth=` / `PreferedHoleWidth=`, mil or mm), and the kind is the LITERAL 11 (the second 2026-10-11 build read `PreferedWidth` off the dominant `IPCB_Rule`; the first .03 draft read it through an `IPCB_RoutingViaStyleRule` iterator local, with `eRule_RoutingViaStyle` - all never run, for every rule on every board). Numeric descriptor and `rule_kind` 11: `free: 1`, `changed: 1`, `via_rule_values` >= 1, `no_rule_values: 0`, the via at the rule's preferred size and hole. Template descriptor ("Templates Used To Check Via: ..."): `via_rule_values: 0`, `no_rule_values: 1`, `changed: 0` - not a defect, it records that the values must come from elsewhere. `rule_kind` not 11 with `via_rule_values` >= 1 and `no_rule_values: 1` = the literal is wrong (record the number). The component-only board: `free: 0`, nothing read, nothing changed. A box = class (b) on `FindDominantRuleForObject` |
 | P24 | `PCB_PlaceEmbeddedBoard:XLocation`, `PCB_PlaceEmbeddedBoard:YLocation`, `PCB_PlaceEmbeddedBoard:DocumentPath`, `PCB_PlaceEmbeddedBoard:RowCount`, `PCB_PlaceEmbeddedBoard:ColCount`, `PCB_PlaceEmbeddedBoard:RowSpacing`, `PCB_PlaceEmbeddedBoard:ColSpacing`, `PCB_PlaceEmbeddedBoard:MirrorFlag` | One `pcb_place_embedded_board` call on a scratch board | Each row names a member `IPCB_EmbeddedBoard` lacks; for the locations, position the board with `MoveByXY` from its bounding rectangle instead |
 | P25 | `PCB_SetMechLayerKind:AddPair` | `pcb_set_mech_layer_kind` with a paired kind and `partner_layer` on two layers that are ALREADY paired | 0 = `AddPair` is idempotent; 1 = it raises on an existing pair, and the add needs a `PairDefined` check too |
 | P26 | `PCB_ModifyLayer:CopperThickness`, `PCB_ModifyLayer:DielectricType`, `PCB_ModifyLayer:DielectricHeight`, `PCB_ModifyLayer:DielectricConstant`, `PCB_ModifyLayer:DielectricMaterial`, `DielectricTypeToken:Dielectric` | `pcb_modify_layer` on Mechanical1 with `copper_thickness_mils`, and on TopSolder with `dielectric_constant` | A row names a member that layer kind lacks: refuse it for that kind up front |
@@ -3394,12 +3437,13 @@ row itself names the pair that popped.
 The rows below are the 2026-10-11 sweep's UNKNOWN sites (a member read on
 a reference that may not be narrowed, never measured). Each is
 **FATAL-IF-WRONG**: run them last, one per session if possible, with a
-human present.
+human present. P36 is the exception since the pre-deploy review: its
+unproven read is gone, so it is an ordinary check.
 
 | Probe | Site | Setup and call | What settles it |
 |---|---|---|---|
 | P35 | `CurrentFootprintNarrowed` (Library.pas; `ResolveLibFootprint`, `Lib_GetFootprintPads`, `Lib_Link3DModel`, `PCB_RenumberPads`) | Restart Altium, open a PcbLib by hand and select a footprint (nothing through the bridge). With NO footprint name: `lib_export_kicad_footprint output_path=<a scratch .kicad_mod>` (it reads the pads through `Lib_GetFootprintPads`), `lib_add_footprint_pad designator=99`, `pcb_renumber_pads`; then `lib_link_3d_model model_path=<a scratch .step>` | Each acts on the selected footprint, no dialog. 2026.10.11.03 takes the library iterator's reference when it compares equal to `PcbLib.CurrentComponent` (the measured LibMakeCurrentVerified compare) and `CurrentComponent` itself otherwise, exactly as before - so a box means `CurrentComponent`'s members fail like `CurrentSchComponent`'s AND the compare missed |
-| P36 | `Audit_FindNetLabelConflicts` (`Pin.OwnerSchComponent.Designator.Text`) | `audit_find_net_label_conflicts` on a scratch sheet with a net label sitting on a pin's connection end | The entry names `<designator>.<pin>`, no dialog. A box = `OwnerSchComponent` is un-narrowed like `CurrentSchComponent`: find the owner through a component iterator instead |
+| P36 | `Audit_FindNetLabelConflicts` (`PinOwnerDesignatorAt`) | `audit_find_net_label_conflicts` on a scratch sheet with a net label sitting on a pin's connection end | NO LONGER FATAL-IF-WRONG: `Pin.OwnerSchComponent` is gone, and the owner is found by the proven shape (a sheet iterator over components, each component's own pin iterator, `Comp.Designator.Text`). An ordinary check: the entry names `<designator>.<pin>`, no dialog. `.<pin>` with an empty designator = no component's pin sat at that location with that number (record the sheet) |
 | P37 | `Proj_Annotate` (TInterfaceList items) | `proj_annotate` on a scratch project with three unlocked parts, order `across_then_down` | Designators renumbered, no dialog. 2026.10.11.03 holds the list as the base `ISch_GraphicalObject` and narrows after retrieval (the PCB side's measured cure); a box = the SCH side fails differently |
 | P38 | `FocusedServerDoc` / `GetPCBBoardAnywhere` (`View.OwnerDocument`) | 39.3 item 4 (P3) with the Home page focused, then `app_list_documents` with the Home page focused and at least one document LOADED and clean (each clean loaded document asks the focused view for its owner) | Both answer, no dialog (the 2026-10-11 `app_list_documents` ran with the Home page focused but nothing loaded, so it did not reach the read). A box = `OwnerDocument` is not on a non-document view: use `DM_FocusedDocument.DM_FullPath` + `Client.GetDocumentByPath` |
 | P39 | `PCB_GetSelectedObjects` (`Board.SelectecObject[]`) | Select a track and a pad on a scratch board by hand, `pcb_get_selected_objects` | Both listed with their properties, no dialog. A box = the indexed property hands back an un-narrowed object: collect the selection with the iterator flag scan instead |
@@ -3427,7 +3471,11 @@ by the Script IDE.
   and the unit and line the IDE shows, then press OK. The call does NOT
   return: `app_ping` keeps answering "not responding", `in_flight` keeps
   the call, and `app_get_status` reports `last_fault` `dead_loop` with a
-  `loop_note` (while `attached` still reads true). Recovery: in the Script
+  `loop_note` (while `attached` still reads true). The bridge records it
+  the moment its dialog probe sees the box (about 3 s into the call, or
+  when the heartbeat extensions run out), with the local time in
+  `last_fault.when`; before 2026.10.11.03 it was recorded only once a LATER
+  call timed out, and `when` was always empty. Recovery: in the Script
   IDE press Stop (Run > Stop, or Ctrl+F3), close the unit's tab without
   saving, and rerun File > Run Script > Altium_API > Dispatcher.pas >
   StartMCPServer (or restart Altium). A `PreProcess` the handler opened
@@ -3491,7 +3539,9 @@ routes into the eight `Lib_Add*` handlers, `lib_link_footprint`, the pin
 readers, obj_create / obj_batch_create into a component and the library
 parameter delete) and the `IPCB_Rule` constraint read in
 `pcb_normalize_vias` - all fixed in 2026.10.11.03, and seven UNKNOWN ones
-(three applied conservatively, the rest probes P35-P40). A `owner_part_id`
+(three applied conservatively, one - `OwnerSchComponent`, P36 - replaced by
+the proven component-iterator shape after review, the rest probes P35 and
+P37-P40). A `owner_part_id`
 on every pin would not have saved P9: the next line, `AddSchObject`, is a
 member of the same reference.
 
