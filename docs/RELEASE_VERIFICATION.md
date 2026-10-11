@@ -12,6 +12,11 @@ Work top to bottom. Step 1 needs nothing but Altium and takes seconds,
 and is the step most likely to catch a compile-level problem. If it
 fails, stop and fix that before running the rest.
 
+**No step may put up an Altium dialog.** Every refusal below must answer
+without one, and `app_ping`'s `caught_exceptions` must not rise across
+it. Section 39 says how to read that counter around each section, and
+lists the few calls that are run on purpose to see whether they raise.
+
 If there is only time for some of it, the risk is not evenly spread.
 What separates the steps is whether the Altium property being written
 is already written somewhere in shipped code, because a property that
@@ -174,7 +179,7 @@ fails silently rather than loudly:
 | `lib_delete_footprint_primitives` | Removes from the wrong footprint, or takes pads with it | Probe the footprint first, delete one layer, probe again and compare pad count |
 | Library parameter delete | Matches zero and reports success | Delete a named parameter from a library symbol, then read the symbol's parameters |
 | Multi-part scope suffix | Returns part one's pins under another part's name | `lib_get_pin_list` on a multi-part symbol with `@2` and `@3`, and compare the counts |
-| Cross-document hints | The hint is appended to an error it does not apply to, or doubles up on a message that already names a tool | Focus a SchDoc and run `pcb_delete_object`. The refusal must name the PCB tool once, and read as one sentence |
+| Cross-document hints | The hint is appended to an error it does not apply to, or doubles up on a message that already names a tool | With NO PcbDoc open in any project, focus a SchDoc and run `pcb_delete_object`. The refusal must name the PCB tool once, and read as one sentence. (With exactly one PcbDoc open anywhere the call does not refuse: it opens that board and edits it) |
 | Refusals name the focused document | A wrong-document refusal says what is missing and not what is there, so the caller goes looking for whatever took the focus | Focus a SchLib and run `sch_place_components`. The refusal must name the .SchLib by file name only, no folder, and still carry the `lib_` hint once. Name the library something containing `lib_` and repeat: the hint must still appear |
 
 None of these can halt the polling loop the way an undeclared
@@ -285,7 +290,9 @@ app_ping
 ```
 
 Expect `altium_script_version` = `2026.10.11.01`, `version_match` =
-`true`, and `mcp_server_version` = `0.6.1`.
+`true`, and `mcp_server_version` = `0.6.1`. On a freshly started loop
+`caught_exceptions` is `0` and `last_caught` null (section 39): note both,
+since every later section is read against them.
 
 Those are two different versions and they fail differently.
 `altium_script_version` is the Pascal that Altium compiled;
@@ -313,7 +320,7 @@ three cases apart:
 | `fault` | What it means | Fix |
 |---|---|---|
 | `dead_loop` | no response and no heartbeat | dismiss any Altium error dialog, Stop, relaunch |
-| `stuck_handler` | keep-alives answered, one command never returned | Stop, relaunch |
+| `stuck_handler` | keep-alives answered, one command never returned | look for an Altium error dialog first: press OK and the call returns `INTERNAL_ERROR` (record the dialog text and `app_get_status`'s `in_flight` before pressing). No dialog: Stop, relaunch |
 | `corrupt_response` | Altium crashed mid-write | retry once, the bad file is already removed |
 
 Stop is the red button in the Script IDE (**Run > Stop**, `Ctrl+F3`,
@@ -338,6 +345,15 @@ It also ends in `ShowMessage`, so it cannot be reached over the bridge
 without splitting the summary out first.
 
 Expect `Failed: 0`. The log is written to the workspace directory.
+
+The self test no longer runs `stop_server`. It used to, and that call runs
+the save pass over EVERY open document (rewriting files nobody edited) and
+can meet Altium's own "A command is currently active" prompt before it
+stops the loop. Its contract is now executed offline from the real source
+by `tests/test_popup_free_core.py`. `App_GetActiveDocument`, which the self
+test does call, no longer raises when no schematic has been opened this
+session (it used to, on its schematic fallback). Read `caught_exceptions`
+before and after: it must not move.
 
 This runs 27 assertions over `StrToIeeeSymbol`, `IeeeSymbolToStr` and
 `StripChar` inside Altium's own engine. The values match what
@@ -378,9 +394,12 @@ already proved the value mapping.
 **The two failure shapes, and why the assignment is deliberately not
 wrapped in `Try/Except`:**
 
-* the property exists but rejects the value: the dispatcher catches it
-  and answers `INTERNAL_ERROR: Unhandled exception processing:
-  library.add_pins`. The loop keeps running.
+* the property exists but rejects the value: an Altium error dialog
+  appears FIRST (the engine shows the exception before any `Except`
+  runs). Note its text and press OK; the dispatcher then answers
+  `INTERNAL_ERROR: Unhandled exception processing: library.add_pins`,
+  `caught_exceptions` rises by 1 and `last_caught.where` is `dispatcher`.
+  The loop keeps running.
 * the property name is not real: an undeclared identifier faults where
   `Try/Except` cannot reach, and the polling loop stops. Recover with
   Detach and `StartMCPServer`.
@@ -453,7 +472,10 @@ pcb_apply_dnp_paste_exclusion(designators=["<from the apply reply>"],
 Regenerate and confirm the apertures come back.
 
 **Restore will refuse a bare `restore=True`**, and that refusal is the
-behaviour to verify, not a defect. Resolving a restore from the current
+behaviour to verify, not a defect. It is decided in Python before
+anything reaches Altium and is covered offline by
+`tests/test_dnp_paste_exclusion.py`, so it needs no live call of its own;
+run it only if the live session has time to spare. Resolving a restore from the current
 variant is only correct while the variant has not changed since the
 apply; when it has, a component excluded under the old variant keeps
 its aperture suppressed and nothing says so. Check that the refusal
@@ -995,9 +1017,16 @@ it used to put the body on the top layer and echo the bad name.
 Then the refusals, which cost nothing:
 
     pcb_place_3d_body  model_path C:\nope.step
-    pcb_place_3d_body  model_path <a .txt file>
 
-The first must be `FILE_NOT_FOUND` and the second `MODEL_LOAD_FAILED`.
+It must be `FILE_NOT_FOUND`. Then
+
+    pcb_place_3d_body  model_path <an existing .txt file>
+
+must be `MODEL_LOAD_FAILED`, with no dialog and `caught_exceptions`
+unchanged: the extension is refused (`Model3DExtLoadable`: STEP,
+Parasolid, SolidWorks part) BEFORE `ModelFactory_FromFilename` or the PCB
+transaction is reached, with the reply the factory's Nil branch gives.
+Whether that list is complete is section 39.4 probe P7.
 They are separated on purpose: the path is checked before anything is
 created, because `ModelFactory_FromFilename` on a missing file returns
 Nil and leaves an orphan body behind.
@@ -1185,9 +1214,12 @@ that they arrived:
 * On a board with internal planes, `board` lists `split_planes`, each
   with its layer, its net and its regions. A plane's net is read from
   there because `LayerObj.Net` on a stack layer faulted live as an
-  undeclared identifier. `pcb_set_plane_net` reads and writes that same
-  `LayerObj.Net`, so expect it to stop the polling loop the same way
-  until it is changed; do not run it on a board in use.
+  undeclared identifier. `pcb_set_plane_net` no longer touches
+  `LayerObj.Net` at all (2026.10.11.01): after its refusals it answers
+  `success: false`, `applied: false`, an empty `net_readback` and a note
+  pointing at the Layer Stack Manager, writes nothing and raises no
+  dialog. Tying a plane through the split-plane objects is unverified and
+  not attempted.
 * A part known to be locked reports `locked: true`.
 * On a board with poured polygons, a poured region or track in the
   `copper` section carries `pour` (the polygon's name) and `pour_net`
@@ -1398,10 +1430,10 @@ Run `align pads` on a footprint whose land is NOT centred on its origin
 (a connector), and confirm `body.bbox` centres on `frame.pads_bbox`
 instead.
 
-Finally the refusals: `align middle` answers `BAD_ALIGN` before anything
-is touched, and a `.txt` file as `model_path` with `replace true` answers
-`MODEL_LOAD_FAILED` and leaves the placeholders where they were (list
-the footprint to check).
+Finally the refusal: `align middle` answers `BAD_ALIGN` before anything
+is touched. The `.txt` file as `model_path` with `replace true` answers
+`MODEL_LOAD_FAILED` (placeholders left where they were) with no dialog:
+refused by extension before the transaction, as in section 15.
 
 ---
 
@@ -2994,6 +3026,149 @@ of a .PcbLib opened on its own.
     `written_by_bridge_record` (the record kept the edit) and its mtime
     moved. If the save is not declined while the command runs on this
     build, record that and skip.
+
+---
+
+## 39. Popup-free run (2026.10.11.01, UNVERIFIED-LIVE)
+
+**Why.** Altium's script engine shows an exception as a modal "press OK"
+dialog BEFORE the surrounding `Try/Except` runs, and the polling loop
+waits on it. This release stops the exception happening wherever an
+ordinary bad input used to raise one (check first: a version gate, a Nil
+test, a folder or file test, a syntax-and-range test before a
+conversion) and COUNTS what is left: every `Except` that is not a
+fault-only backstop now calls `RecordCaughtException`, and so does the
+dispatcher's catch-all.
+
+What carries the count (all new in this build):
+
+* `app_ping` answers `caught_exceptions` (catches this pump session; each
+  one is a dialog that fired, even one somebody clicked away) and
+  `last_caught` (`{where, command, request_id, at}`, or null).
+  `cast_errors` and `caught_exceptions` both start at 0 when the pump
+  starts.
+* `app_get_status` answers `in_flight` (the calls whose progress
+  heartbeat is on disk: `command`, `request_id`, `age_s`) and
+  `last_caught` (the last `_caught_exception` row of `activity.log`). Both
+  are read from files, so they answer while a dialog blocks Altium.
+* The status form shows `<command>  #<first 8 of the request id>  since
+  hh:nn:ss` while a call is in flight, and a stuck-handler timeout names
+  the in-flight command and says an Altium error dialog may be open
+  (pressing OK lets the handler finish with `INTERNAL_ERROR`).
+
+### 39.1 The counter starts clean
+
+    app_ping
+
+Right after `StartMCPServer`: `caught_exceptions` = `0`, `last_caught` =
+null, `cast_errors` = `0`. `app_get_status`: `in_flight` is empty (or
+holds only the ping itself) and `last_caught` is null on a fresh
+`activity.log`.
+
+### 39.2 Read the counters around EVERY section
+
+Before each section of this document, `app_ping` and write down
+`caught_exceptions` and `cast_errors`. After the section, ping again.
+**Any increase means a modal fired**, whether or not anyone saw it:
+record the section, the step, and `last_caught` (`where` names the site,
+`command` and `request_id` the call). The expected increase is 0 for
+every section, except a probe in 39.4 and step 2's first failure shape,
+which are listed because they may raise.
+
+### 39.3 Calls that used to raise and must not now
+
+Each must answer with no dialog and leave `caught_exceptions` unchanged.
+
+1. **No schematic server.** Restart Altium, open only a PcbDoc (no SchDoc
+   or SchLib this session), focus the Home page. `app_get_active_document`
+   answers (the board, or `{}`); `app_get_preferences` answers
+   `"schematic": null`; `app_exit_active_command` answers
+   `sch_post_process: false`.
+2. **A board path that cannot be a board.** `pcb_place_components` with
+   `board_path` = `C:\nope.PcbDoc`, then with the absolute path of an
+   existing `.SchDoc`. Each takes the same fallback a failed open always
+   took (it does NOT refuse: a bad `board_path` still lands on whichever
+   board the fallback finds, so use a scratch board).
+3. **A project that lists a board missing on disk.** Copy a scratch
+   project without its `.PcbDoc`, open it, focus a sheet, run
+   `app_get_preferences`: `"pcb": null` (or another open board).
+4. **Home page focused.** With a project holding a PcbDoc open and the
+   Home page focused, `app_get_preferences`. The view is not restored to
+   the Home page afterwards (there was never a document to restore).
+5. **A file into a missing folder.** `app_create_document kind=SCH
+   file_path=C:\no_such_dir\x.SchDoc add_to_project=false`: `saved:
+   false`, no Save As dialog, no error dialog.
+6. **A hand-edited config.** Stop the bridge, set
+   `poll_interval_active_ms` to `600000.0` in the workspace
+   `mcp_config.json`, start it again: no dialog, the default polling
+   speed. Put the file back.
+
+The conversion guards (`StrToIntDef`, `StrToFloatDef`, `LoadMCPConfig`)
+are executed offline against the real source by
+`tests/test_popup_free_core.py`; nothing here needs a value that would
+raise.
+
+### 39.4 Live probes: sites left counted, not guarded
+
+No conservative pre-check exists for these, so the `Try` stays and its
+`Except` records the site. Run each ONCE, on a scratch setup, with the
+39.2 readings around it, and record: dialog or not, the
+`caught_exceptions` change, `last_caught.where`, and the reply.
+
+| Probe | Site (`where`) | Setup and call | What settles it |
+|---|---|---|---|
+| P1 | `App_ExitActiveCommand:PCBServer.PostProcess` | Restart Altium, open ONLY a SchLib, `app_exit_active_command` | 0 = `PCBServer` answers with no board open; 1 = it raises and the loop now stops after the first (it used to raise 8 times); a stopped loop or `where` = `dispatcher` = an undeclared identifier, which no `Try` catches |
+| P1b | same | Open a PcbLib, close it, `app_exit_active_command` | `pcb_post_process: true` confirms a closed library leaves the server registered (why this site is NOT gated on an open PCB document) |
+| P2 | `dispatcher` (in `App_CreateDocument`) | `app_create_document kind=NOTAKIND file_path=<scratch>\x.dat add_to_project=false` | `CREATE_FAILED` = `OpenNewDocument` answers Nil, nothing to do; `INTERNAL_ERROR` + a dialog = it raises, and unknown kinds need a refusal |
+| P3 | `GetPCBBoardAnywhere:OwnerDocument` | 39.3 item 4 | 0 = the Nil test was enough; 1 = reading `OwnerDocument` itself raises on a non-document view |
+| P4 | `MechLayerFromNumber:LayerUtils.MechanicalLayer` | Any tool given the layer `Mechanical21` on a board or library (e.g. `pcb_get_mech_layer_names` on one using mechanical 17+) | 0 expected on AD26; on a pre-AD19 build, record the result (an undeclared `LayerUtils` would show as `dispatcher` or a stopped loop) |
+| P5 | `ReadMechKind:Kind` | Only on a build below AD19: `pcb_get_mech_layer_names` | kinds read -1 and nothing is counted (the read is gated off below 19) |
+| P6 | `App_CreateDocument:DoFileSave`, `App_CreateDocument:SaveObject` | 39.3 item 5, and the same with a folder that exists but is read-only | 0 confirms the folder test is the whole story; a count means a save raises in an existing folder |
+| P6b | `ResolvePCBBoard:OpenDocument`, `GetPCBBoardAnywhere:OpenDocument` | A 0-byte file renamed `scratch.PcbDoc`: pass it as `pcb_place_components` `board_path`, then list it in a scratch project and run `app_get_preferences` with a sheet focused | These are the residual opens of a board that IS on disk; 0 = Altium answers Nil for a broken file, 1 = it raises (a genuine fault, now counted rather than silent) |
+| P7 | (none: a guard's completeness) `Model3DExtLoadable` in `pcb_place_3d_body` and `lib_link_3d_model` | In Altium's own Place 3D Body dialog, try a `.wrl`, an `.igs` and an `.stl` model | Any that Altium loads must be ADDED to `Model3DExtLoadable` (the bridge now refuses it with `MODEL_LOAD_FAILED` before the call); none = the list is complete |
+
+The rows below are the per-file stages' sites (Library, Generic, PCB,
+Project), filled in at integration. A `<prop>` / `<id>` in a `where` is
+the property name and the schematic `ObjectId` the row carries, so the
+row itself names the pair that popped.
+
+| Probe | Site (`where`) | Setup and call | What settles it |
+|---|---|---|---|
+| P8 | `MarkLibDirty:CurrentSchComponent.GraphicallyInvalidate` | Fresh session; open a SchLib with a symbol selected in the editor and nothing created through the bridge; `lib_add_symbol_lines` on it | 0 = the editor's current component carries the member; 1 per call = it does not, and the invalidate needs the component narrowed first (this would have been a dialog on EVERY library edit) |
+| P9 | `SetOwnerPart:CurrentPartID`, `SetOwnerPart:DisplayMode`, `TargetLibComponentName:CurrentSchComponent.LibReference` | Same fresh session: `lib_add_pins` (two pins), then `lib_get_pin_list` | 0 = the editor's current component answers; a count = the un-narrowed reference lacks the member (the Lib_GetPinList measurement), and these reads need the component found by name instead |
+| P10 | (none: the held component's liveness) | `lib_create_symbol X`, then close and reopen that SchLib in the UI, then `lib_add_pins` | The pins land on the editor's CURRENT symbol, no dialog, no count. A dialog = `Client.GetDocumentByPath` hands back the same interface after a reopen, so `LastCreatedLibIsLive` cannot see it (record whether two lookups return the same object) |
+| P11 | `ApplyLabelFormat:write` | Scratch SchLib: `lib_set_label_formats ops=[{target: designator, orientation: 90}]`, then `[{target: designator, justification: 12}]` | 1 = an out-of-range ordinal raises, and both fields need a range refusal (0..3, 0..8); 0 = check with `lib_audit_styles` whether the value was stored as given |
+| P12 | `Lib_InstallLibrary:InstallLibrary`, `Lib_UninstallLibrary:UnInstallLibrary` | Install and uninstall a real scratch `.SchLib`; then install a RELATIVE name that does not exist; then uninstall a name that is installed under another spelling of its path | 0 for the real file; the relative and respelled cases are still asked and show whether either call raises (the absolute-missing and never-installed cases are refused before the call) |
+| P13 | `Lib_MoveFootprints:GetPCBLibraryByPath`, `Lib_CopyFootprint:GetPCBLibraryByPath` | `lib_copy_footprint` and `lib_move_footprints` into a destination `.PcbLib` that exists on disk but is NOT open | 0 = the lookup answers Nil for a closed library and the load route runs; 1 = it raises |
+| P14 | (none: the reader's source) | Save a SchLib, add a symbol through the bridge WITHOUT saving, then `lib_get_component_details` on it by index | The new symbol is absent = the component reader reads the FILE, as the `LibFileMissing` guards assume; present = it reads the open document, and those guards would lose components of an unsaved library |
+| P15 | `GetSchProperty:<prop>:<id>`, `SetSchProperty:<prop>:<id>`, `GetSchVertexProperty:VerticesCount:<id>` | Scratch sheet with one object of each type: `obj_query` and `obj_modify` for Name, FontId, LineWidth, Style, IOType, Alignment, TextColor, Justification, Width, IsSolid, AreaColor, Orientation; and LibReference, XSize, Electrical, VerticesCount on eLine, eBusEntry, eProbe, eParameterSet, eCompileMask | Each row names a pair to add to `SchPropAbsentOn` (or `SchObjectLacksVertexArray`); no rows = the denylists are complete for these names |
+| P16 | `Gen_HighlightNet:Selection:<id>`, `Gen_ClearHighlights:Selection:<id>`, `SetSchProperty:Selection:<id>` | `obj_select` on ePin, eSheetEntry and eParameter; `sch_highlight_net` on a net that reaches a sheet entry; `sch_clear_highlights` on a sheet with parts | A row names a type without `Selection`: skip it in the loops (and in `Gen_CopyObjects`, which sets Selection with no Try) |
+| P17 | `SetSchProperty:IsMirrored:<id>` | `obj_modify set='IsMirrored=false'` on eLabel, eNetLabel, eParameter, eNoERC, eLine, eImage, eTextFrame | A row adds that type to `SchObjectLacksIsMirrored` |
+| P18 | `Gen_WriteProjectFile:DM_ProjectFullPath`, `Gen_AddSheet:DM_ProjectFullPath`, `Gen_DeleteSheet:DM_ProjectFullPath`, `Gen_DeleteSheet:FocusedProjectFullPath` | With ONLY free documents open: `proj_add_sheet`, `proj_delete_sheet` with no `project_path`, and a sheet delete that refocuses | 0 = fault-only (expected). If `proj_add_sheet` builds its path from the text `Free Documents`, that is a separate correctness bug |
+| P19 | `Gen_GetConstraintGroups:DM_ConstraintGroupCount` | `sch_get_constraint_groups` on a sheet, then on a sheet that has constraint groups | No dialog (it used to raise on EVERY call: an ISch_Document has no DM_ members); on the second sheet the group and constraint reads answer |
+| P20 | `Gen_PlaceHarnessConnector:HarnessType` | `sch_place_harness_connector` with `harness_type` set | 1 = the member does not exist; drop the write |
+| P21 | `Gen_PlaceCrossSheetConnector:Side` | `sch_place_cross_sheet_connector` with `side=left`, then `side=right` | 1 = the member does not exist; drop the write |
+| P22 | `ProcessSchDocObjects:owner-remove` | `obj_delete object_type=eSheetEntry` with a filter matching one entry on a hierarchical sheet | 0 and the entry gone = removal through the owning symbol works; 1 = the owner refused and the document-level fallback ran |
+| P23 | `PCB_NormalizeVias:PreferedWidth` | `pcb_normalize_vias` on a scratch board with one free via | 1 = a base `IPCB_Rule` lacks the member: iterate the routing-via rules typed instead (now at most one dialog per rule, not per via) |
+| P24 | `PCB_PlaceEmbeddedBoard:XLocation`, `PCB_PlaceEmbeddedBoard:YLocation`, `PCB_PlaceEmbeddedBoard:DocumentPath`, `PCB_PlaceEmbeddedBoard:RowCount`, `PCB_PlaceEmbeddedBoard:ColCount`, `PCB_PlaceEmbeddedBoard:RowSpacing`, `PCB_PlaceEmbeddedBoard:ColSpacing`, `PCB_PlaceEmbeddedBoard:MirrorFlag` | One `pcb_place_embedded_board` call on a scratch board | Each row names a member `IPCB_EmbeddedBoard` lacks; for the locations, position the board with `MoveByXY` from its bounding rectangle instead |
+| P25 | `PCB_SetMechLayerKind:AddPair` | `pcb_set_mech_layer_kind` with a paired kind and `partner_layer` on two layers that are ALREADY paired | 0 = `AddPair` is idempotent; 1 = it raises on an existing pair, and the add needs a `PairDefined` check too |
+| P26 | `PCB_ModifyLayer:CopperThickness`, `PCB_ModifyLayer:DielectricType`, `PCB_ModifyLayer:DielectricHeight`, `PCB_ModifyLayer:DielectricConstant`, `PCB_ModifyLayer:DielectricMaterial`, `DielectricTypeToken:Dielectric` | `pcb_modify_layer` on Mechanical1 with `copper_thickness_mils`, and on TopSolder with `dielectric_constant` | A row names a member that layer kind lacks: refuse it for that kind up front |
+| P27 | `dispatcher` (in `PCB_CreateDesignRule`) | `pcb_create_design_rule` with `rule_type=solder_mask_expansion`, then `rule_type=vias_under_smd` | 1 = that rule type's factory or member is not scriptable: refuse it with `NOT_SCRIPTABLE` up front, as `pcb_set_via_soldermask_relief` does |
+| P28 | `GetPCBProperty:<prop>` | `obj_query object_type=eConnectionObject props=IsRedundant,Mode` | A row: delete that branch and drop the name from `IsKnownPCBProperty` / `KnownPCBPropertyList` |
+| P29 | `SetPCBProperty:<prop>` | `obj_modify` on a scratch region, `set='Kind=board_cutout'` | `SetPCBProperty:Kind` = the region Kind write is not scriptable: drop the write branch, keep the read |
+| P30 | `Proj_Create:ForceDirectories`, `Proj_Create:Rewrite` | `proj_create` over an existing READ-ONLY project stub in an existing folder | `Proj_Create:Rewrite` = the residual fault (read-only or locked stub) the folder and name checks cannot see; `ForceDirectories` should never count |
+| P31 | `Proj_ImportDocument:CopyFile` | With a project focused, `proj_import_document` with a `source_path` outside the project folder | A count + dialog = `CopyFile` is not in the binding: copy in Python (`shutil.copy2`) and check `FileExists` in Pascal. No count but no file at `dest_path` while the reply says success = it returns False: add a `FileExists(DestPath)` check |
+| P32 | (none: `PcbLibMayBeCurrent`) | Right after `app_create_document kind=PCBLIB`, with no other step between: `lib_create_footprint`, `lib_add_footprint_pad`, then `pcb_renumber_pads` | Both act on the new library. `NO_PCBLIB` here = the DM focus AND the open-document walk both missed a library that is current, and the gate needs widening |
+| P33 | (none: syntax check) | `audit_find_via_antennas` on a board with an internal plane | No dialog. A dialog per via and plane layer = `Via.IsConnectedToPlane[LayerId]` needs parentheses, not brackets (the docs show `( )`) |
+
+### 39.5 If a dialog does appear
+
+Do not press OK straight away. First call `app_get_status`: `in_flight`
+must name the command and request that are blocked, and the status form
+must show the same command, request id and start time. Then press OK:
+the call returns `INTERNAL_ERROR` (or the site's own reply),
+`caught_exceptions` rises by 1, and `last_caught.where` names the site or
+`dispatcher`. Record all of it, including the dialog's text.
 
 ---
 

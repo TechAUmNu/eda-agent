@@ -1032,10 +1032,14 @@ def test_the_stuck_handler_timeout_names_the_command_in_flight(
 # RELEASE_VERIFICATION section 39: every counted site has a live probe
 # ---------------------------------------------------------------------------
 
-#: The units this test holds to the rule. INTEGRATION: widen it to every
-#: .pas file once the other groups' sites fill section 39's P8+ rows.
-_COUNTED_UNITS = ("Main.pas", "Utils.pas", "Application.pas",
-                  "StatusForm.pas", "Dispatcher.pas", "SelfTest.pas")
+#: Every unit is held to the rule (widened at integration, once the
+#: per-file stages' sites filled section 39.4).
+_COUNTED_UNITS = tuple(sorted(
+    p.name for p in _ALTIUM.glob("*.pas") if p.name != "Altium_MCP.pas"))
+
+#: A literal ``where``, or the literal PREFIX of one built at run time
+#: (``'GetSchProperty:' + PropName + ...``): group 2 is the ``+``.
+_WHERE = re.compile(r"RecordCaughtException\('([^']+)'(\s*\+)?")
 
 
 def _section_39() -> str:
@@ -1046,18 +1050,31 @@ def _section_39() -> str:
     return m.group(0)
 
 
-def test_every_counted_site_has_a_live_probe_in_section_39():
-    sec = _section_39()
-    wheres = set()
+def _counted_wheres() -> tuple[set[str], set[str]]:
+    exact, prefixes = set(), set()
     for unit in _COUNTED_UNITS:
         code = strip_comments((_ALTIUM / unit).read_text(
             encoding="utf-8-sig", errors="replace"))
-        wheres.update(re.findall(r"RecordCaughtException\('([^']+)'\)", code))
-    assert "dispatcher" in wheres and len(wheres) >= 6, wheres
-    missing = sorted(w for w in wheres if f"`{w}`" not in sec)
+        for m in _WHERE.finditer(code):
+            (prefixes if m.group(2) else exact).add(m.group(1))
+    return exact, prefixes
+
+
+def test_every_counted_site_has_a_live_probe_in_section_39():
+    sec = _section_39()
+    exact, prefixes = _counted_wheres()
+    assert "dispatcher" in exact and len(exact) >= 40, exact
+    assert len(prefixes) >= 6, prefixes
+    assert len(_COUNTED_UNITS) >= 11, _COUNTED_UNITS
+    missing = sorted(w for w in exact if f"`{w}`" not in sec)
+    # A run-time where is probed by a row naming its literal prefix inside a
+    # code span, e.g. `GetSchProperty:<prop>:<id>`.
+    missing += sorted(w + "..." for w in prefixes if f"`{w}" not in sec)
     assert not missing, (
         f"these counted sites have no probe row in RELEASE_VERIFICATION "
         f"section 39: {missing}")
+    assert "P8+" not in sec and "INTEGRATE" not in sec, \
+        "the integration placeholder is still in section 39.4"
     assert "caught_exceptions" in sec and "in_flight" in sec
 
 

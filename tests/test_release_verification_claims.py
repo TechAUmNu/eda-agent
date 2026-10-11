@@ -213,8 +213,12 @@ def test_every_step_that_writes_a_property_is_ranked():
 # Step 35 (single-sheet object edits report a deferred write) changes only
 # the reply fields; the property writes obj_modify performs are unchanged
 # and long shipped.
+#
+# Step 39 (the popup-free run) writes nothing: it reads app_ping's
+# caught_exceptions around the other sections and runs a few probes whose
+# question is whether a call RAISES, which is the step's own subject.
 _STEPS_WITHOUT_A_PROPERTY = {"0", "1", "8", "9", "10", "19", "21", "29", "32",
-                             "33", "34", "35"}
+                             "33", "34", "35", "39"}
 
 
 def _step_headings() -> list[tuple[str, str]]:
