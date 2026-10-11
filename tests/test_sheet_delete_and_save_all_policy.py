@@ -335,7 +335,8 @@ def test_the_save_pass_can_skip_an_unmodified_library():
     assert "SaveSkippedPaths" in body, "a skip must be recorded, not silent"
     # One entry per file: a library open in two projects is reached twice.
     # Keyed by DocPathKey since 2026.10.11.02 (both slash spellings of one
-    # file were listed live); executed in test_live_2026_10_11_findings.py.
+    # file were listed live); executed in
+    # test_live_save_all_visits_a_file_once.py.
     dedup = _at(body, "If (Pos('|' + DocPathKey(DocPath) + '|', "
                       "'|' + DocPathKey(SaveSkippedPaths) + '|') = 0)")
     assert dedup < _at(body, "SaveSkipped := SaveSkipped + 1;"), (

@@ -2895,7 +2895,8 @@ Application.pas):
 
 **2026.10.11.02, after the 2026-10-11 live run** (results at the end of
 this section; the fixes, each with an executed test that fails on the
-first 2026-10-11 build, are in `tests/test_live_2026_10_11_findings.py`):
+first 2026-10-11 build, are in `tests/test_live_*.py`, one module per
+finding, sharing `tests/live_2026_10_11.py`):
 
 * **THE FLAG IS READ AS A REAL BOOLEAN (D1, the root cause).** Live, after
   `SetModified(True)`, `IServerDocument.Modified` read as NEITHER true NOR
