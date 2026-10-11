@@ -4812,6 +4812,20 @@ Begin
     Body := Nil;
     Model := Nil;
 
+    { A format the loader cannot read gets the Model = Nil reply BEFORE the  }
+    { transaction opens, instead of risking a raise inside it (a factory    }
+    { that raises on a file it cannot parse is a modal, then INTERNAL_ERROR }
+    { from the dispatcher). Model3DExtLoadable (Library.pas) is the list    }
+    { Lib_Link3DModel uses: STEP, Parasolid, SolidWorks part, the formats   }
+    { Altium's 3D body takes. Release run probe P7 confirms it.             }
+    If Not Model3DExtLoadable(ModelPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MODEL_LOAD_FAILED',
+            'Could not load a 3D model from ' + ModelPath
+            + '. The file exists, so it is the format Altium refused.');
+        Exit;
+    End;
+
     { NO Exit BETWEEN PreProcess AND PostProcess: a failure is recorded and    }
     { the rest skipped, so the Finally always closes the transaction.          }
     PCBServer.PreProcess;

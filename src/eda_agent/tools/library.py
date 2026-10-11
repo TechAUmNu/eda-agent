@@ -5306,8 +5306,15 @@ def register_library_tools(mcp):
              "font_id": <int>,               # optional
              "color":   <int>,               # optional, BGR-packed
              "is_hidden": False,             # optional
-             "orientation": <int>,           # optional, 0/90/180/270
-             "justification": <int>}         # optional
+             "orientation": <int>,           # optional, 0..3
+             "justification": <int>}         # optional, 0..8
+
+        ``orientation`` is Altium's quarter-turn ORDINAL (0 = 0, 1 = 90,
+        2 = 180, 3 = 270 degrees), written to the label as given, NOT a
+        degree count: 90 is out of range. ``justification`` is the
+        0..8 text-justification ordinal (0 = bottom-left ... 8 =
+        top-right). Out-of-range values are not refused here; how
+        Altium takes them is an open release-run probe.
 
         At least one style field must be set per op. Targets are
         ``"designator"``, ``"comment"``, or ``"parameter:<Name>"``.

@@ -331,8 +331,11 @@ def test_forget_never_compares_a_held_component_it_need_not():
 
 
 def _no_direct_global_writes():
+    # The two renames (Lib_BatchRename, and NoteLibComponentRenamed for
+    # obj_modify LibReference) update only the recorded NAME of a component
+    # that stays held; every set and every clear goes through the pair.
     allowed = {"RememberLibComponent", "ForgetRememberedLibComponent",
-               "Lib_BatchRename"}
+               "Lib_BatchRename", "NoteLibComponentRenamed"}
     bad = []
     for fname, body in _lib().items():
         if fname in allowed:

@@ -176,6 +176,9 @@ def _ns(ctx, bodies):
         "SetSheetSymbolText": lambda o, p, v: True,
         "SetSchComponentSubText": lambda o, p, v: None,
         "RecordCastError": lambda w: None,
+        # Library.pas: keeps the held component's recorded name true on a
+        # LibReference write (tests/test_popup_free_crossfile.py runs it).
+        "NoteLibComponentRenamed": lambda o, v: None,
     })
     return ns
 

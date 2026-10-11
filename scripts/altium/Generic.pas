@@ -981,7 +981,12 @@ Begin
                 Matched := False;
         End
         Else If PropName = 'Name'        Then Obj.Name := Value
-        Else If PropName = 'LibReference'       Then Obj.LibReference := Value
+        Else If PropName = 'LibReference'       Then
+        Begin
+            Obj.LibReference := Value;
+            { Keep the held library component's recorded name true. }
+            NoteLibComponentRenamed(Obj, Value);
+        End
         // SourceLibraryName is the design-cache field that records which
         // library a placed component came from. It is read in GetSchProperty
         // but had no write case, so obj_modify / batch_modify silently no-oped
@@ -1612,9 +1617,11 @@ Begin
         { Same guard as the sheet path: without a filter this would strip     }
         { every parameter off the symbol.                                     }
         If ReducedFilter = '' Then Exit;
-        Comp := LastCreatedLibComponent;
-        If Comp = Nil Then
-            Try Comp := SchDoc.CurrentSchComponent; Except Comp := Nil; End;
+        { GetTargetLibComponent (Library.pas): the held component while   }
+        { its library lives, else the editor's current symbol - the same  }
+        { answer as before, minus a held reference whose library closed,  }
+        { whose first member read in the iterator was the modal.          }
+        Comp := GetTargetLibComponent(SchDoc);
         RemoveMatchingParamsFromComponent(Comp, ReducedFilter, TotalMatched);
         Exit;
     End;

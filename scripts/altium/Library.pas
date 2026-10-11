@@ -269,6 +269,26 @@ Begin
         ForgetRememberedLibComponent(0);
 End;
 
+{ Comp was just renamed to NewName (obj_modify LibReference). If it is the   }
+{ held component, the recorded name must follow: FindLibComponentInMemory   }
+{ step 3 matches the held one by that name, so a stale name would answer    }
+{ the renamed symbol for its OLD name (a false NAME_EXISTS for a new symbol }
+{ of that name) and TargetLibComponentName would name it wrongly. Same      }
+{ order as ForgetLibComponentIf: a held reference whose library has gone is }
+{ dropped without a compare, and only a live one is compared.               }
+Procedure NoteLibComponentRenamed(Comp : ISch_GraphicalObject; NewName : String);
+Begin
+    If LastCreatedLibComponent = Nil Then Exit;
+    If Not LastCreatedLibIsLive(0) Then
+    Begin
+        ForgetRememberedLibComponent(0);
+        Exit;
+    End;
+    If Comp = Nil Then Exit;
+    If Comp = LastCreatedLibComponent Then
+        LastCreatedLibComponentName := NewName;
+End;
+
 { Resolve the target component for a Lib_Add* primitive helper.             }
 {                                                                              }
 { SchLib.CurrentSchComponent in DelphiScript reflects the editor's selected }

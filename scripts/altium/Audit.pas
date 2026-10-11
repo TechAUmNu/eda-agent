@@ -3679,7 +3679,12 @@ Begin
                     SpatIter := Board.SpatialIterator_Create;
                     Try
                         SpatIter.AddFilter_ObjectSet(MkSet(eTrackObject));
-                        SpatIter.AddFilter_IPCB_LayerSet(MkSet(Track.Layer));
+                        { AddFilter_LayerSet takes a MkSet SET;          }
+                        { AddFilter_IPCB_LayerSet takes an IPCB_LayerSet }
+                        { OBJECT, and handing it a set raised a type     }
+                        { cast - a MODAL per track end - before the      }
+                        { Except (the PCB_FilletCorners measurement).    }
+                        SpatIter.AddFilter_LayerSet(MkSet(Track.Layer));
                         SpatIter.AddFilter_Area(
                             PX - Tol, PY - Tol, PX + Tol, PY + Tol);
                         Obj := SpatIter.FirstPCBObject;

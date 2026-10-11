@@ -3964,9 +3964,16 @@ def register_pcb_tools(mcp):
         not have is refused with ``UNKNOWN_LAYER`` rather than silently
         retargeting another layer.
 
-        The assignment is READ BACK before reporting. If the read-back
-        disagrees the call answers ``success: false`` with ``applied:
-        false`` and a note, and the board is NOT saved.
+        THIS BUILD CANNOT TIE THE NET YET. The layer object's ``Net``
+        member is not part of the script binding (it faulted live as an
+        undeclared identifier, which Altium shows as a modal error
+        dialog), so the bridge no longer touches it. After the checks
+        above the call always answers ``success: false`` with ``applied:
+        false``, an empty ``net_readback`` and a note pointing at the
+        Layer Stack Manager (the plane row's Net Name column); nothing is
+        written and the board is NOT saved. The refusals above
+        (``NOT_A_PLANE``, ``UNKNOWN_LAYER``, ``NET_NOT_FOUND``) still
+        tell you whether the request itself was valid.
 
         Args:
             layer: Internal plane layer, e.g. "InternalPlane1" or the name
