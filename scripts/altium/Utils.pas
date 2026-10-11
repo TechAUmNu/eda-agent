@@ -1345,6 +1345,14 @@ End;
 { identifier faults uncatchably at RUN time, so an unknown version (-1) or an }
 { older build answers '' and GetLayerString keeps 'Unknown'. '' when nothing  }
 { verifies.                                                                   }
+{ A DELIBERATE DEPARTURE FROM THE GATE RULE above AltiumMajorVersion ('-1     }
+{ must never suppress anything'). That rule keeps a FEATURE working on a      }
+{ build whose version string does not parse; here the gated-off answer is     }
+{ the ef2d79b behaviour ('Unknown'), so suppressing costs one echo, while the }
+{ exposure is wider than MechLayerFromNumber's (ungated, but reached only     }
+{ when a caller names Mechanical17+): GetLayerString runs for EVERY object on }
+{ an unnamed layer in the bulk reads, where an undeclared LayerUtils would   }
+{ fault on each one. Review of 0493c42 offered both; the cheaper failure won. }
 Function MechLayerNameAbove16(Layer : TLayer) : String;
 Var
     First, Hit : TLayer;

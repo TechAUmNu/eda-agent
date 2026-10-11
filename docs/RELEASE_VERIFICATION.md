@@ -2905,26 +2905,49 @@ finding, sharing `tests/live_2026_10_11.py`):
   test the NEGATION never fired either (no `save_hint` on `obj_modify`,
   `mark.problem` empty, the generic close refusal). The likely value is a
   Boolean variant holding 1 rather than True's -1. Every read of the flag,
-  in every unit, now goes through `ModifiedFlagOf` (Main.pas): Nil is
-  false, a read that raises is true (doubt writes, counted), anything else
-  is true when it is NOT 0 - a numeric compare, never `If X` or `= True`.
-  It uses operators only: no Variant routine (`VarType`, `VarIsNull`, ...)
-  has ever run in this codebase, and an undeclared one would fault inside
-  the polling loop. So on this build a bridge mark is expected to read
-  `marked_modified: true`.
+  in every unit, now goes through `ModifiedFlagState` / `ModifiedFlagOf`
+  (Main.pas), built ONLY from the two forms that ran live on this very value
+  with 0 catches, `If X` and `If Not X`: `If X` = modified, `If Not X` =
+  clean, NEITHER (the odd value) = modified (doubt writes), a read that
+  raises = unreadable (counted under `ModifiedFlagState:Modified`). Save,
+  close and count gates treat odd and unreadable alike as modified; the
+  MARK, a read-back, claims `marked_modified: true` only for modified or
+  odd, and for an unreadable flag says `false` with problem "the modified
+  flag could not be read". No compare of a Boolean with an integer or with
+  the `True` / `False` literals runs on a normal document (no such compare
+  exists anywhere else in these units, and a raise there would be a modal
+  on every edit and every save walk), and no Variant routine (`VarType`,
+  `VarIsNull`, ...) is used: none has ever run in this codebase, and an
+  undeclared one would fault inside the polling loop. So on this build a
+  bridge mark is expected to read `marked_modified: true`. The live run's
+  PcbDoc and PcbLib flags already read true (`modified_read: true` at close
+  in the 39 run), so D1 looks SCHEMATIC-side: the diagnostic below is most
+  informative on a SchDoc mark (step 2's free sheet).
 * **The diagnostic that settles it.** Every `mark` now carries `flag_raw`
-  (`-1`, `0`, `1`, `other`; `unreadable`; empty when nothing was found)
-  and `flag_tests` (`if=..,not=..,eq_true=..,eq_false=..,ne_zero=..`, 1 or
-  0 each), read right after `SetModified(True)`. A normal True reads
-  `-1` / `if=1,not=0,eq_true=1,eq_false=0,ne_zero=1`; the hypothesis reads
-  `1` / `if=0,not=0,eq_true=0,eq_false=0,ne_zero=1`. Record both on the
-  first mark of the run.
+  and `flag_tests`, read right after `SetModified(True)`. Both run the two
+  proven tests first; the numeric and literal compares - forms NEVER run in
+  this codebase - run only when neither proven test held, i.e. only on the
+  odd value, each inside its own counted `Try`. `flag_raw`: `true` / `false`
+  when `If X` / `If Not X` held; for the odd value `1`, `-1`, `0` or `other`
+  by numeric compare, `odd` when that compare raised; `unreadable` when the
+  read raised; empty when nothing was found. `flag_tests`: `if=..,not=..`
+  always; for the odd value also `,ne_zero=..,eq_true=..,eq_false=..`
+  (each appended as soon as known), `,raised` if one of those raised. A
+  normal True reads `true` / `if=1,not=0`; the 1-hypothesis reads `1` /
+  `if=0,not=0,ne_zero=1,eq_true=0,eq_false=0`. Record both on the first
+  SchDoc mark of the run, and a PcbLib mark's for comparison.
 * **One visit per file per save pass (D2).** The walk reached a file once
   per listing (a project member and the Free Documents listing of the same
   file, or two slash spellings) and, after writing it on the first visit,
   filed it under `skipped_unmodified` / `libraries_skipped` on the second.
   A file the pass has attempted is not looked at again, and the skip list
-  is deduped by `DocPathKey`. A document whose flag reads modified is
+  is deduped by `DocPathKey`. That early exit applies INSIDE an
+  `app_save_all` walk only: `proj_save` / `proj_close save=true` after an
+  `app_save_all` write an edit made since (the first cut of this fix
+  skipped every file the last save-all had written, review of 0c4f20e). A
+  listed document with no absolute file name (unnamed, or a bare name) is
+  never written - `DoFileSave('')` could only ask where - and is listed in
+  `free_documents_not_reached`. A document whose flag reads modified is
   written by the walk itself, so it is NOT listed in
   `written_by_bridge_record` (that list is for recorded documents whose
   flag reads clean) - with D1 fixed that is the normal case.
@@ -2966,10 +2989,14 @@ of a .PcbLib opened on its own.
    path lookup reaches a different object from the focused tab; both false
    means `IServerDocument.Modified` does not reflect `SetModified` on this
    Altium at all. Either way the reply now SAYS so (`save_hint`), and step 4
-   is the safety net. On 2026.10.11.02 a false here, with `flag_raw` `0`,
-   means the raw value compares equal to 0 (an unassigned value would; the
-   helper cannot tell it from False without a Variant routine) - record
-   `flag_tests` exactly.
+   is the safety net. On 2026.10.11.02 a false here comes with `flag_raw`
+   `false` (`If Not X` held: the flag really reads False after
+   `SetModified(True)`, or an unassigned value, which converts to False) or
+   `unreadable` (the problem then says "the modified flag could not be
+   read" and `caught_exceptions` rose by one under
+   `ModifiedFlagState:Modified`) - record `flag_tests` exactly. A modal on
+   the FIRST mark, or a `dispatcher` catch, would mean a compare in the
+   readers raised outside its `Try` - not expected: none runs outside one.
 3. **Read-back on a PROJECT document.** In the scratch project copy, the same
    `obj_modify` with `scope` `doc:<sheet path>` while ANOTHER document is
    focused: `marked_modified: true`, `mark.found: true`, `mark.via: path`,
@@ -3124,7 +3151,7 @@ as `only_modified=true` instead (marked SUB). `caught_exceptions` 0,
 | Step | Verdict | What happened | On 2026.10.11.02 |
 |---|---|---|---|
 | 1 | PASS | version matched | re-check the new version |
-| 2 | FAIL | `marked_modified` false, `modified_read` false with `*` on the tab, NO `save_hint`, `mark.problem` empty; the no-match half passed | D1 fixed (`ModifiedFlagOf`); record `flag_raw` / `flag_tests` |
+| 2 | FAIL | `marked_modified` false, `modified_read` false with `*` on the tab, NO `save_hint`, `mark.problem` empty; the no-match half passed | D1 fixed (`ModifiedFlagState` / `ModifiedFlagOf`, `If X` / `If Not X` only); record `flag_raw` / `flag_tests` |
 | 3 | FAIL | doc: and project scope marks read false (`sheets_marked` 0); a ONE-op batch refused `unknown_object_type`; a two-op batch counted its no-match op in `ops_mark_not_read_back` | D1, D3, D4 fixed |
 | 4 | PARTIAL (SUB) | the edit WAS written (height on disk), but the reply listed the file in `skipped_unmodified` + `libraries_skipped` with the "NOT written" warning, `written_by_bridge_record` `[]`; the repeat passed | D2 fixed; the "reads false" precondition is not expected to arise (D1) |
 | 5 | PARTIAL (SUB) | `bridge_edited` true / `written_to_disk` true, then false: pass; the within-2 s save wrote it but listed it in `libraries_skipped` | D2 fixed |
@@ -3229,8 +3256,12 @@ Each must answer with no dialog and leave `caught_exceptions` unchanged.
    "Warning - File type not recognised." inside the call - not an
    exception, so uncounted - and the bridge blocks until somebody presses
    OK. The "as before" was that same modal (the eec334c build behaved
-   identically). Count the components on the scratch board before and
-   after: unchanged.
+   identically) - and WORSE after OK: the call went on, `OpenDocument` still
+   opened the library, and the library then read `modified: true` with
+   `bridge_edited: true`, i.e. `pcb_place_components` very likely placed its
+   part INTO THE LIBRARY. A modal followed by a silent write into a library
+   is why this is a refusal, not an open and not a fallback. Count the
+   components on the scratch board before and after: unchanged.
 3. **A project that lists a board missing on disk.** Copy a scratch
    project without its `.PcbDoc`, open it, focus a sheet, run
    `app_get_preferences`: `"pcb": null` (or another open board).
@@ -3318,7 +3349,7 @@ row itself names the pair that popped.
 | P31 | `Proj_ImportDocument:CopyFile` | With a project focused, `proj_import_document` with a `source_path` outside the project folder | A count + dialog = `CopyFile` is not in the binding: copy in Python (`shutil.copy2`). The copy is now checked by its OUTCOME (`FileExists(DestPath)` after the call, `COPY_FAILED` if absent), so a `CopyFile` that returns False quietly answers `COPY_FAILED` like one that raises, and the missing-folder refusal before it is that same reply whichever it is. Success with no file at `dest_path` would be a bug in the outcome check |
 | P32 | (none: `PcbLibMayBeCurrent`, `PcbLibMayBeCurrentAt`) | (a) Right after `app_create_document kind=PCBLIB`, with no other step between: `lib_create_footprint`, `lib_add_footprint_pad`, then `pcb_renumber_pads`. (b) Focus a SchLib in the UI, then `lib_reload_library` on a SAVED `.PcbLib` (its programmatic close and reopen can leave the DM focus on the SchLib, stale rather than Nil) | (a) All act on the new library. (b) `reloaded: true` (`PcbLibMayBeCurrentAt` accepts a PcbLib open at `library_path` whatever the focus says). `NO_PCBLIB` in either = the DM focus AND the open-document walk (and, in b, `GetDocumentByPath` at the path) all missed a library that is current, and the gate needs widening |
 | P33 | (none: syntax check) | `audit_find_via_antennas` on a board with an internal plane | No dialog. A dialog per via and plane layer = `Via.IsConnectedToPlane[LayerId]` needs parentheses, not brackets (the docs show `( )`) |
-| P34 | `ModifiedFlagOf:Modified`, `ModifiedFlagRaw:Modified`, `ModifiedFlagTests:Modified` | Every bridge edit (section 38 step 2 is enough): the mark reads the flag through these three | 0 expected: the property read never raised live, and the readers only compare its value. A count = the read itself raised; the mark then reads true (doubt writes) and `flag_raw` says `unreadable` |
+| P34 | `ModifiedFlagState:Modified`, `ModifiedFlagRaw:Modified`, `ModifiedFlagTests:Modified`, `ModifiedFlagRaw:compare`, `ModifiedFlagTests:compare` | Every bridge edit (section 38 step 2 on the free SchDoc is the one that matters): the mark reads the flag through these readers | 0 expected for the `:Modified` sites: the read and the two proven tests (`If X`, `If Not X`) never raised live. A `:Modified` count = the read raised; the mark then reads `marked_modified: false` with problem "the modified flag could not be read" and `flag_raw` `unreadable` (saves still write it: doubt writes). The `:compare` sites run ONLY on the odd value (neither proven test held) and are the first time a Boolean is compared with an integer or a literal here: a count there = the engine refuses that compare - record it; `flag_raw` then reads `odd` and `flag_tests` ends `,raised`, and nothing else is affected. A modal or a `dispatcher` catch on the first mark or save would mean a compare ran OUTSIDE these `Try`s - none does |
 
 ### 39.5 If a dialog does appear
 
@@ -3347,7 +3378,7 @@ around every call up to the modal below.
 | Item | Verdict | What happened | On 2026.10.11.02 |
 |---|---|---|---|
 | 39.3 item 2, `C:\nope.PcbDoc` and an existing `.SchDoc` | PASS | each took the fallback to the focused scratch board (one part placed on it), no dialog | unchanged |
-| 39.3 item 2, an existing `.PcbLib` | FAIL | Altium's own modal "Warning - File type not recognised." inside `OpenDocument('PCB', ...)`; `in_flight` named the call, `caught_exceptions` unreadable while blocked, the library file unchanged. RUN STOPPED; the owner pressed OK | refused `BOARD_PATH_IS_LIBRARY` before any open (B1); the item's text corrected |
+| 39.3 item 2, an existing `.PcbLib` | FAIL | Altium's own modal "Warning - File type not recognised." inside `OpenDocument('PCB', ...)`; `in_flight` named the call, `caught_exceptions` unreadable while blocked, the library file unchanged while blocked. RUN STOPPED; the owner pressed OK. AFTER OK the library was open and read `modified: true`, `bridge_edited: true`: the part very likely went INTO the library | refused `BOARD_PATH_IS_LIBRARY` before any open (B1); the item's text corrected |
 | 39.3 item 2, a missing `.PcbLib` | NOT RUN | stopped | refused the same way |
 | 39.3 item 5 / P6 first half | PASS | `saved: false`, no folder created, no dialog | unchanged |
 | P2 | PASS | `OpenNewDocument` answered Nil for `NOTAKIND` (`CREATE_FAILED`), no dialog | unchanged |
