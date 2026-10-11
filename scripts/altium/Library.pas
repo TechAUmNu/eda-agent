@@ -113,14 +113,160 @@ Begin
     If Obj = Nil Then Exit;
     If Component <> Nil Then
     Begin
-        Try Obj.OwnerPartId := Component.CurrentPartID; Except End;
-        Try Obj.OwnerPartDisplayMode := Component.DisplayMode; Except End;
+        { Component is GetTargetLibComponent's answer: the held reference,   }
+        { now dropped before it can go stale (LastCreatedLibIsLive and the   }
+        { ForgetLibComponentIf hooks), or the editor's CurrentSchComponent,  }
+        { which may not carry its members (the Lib_GetPinList measurement). }
+        { No member test exists that cannot itself raise, so a catch here is }
+        { COUNTED for the live probe rather than guarded.                   }
+        Try Obj.OwnerPartId := Component.CurrentPartID;
+        Except RecordCaughtException('SetOwnerPart:CurrentPartID'); End;
+        Try Obj.OwnerPartDisplayMode := Component.DisplayMode;
+        Except RecordCaughtException('SetOwnerPart:DisplayMode'); End;
     End
     Else
     Begin
         Try Obj.OwnerPartId := 1; Except End;
         Try Obj.OwnerPartDisplayMode := 0; Except End;
     End;
+End;
+
+{..............................................................................}
+{ THE HELD LIBRARY COMPONENT, AND WHEN IT IS DEAD.                             }
+{                                                                              }
+{ LastCreatedLibComponent outlives the command that set it, because the       }
+{ polling loop does. When its library is closed, or the component is removed  }
+{ (lib_delete_component, lib_move_components, an overwrite), the reference    }
+{ points at nothing, and the next member read on it - LibReference,           }
+{ CurrentPartID - raises. Altium shows that as a MODAL before any Except     }
+{ runs (Main.pas measured one caller sitting on it for over two minutes), so  }
+{ the cure is never to read a member off a reference that may be dead: these  }
+{ decide with pointer and string compares only.                               }
+{..............................................................................}
+
+{ Which library a SchLib is, as a key: its absolute path when it reports one   }
+{ or when its bare name is carried by exactly ONE listed document (never a    }
+{ namesake guess: DocNameCount counts before ResolveLoadedDocPath answers);   }
+{ otherwise the bare name itself, which names the file but never locates it.  }
+{ '' when the library reports no name at all.                                 }
+Function RememberedLibKey(SchLib : ISch_Lib) : String;
+Var
+    DocName, Full : String;
+Begin
+    Result := '';
+    If SchLib = Nil Then Exit;
+    DocName := '';
+    Try DocName := SchLib.DocumentName; Except DocName := ''; End;
+    DocName := Trim(DocName);
+    If DocName = '' Then Exit;
+    Result := DocName;
+    If LooksAbsolutePath(DocName) Then Exit;
+    If DocNameCount(DocName) = 1 Then
+    Begin
+        Full := ResolveLoadedDocPath(DocName);
+        If LooksAbsolutePath(Full) Then Result := Full;
+    End;
+End;
+
+{ Hold Comp as the component the Lib_Add* helpers target, recording WHICH      }
+{ library it lives in (LastCreatedLibPath) and the document object open for   }
+{ that library now (LastCreatedLibDoc), so liveness can later be asked        }
+{ without touching the component.                                             }
+Procedure RememberLibComponent(SchLib : ISch_Lib; Comp : ISch_Component; Name : String);
+Begin
+    LastCreatedLibComponent := Comp;
+    LastCreatedLibComponentName := Name;
+    LastCreatedLibPath := '';
+    LastCreatedLibDoc := Nil;
+    If Comp = Nil Then
+    Begin
+        LastCreatedLibComponentName := '';
+        Exit;
+    End;
+    LastCreatedLibPath := RememberedLibKey(SchLib);
+    If LooksAbsolutePath(LastCreatedLibPath) Then
+        LastCreatedLibDoc := Client.GetDocumentByPath(LastCreatedLibPath);
+End;
+
+Procedure ForgetRememberedLibComponent(Dummy : Integer);
+Begin
+    LastCreatedLibComponent := Nil;
+    LastCreatedLibComponentName := '';
+    LastCreatedLibDoc := Nil;
+    LastCreatedLibPath := '';
+End;
+
+{ Is SchLib the library the held component was recorded in? True whenever    }
+{ either side is unknown, which is the answer every caller gave before the    }
+{ library was recorded at all; False only when the two keys name different   }
+{ files (absolute keys by path, otherwise by file name).                     }
+Function SameLibAsRemembered(SchLib : ISch_Lib) : Boolean;
+Var
+    Key : String;
+Begin
+    Result := True;
+    If LastCreatedLibPath = '' Then Exit;
+    Key := RememberedLibKey(SchLib);
+    If Key = '' Then Exit;
+    If LooksAbsolutePath(Key) And LooksAbsolutePath(LastCreatedLibPath) Then
+        Result := (DocPathKey(Key) = DocPathKey(LastCreatedLibPath))
+    Else
+        Result := (DocNameKey(Key) = DocNameKey(LastCreatedLibPath));
+End;
+
+{ Can the held component still be used? CONSERVATIVE: False only on evidence  }
+{ that its library has gone, never on a doubt.                                }
+{ * Nothing recorded, or only a bare name: True, today's answer.             }
+{ * Client.GetDocumentByPath(absolute path) = Nil: the library is closed, and }
+{   closing frees every component in it. False.                              }
+{ * A DIFFERENT document object is open at that path now: the library was    }
+{   closed and reopened (the RefreshSchLibFromDisk case, done from outside    }
+{   the bridge). False - BUT ONLY when two lookups in a row return the SAME   }
+{   object, i.e. when this build hands back stable document interfaces. If   }
+{   it wraps each call afresh, identity proves nothing and the answer stays  }
+{   True (today's). Needs-probe: the live run confirms which.                }
+Function LastCreatedLibIsLive(Dummy : Integer) : Boolean;
+Var
+    DocNow, DocAgain : IServerDocument;
+Begin
+    Result := False;
+    If LastCreatedLibComponent = Nil Then Exit;
+    Result := True;
+    If Not LooksAbsolutePath(LastCreatedLibPath) Then Exit;
+    DocNow := Client.GetDocumentByPath(LastCreatedLibPath);
+    If DocNow = Nil Then
+    Begin
+        Result := False;
+        Exit;
+    End;
+    If LastCreatedLibDoc = Nil Then Exit;
+    If DocNow = LastCreatedLibDoc Then Exit;
+    DocAgain := Client.GetDocumentByPath(LastCreatedLibPath);
+    If DocAgain = DocNow Then Result := False;
+End;
+
+{ Drop the held component when Comp (about to be removed from SchLib) is it:  }
+{ the same reference, or the same recorded name in the same library. Call it  }
+{ BEFORE every RemoveSchComponent that can remove the held one: once removed, }
+{ FindLibComponentInMemory would hand it back by name, and the first member   }
+{ read on it would be the modal.                                              }
+{ ORDER MATTERS: a component held from ANOTHER library is never the one being }
+{ removed, so it is left alone without even a pointer compare; one whose     }
+{ library has gone is dropped without one. The compare is made only against  }
+{ a reference whose library is open here, so it never touches a freed one on }
+{ the recorded-path route.                                                   }
+Procedure ForgetLibComponentIf(SchLib : ISch_Lib; Comp : ISch_Component; Name : String);
+Begin
+    If LastCreatedLibComponent = Nil Then Exit;
+    If Not SameLibAsRemembered(SchLib) Then Exit;
+    If Not LastCreatedLibIsLive(0) Then
+    Begin
+        ForgetRememberedLibComponent(0);
+        Exit;
+    End;
+    If ((Comp <> Nil) And (Comp = LastCreatedLibComponent))
+        Or ((Name <> '') And (Name = LastCreatedLibComponentName)) Then
+        ForgetRememberedLibComponent(0);
 End;
 
 { Resolve the target component for a Lib_Add* primitive helper.             }
@@ -134,13 +280,52 @@ End;
 { Use the global LastCreatedLibComponent we set in Lib_CreateSymbol         }
 { instead, falling back to CurrentSchComponent only if nothing has been     }
 { created in this session.                                                  }
+{                                                                              }
+{ A held component whose library has gone is DROPPED here, before any caller  }
+{ can read a member off it (LastCreatedLibIsLive), and the lookup falls       }
+{ through exactly as it does when nothing was held. CurrentSchComponent is   }
+{ read only off a schematic LIBRARY: an ISch_Sheet has no such member, and   }
+{ reading it there was the modal (Lib_SplitPinFunctions with a sheet         }
+{ focused); Nil instead is the callers' NO_COMPONENT reply.                  }
 Function GetTargetLibComponent(SchLib : ISch_Lib) : ISch_Component;
 Begin
+    Result := Nil;
+    If (LastCreatedLibComponent <> Nil) And (Not LastCreatedLibIsLive(0)) Then
+        ForgetRememberedLibComponent(0);
     Result := LastCreatedLibComponent;
-    If Result = Nil Then
+    If Result <> Nil Then Exit;
+    If SchLib = Nil Then Exit;
+    If SchLib.ObjectId <> eSchLib Then Exit;
+    Result := SchLib.CurrentSchComponent;
+End;
+
+{ The NAME of the component GetTargetLibComponent would answer, without ever  }
+{ reading it back off the held reference: the recorded name is what           }
+{ FindLibComponentInMemory matches the held component by, so looking it up   }
+{ resolves the same component while it lives (and nothing once it has gone). }
+{ Only the editor's CurrentSchComponent is asked for LibReference, as today; }
+{ that read is the MarkLibDirty probe, so a catch is counted.                 }
+Function TargetLibComponentName(SchLib : ISch_Lib) : String;
+Var
+    Cur : ISch_Component;
+Begin
+    Result := '';
+    If (LastCreatedLibComponent <> Nil) And (Not LastCreatedLibIsLive(0)) Then
+        ForgetRememberedLibComponent(0);
+    If LastCreatedLibComponent <> Nil Then
     Begin
-        If SchLib <> Nil Then
-            Result := SchLib.CurrentSchComponent;
+        Result := LastCreatedLibComponentName;
+        Exit;
+    End;
+    If SchLib = Nil Then Exit;
+    If SchLib.ObjectId <> eSchLib Then Exit;
+    Cur := SchLib.CurrentSchComponent;
+    If Cur = Nil Then Exit;
+    Try
+        Result := Cur.LibReference;
+    Except
+        RecordCaughtException('TargetLibComponentName:CurrentSchComponent.LibReference');
+        Result := '';
     End;
 End;
 
@@ -217,10 +402,16 @@ Begin
     { component too, and process pending paint messages so the new state     }
     { surfaces immediately.                                                  }
     Try SchLib.GraphicallyInvalidate; Except End;
+    { NEEDS PROBE, not guarded: the Lib_GetPinList measurement says a        }
+    { component taken from CurrentSchComponent may not carry its methods,    }
+    { and no test of that exists that cannot itself raise. The catch is     }
+    { COUNTED so the live run shows whether every edit pops this modal.      }
     Try
         If SchLib.CurrentSchComponent <> Nil Then
             SchLib.CurrentSchComponent.GraphicallyInvalidate;
-    Except End;
+    Except
+        RecordCaughtException('MarkLibDirty:CurrentSchComponent.GraphicallyInvalidate');
+    End;
     Try Application.ProcessMessages; Except End;
 End;
 
@@ -370,8 +561,7 @@ Begin
     { reference held from creation stops pointing at anything. Dropping   }
     { it here is what keeps LookupLibComponent from handing a caller a    }
     { component that no longer exists.                                    }
-    LastCreatedLibComponent := Nil;
-    LastCreatedLibComponentName := '';
+    ForgetRememberedLibComponent(0);
 
     ResetParameters;
     AddStringParameter('ObjectKind', 'Document');
@@ -441,9 +631,18 @@ Begin
     { The name is compared against the one recorded at the time, NOT read }
     { back off the interface. See LastCreatedLibComponentName in Main for }
     { what a property read on a freed component does to the session.      }
+    { And ONLY while it lives, in THIS library: a held component whose     }
+    { library closed is dropped (its first member read would be the modal),  }
+    { and one recorded in another library is not this library's - copying X }
+    { from A to B used to find A's X here and answer NAME_EXISTS for B.     }
     If (LastCreatedLibComponent <> Nil) And
        (LastCreatedLibComponentName = Name) Then
-        Result := LastCreatedLibComponent;
+    Begin
+        If Not LastCreatedLibIsLive(0) Then
+            ForgetRememberedLibComponent(0)
+        Else If SameLibAsRemembered(SchLib) Then
+            Result := LastCreatedLibComponent;
+    End;
 End;
 
 { LookupLibComponent - the index, then the walk, then a reopen.               }
@@ -642,8 +841,7 @@ Begin
             Try Component.PartCount := PartCount; Except End;
 
         SchLib.CurrentSchComponent := Component;
-        LastCreatedLibComponent := Component;
-        LastCreatedLibComponentName := Name;
+        RememberLibComponent(SchLib, Component, Name);
 
         // Refresh the library editor view so the new component is visible.
         Try SchLib.GraphicallyInvalidate; Except End;
@@ -874,6 +1072,23 @@ Begin
     End;
 End;
 
+{ A COMPONENT READER ON A FILE THAT IS NOT THERE. CreateLibCompInfoReader /  }
+{ ReadAllComponentInfo read the library FILE (Lib_GetComponents), and the    }
+{ bridge authors libraries unsaved, so an open .SchLib often has no file     }
+{ yet; SafeSchLibPath passes a missing .SchLib through unchanged and the     }
+{ reader then raises, which Altium shows as a modal before any Except runs.  }
+{ True only for an ABSOLUTE path that is not on disk: '' (an IntLib with no  }
+{ source found) and a relative path keep their existing routes. A caller    }
+{ that sees True proceeds exactly as for a reader with no components, which }
+{ is all a reader of a missing file can yield.                              }
+Function LibFileMissing(LibPath : String) : Boolean;
+Var
+    P : String;
+Begin
+    P := Trim(SafeSchLibPath(LibPath));
+    Result := (P <> '') And LooksAbsolutePath(P) And (Not FileExists(P));
+End;
+
 { OtherLibComponentName - the name of any component in this library other     }
 { than Name, or '' when there is none.                                        }
 {                                                                              }
@@ -885,10 +1100,16 @@ Var
     Reader : ILibCompInfoReader;
     Info : IComponentInfo;
     I, N : Integer;
+    DocName : String;
 Begin
     Result := '';
     Reader := Nil;
-    Try Reader := SchServer.CreateLibCompInfoReader(SafeSchLibPath(SchLib.DocumentName)); Except End;
+    DocName := '';
+    Try DocName := SchLib.DocumentName; Except DocName := ''; End;
+    { Candidates come from the FILE; a library not saved yet has none, the  }
+    { same answer as an empty reader (ReachLibPartOne's existing note).     }
+    If LibFileMissing(DocName) Then Exit;
+    Try Reader := SchServer.CreateLibCompInfoReader(SafeSchLibPath(DocName)); Except End;
     If Reader = Nil Then Exit;
     Try
         Try Reader.ReadAllComponentInfo; Except End;
@@ -1017,8 +1238,7 @@ Begin
     If Component = Nil Then Exit;
 
     SchLib.CurrentSchComponent := Component;
-    LastCreatedLibComponent := Component;
-    LastCreatedLibComponentName := Name;
+    RememberLibComponent(SchLib, Component, Name);
 
     { Reset PartID + DisplayMode so subsequent Lib_AddSymbol* calls write     }
     { their primitives onto a VISIBLE normal-mode part. Without this, after a }
@@ -6063,6 +6283,19 @@ Begin
         Result := Result + JsonNull('bbox');
 End;
 
+{ A model file ModelFactory_FromFilename can load: the STEP, Parasolid and    }
+{ SolidWorks part formats Altium's 3D body takes. Anything else (a .wrl, an }
+{ .stl, a renamed file) raised inside the PreProcess transaction - a modal - }
+{ where the Model = Nil branch would have answered MODEL_LOAD_FAILED.       }
+Function Model3DExtLoadable(Path : String) : Boolean;
+Var
+    Ext : String;
+Begin
+    Ext := UpperCase(ExtractFileExt(Trim(Path)));
+    Result := (Ext = '.STEP') Or (Ext = '.STP') Or (Ext = '.X_T')
+        Or (Ext = '.X_B') Or (Ext = '.SLDPRT');
+End;
+
 { Lib_Link3DModel - attach a 3D STEP model to a PcbLib FOOTPRINT.              }
 {                                                                              }
 { A 3D model in Altium is geometry that lives on the footprint as an          }
@@ -6342,6 +6575,16 @@ Begin
     PY2 := 0;
     Body := Nil;
     Model := Nil;
+
+    { A format the loader cannot read gets the Model = Nil reply BEFORE the  }
+    { transaction opens, instead of raising inside it (Model3DExtLoadable). }
+    If Not Model3DExtLoadable(ModelPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MODEL_LOAD_FAILED',
+            'Could not load a 3D model from ' + ModelPath
+            + '. Nothing was removed or added.');
+        Exit;
+    End;
 
     { NO Exit BETWEEN PreProcess AND PostProcess. A failure is recorded and  }
     { the remaining steps are skipped, so the Finally always closes the      }
@@ -7211,6 +7454,14 @@ Begin
     Result := False;
     LowerQuery := LowerCase(Query);
 
+    { A library with no file on disk (named but missing, or open and never  }
+    { saved) contributes no matches, as an empty reader would.              }
+    If LibFileMissing(LibPath) Then
+    Begin
+        Result := True;
+        Exit;
+    End;
+
     LibReader := SchServer.CreateLibCompInfoReader(SafeSchLibPath(LibPath));
     If LibReader = Nil Then Exit;
 
@@ -7518,6 +7769,16 @@ Begin
 
         { Read Altium's own copy of the name at this position. }
         WantName := '';
+        { No file on disk: no position exists, the reply an empty reader    }
+        { gives.                                                             }
+        If LibFileMissing(LibPath) Then
+        Begin
+            CompNum := 0;
+            ErrCode := 'INDEX_OUT_OF_RANGE';
+            ErrMsg := 'component_index ' + IntToStr(Idx) + ' out of range (0..'
+                + IntToStr(CompNum - 1) + ')';
+            Exit;
+        End;
         LibReader := SchServer.CreateLibCompInfoReader(SafeSchLibPath(LibPath));
         If LibReader = Nil Then
         Begin
@@ -7693,7 +7954,11 @@ Begin
     AliasName := '';
     PartCount := 1;
     FoundInfo := False;
-    LibReader := SchServer.CreateLibCompInfoReader(SafeSchLibPath(LibPath));
+    { No file on disk (the normal read-back right after authoring an unsaved }
+    { library): the no-reader route, description from the live component.   }
+    LibReader := Nil;
+    If Not LibFileMissing(LibPath) Then
+        LibReader := SchServer.CreateLibCompInfoReader(SafeSchLibPath(LibPath));
     If LibReader <> Nil Then
     Begin
         Try
@@ -8144,6 +8409,17 @@ Begin
                 SchLib.RemoveSchComponent(Component);
                 Component.LibReference := NewName;
                 SchLib.AddSchComponent(Component);
+                { The held component survives a rename under its NEW name:   }
+                { matching it by the old one would hand a renamed symbol     }
+                { back for a name it no longer carries. Only one held in    }
+                { THIS library and still live is compared at all (see       }
+                { ForgetLibComponentIf for why the order matters).           }
+                If (LastCreatedLibComponent <> Nil)
+                    And SameLibAsRemembered(SchLib)
+                    And LastCreatedLibIsLive(0)
+                    And ((Component = LastCreatedLibComponent)
+                        Or (OldName = LastCreatedLibComponentName)) Then
+                    LastCreatedLibComponentName := NewName;
                 Inc(Renamed);
             End;
         Finally
@@ -8615,15 +8891,7 @@ Begin
       depending on, and stops disturbing, the current selection. }
     WantName := ExtractJsonValue(Params, 'component_name');
     If WantName = '' Then
-    Begin
-        Component := GetTargetLibComponent(SchLib);
-        If Component <> Nil Then
-            Try
-                WantName := Component.LibReference;
-            Except
-                WantName := '';
-            End;
-    End;
+        WantName := TargetLibComponentName(SchLib);
 
     If WantName = '' Then
     Begin
@@ -8822,6 +9090,10 @@ Begin
             Exit;
         End;
         SchServer.ProcessControl.PreProcess(DestLib, '');
+        { Drop the held reference first if this is it: once removed, the next    }
+        { by-name lookup would hand it back and its first member read is the    }
+        { modal (see ForgetLibComponentIf).                                     }
+        ForgetLibComponentIf(DestLib, Existing, NewName);
         DestLib.RemoveSchComponent(Existing);
         SchServer.ProcessControl.PostProcess(DestLib, 'Edit');
         Overwrote := True;
@@ -8861,8 +9133,7 @@ Begin
     Except End;
 
     DestLib.CurrentSchComponent := NewComp;
-    LastCreatedLibComponent := NewComp;
-    LastCreatedLibComponentName := NewName;
+    RememberLibComponent(DestLib, NewComp, NewName);
     Try DestLib.GraphicallyInvalidate; Except End;
     MarkLibDirty(DestLib);
 
@@ -9401,14 +9672,21 @@ Begin
     { in document order; for each name we load the live ISch_Component via }
     { GetState_SchComponentByLibRef to read its designator/comment/parameter}
     { style records. This is the same pattern Lib_GetComponents uses.        }
-    LibReader := SchServer.CreateLibCompInfoReader(SafeSchLibPath(LibPath));
-    If LibReader = Nil Then
+    { No file on disk: nothing to enumerate, the same reply as an empty   }
+    { reader. READER_FAILED stays for a reader that cannot be made.      }
+    LibReader := Nil;
+    If Not LibFileMissing(LibPath) Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'READER_FAILED',
-            'Failed to create library reader for ' + LibPath);
-        Exit;
+        LibReader := SchServer.CreateLibCompInfoReader(SafeSchLibPath(LibPath));
+        If LibReader = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'READER_FAILED',
+                'Failed to create library reader for ' + LibPath);
+            Exit;
+        End;
     End;
 
+    If LibReader <> Nil Then
     Try
         LibReader.ReadAllComponentInfo;
         NumComps := LibReader.NumComponentInfos;
@@ -9667,6 +9945,12 @@ Begin
         SchEndModify(Lbl);
         Result := 1;
     Except
+        { NEEDS PROBE, not guarded. An out-of-enum Orientation (TRotationBy90 }
+        { is 0..3, and the Python docstring offers 0/90/180/270) or          }
+        { Justification (0..8) is the suspected raise, but whether the write  }
+        { raises or silently stores the ordinal is not measured, and a range  }
+        { refusal would turn the second into a failure. Counted instead.      }
+        RecordCaughtException('ApplyLabelFormat:write');
         Result := -1;
     End;
 End;
@@ -9800,13 +10084,20 @@ Begin
             { Bulk mode: walk library via CompInfoReader, same enumeration as }
             { Lib_GetComponents and Lib_AuditStyles.                            }
             Scope := 'bulk';
-            LibReader := SchServer.CreateLibCompInfoReader(SafeSchLibPath(LibPath));
-            If LibReader = Nil Then
+            { No file on disk: nothing to enumerate, the same reply as an empty   }
+            { reader. READER_FAILED stays for a reader that cannot be made.      }
+            LibReader := Nil;
+            If Not LibFileMissing(LibPath) Then
             Begin
-                Result := BuildErrorResponse(RequestId, 'READER_FAILED',
-                    'Failed to create library reader for ' + LibPath);
-                Exit;
+                LibReader := SchServer.CreateLibCompInfoReader(SafeSchLibPath(LibPath));
+                If LibReader = Nil Then
+                Begin
+                    Result := BuildErrorResponse(RequestId, 'READER_FAILED',
+                        'Failed to create library reader for ' + LibPath);
+                    Exit;
+                End;
             End;
+            If LibReader <> Nil Then
             Try
                 LibReader.ReadAllComponentInfo;
                 NumComps := LibReader.NumComponentInfos;
@@ -10063,13 +10354,20 @@ Begin
             Else
             Begin
                 Scope := 'bulk';
-                LibReader := SchServer.CreateLibCompInfoReader(SafeSchLibPath(LibPath));
-                If LibReader = Nil Then
+                { No file on disk: nothing to enumerate, the same reply as an empty   }
+                { reader. READER_FAILED stays for a reader that cannot be made.      }
+                LibReader := Nil;
+                If Not LibFileMissing(LibPath) Then
                 Begin
-                    Result := BuildErrorResponse(RequestId, 'READER_FAILED',
-                        'Failed to create library reader for ' + LibPath);
-                    Exit;
+                    LibReader := SchServer.CreateLibCompInfoReader(SafeSchLibPath(LibPath));
+                    If LibReader = Nil Then
+                    Begin
+                        Result := BuildErrorResponse(RequestId, 'READER_FAILED',
+                            'Failed to create library reader for ' + LibPath);
+                        Exit;
+                    End;
                 End;
+                If LibReader <> Nil Then
                 Try
                     LibReader.ReadAllComponentInfo;
                     NumComps := LibReader.NumComponentInfos;
@@ -10670,6 +10968,7 @@ Var
     Iter : ISch_Iterator;
     Pin : ISch_Pin;
     Processed : Integer;
+    WantName : String;
 Begin
     SchLib := SchServer.GetCurrentSchDocument;
     If SchLib = Nil Then
@@ -10677,7 +10976,22 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_SCHLIB', 'No schematic library is active');
         Exit;
     End;
-    Component := GetTargetLibComponent(SchLib);
+    { RESOLVED THROUGH THE LIBRARY, never straight off CurrentSchComponent:  }
+    { SchIterator_Create on a component taken from there raised 'Undeclared  }
+    { identifier' (measured, Lib_GetPinList), as a modal. The name comes     }
+    { from TargetLibComponentName and FindLibComponentInMemory resolves it   }
+    { (never the reopening lookup: SchLib is edited below). On a SHEET there }
+    { is no library to look in, and GetTargetLibComponent answers the held   }
+    { component as before, or Nil instead of the raising member read.       }
+    Component := Nil;
+    If SchLib.ObjectId = eSchLib Then
+    Begin
+        WantName := TargetLibComponentName(SchLib);
+        If WantName <> '' Then
+            Component := FindLibComponentInMemory(SchLib, WantName);
+    End
+    Else
+        Component := GetTargetLibComponent(SchLib);
     If Component = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_COMPONENT', 'No current library component');
@@ -10758,15 +11072,7 @@ Begin
     { SchIterator_Create is undeclared on a component fetched that way.       }
     WantName := ExtractJsonValue(Params, 'component_name');
     If WantName = '' Then
-    Begin
-        Component := GetTargetLibComponent(SchLib);
-        If Component <> Nil Then
-            Try
-                WantName := Component.LibReference;
-            Except
-                WantName := '';
-            End;
-    End;
+        WantName := TargetLibComponentName(SchLib);
     If WantName = '' Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_COMPONENT',
@@ -11178,13 +11484,46 @@ Begin
         Exit;
     End;
     Ok := False;
-    Try
-        IntegratedLibraryManager.InstallLibrary(Path);
-        Ok := True;
-    Except End;
+    { An ABSOLUTE path with no file behind it cannot be installed; asking    }
+    { raised (a modal) and the reply was installed:false. Answer that        }
+    { without asking. A relative path goes ahead as before.                  }
+    If Not (LooksAbsolutePath(Trim(Path)) And (Not FileExists(Trim(Path)))) Then
+        Try
+            IntegratedLibraryManager.InstallLibrary(Path);
+            Ok := True;
+        Except
+            RecordCaughtException('Lib_InstallLibrary:InstallLibrary');
+        End;
     Result := BuildSuccessResponse(RequestId,
         '{"installed":' + BoolToJsonStr(Ok) + ',"library_path":"'
         + EscapeJsonString(Path) + '"}');
+End;
+
+{ Could Path be an installed library? False only when the installed list was  }
+{ READ and no entry carries Path's file name - the case UnInstallLibrary has  }
+{ nothing to act on and raises. An unreadable list or entry answers True, so  }
+{ the call goes ahead exactly as before. A file-NAME match, not a path match, }
+{ so a path spelled differently from the stored one is never refused.         }
+Function InstalledLibNameKnown(Path : String) : Boolean;
+Var
+    I, N : Integer;
+    P, Want : String;
+    Unread : Boolean;
+Begin
+    Result := True;
+    Want := DocNameKey(Path);
+    If Want = '' Then Exit;
+    N := -1;
+    Try N := IntegratedLibraryManager.InstalledLibraryCount; Except N := -1; End;
+    If N < 0 Then Exit;
+    For I := 0 To N - 1 Do
+    Begin
+        P := '';
+        Unread := False;
+        Try P := IntegratedLibraryManager.InstalledLibraryPath(I); Except Unread := True; End;
+        If Unread Or (DocNameKey(P) = Want) Then Exit;
+    End;
+    Result := False;
 End;
 
 Function Lib_UninstallLibrary(Params : String; RequestId : String) : String;
@@ -11204,10 +11543,16 @@ Begin
         Exit;
     End;
     Ok := False;
-    Try
-        IntegratedLibraryManager.UnInstallLibrary(Path);
-        Ok := True;
-    Except End;
+    { Not installed (no installed entry even carries the file name): the   }
+    { call raised and the reply was uninstalled:false. Answer that without  }
+    { asking (InstalledLibNameKnown).                                       }
+    If InstalledLibNameKnown(Path) Then
+        Try
+            IntegratedLibraryManager.UnInstallLibrary(Path);
+            Ok := True;
+        Except
+            RecordCaughtException('Lib_UninstallLibrary:UnInstallLibrary');
+        End;
     Result := BuildSuccessResponse(RequestId,
         '{"uninstalled":' + BoolToJsonStr(Ok) + ',"library_path":"'
         + EscapeJsonString(Path) + '"}');
@@ -11305,7 +11650,10 @@ Begin
         { expensive call here and the caller can decline it. -1 says not  }
         { asked, which is not the same as an empty library.               }
         CompCount := -1;
-        If WantCounts Then
+        { An installed library whose FILE has since gone: GetComponentCount  }
+        { opens it, raised, and left -1. Leave -1 without asking. Entries    }
+        { that are not plain files (relative or server paths) ask as before. }
+        If WantCounts And (Not (LooksAbsolutePath(LibPath) And (Not FileExists(LibPath)))) Then
         Begin
             Try CompCount := IntegratedLibraryManager.GetComponentCount(LibPath); Except End;
         End;
@@ -11390,6 +11738,10 @@ Begin
     End;
 
     SchServer.ProcessControl.PreProcess(SchLib, '');
+    { Drop the held reference first if this is it: once removed, the next    }
+    { by-name lookup would hand it back and its first member read is the    }
+    { modal (see ForgetLibComponentIf).                                     }
+    ForgetLibComponentIf(SchLib, Component, CompName);
     SchLib.RemoveSchComponent(Component);
     SchServer.ProcessControl.PostProcess(SchLib, 'Delete component');
     MarkLibDirty(SchLib);
@@ -11501,8 +11853,7 @@ Begin
         SchServer.ProcessControl.PostProcess(SchLib, 'Rename component');
     End;
     SchLib.GraphicallyInvalidate;
-    LastCreatedLibComponent := Component;
-    LastCreatedLibComponentName := NewName;
+    RememberLibComponent(SchLib, Component, NewName);
     MarkLibDirty(SchLib);
 
     { VERIFY BOTH DIRECTIONS. A rename is only done if the new name       }
@@ -12872,7 +13223,11 @@ Begin
         NewComp.LibReference := Name;
 
         SchServer.ProcessControl.PreProcess(DestLib, '');
-        If Existing <> Nil Then Try DestLib.RemoveSchComponent(Existing); Except End;
+        If Existing <> Nil Then
+        Begin
+            ForgetLibComponentIf(DestLib, Existing, Name);
+            Try DestLib.RemoveSchComponent(Existing); Except End;
+        End;
         DestLib.AddSchComponent(NewComp);
         { REGISTER IT IN THE DESTINATION, or the move does not reach disk.
           Same defect as the copy path: the component is added to a library
@@ -12889,6 +13244,7 @@ Begin
         If DeleteFromSource Then
         Begin
             SchServer.ProcessControl.PreProcess(SourceLib, '');
+            ForgetLibComponentIf(SourceLib, SourceComp, Name);
             Try SourceLib.RemoveSchComponent(SourceComp); Except End;
             SchServer.ProcessControl.PostProcess(SourceLib, 'Move component');
         End;
@@ -12914,6 +13270,24 @@ Begin
         + ',"skipped":' + IntToStr(Skipped)
         + ',"failed":' + IntToStr(Failed) + '}';
     Result := BuildSuccessResponse(RequestId, RespJson);
+End;
+
+{ Can PCBServer.LoadPCBLibraryByPath be handed Path without raising on an     }
+{ ordinary bad input? A .PcbLib that is not ABSOLUTE-and-missing. A missing  }
+{ file or another document kind (a .SchLib passed by mistake) raised, as a   }
+{ modal, and the handler then answered its NO_PCBLIB 'Failed to open ...'    }
+{ reply; False sends it to that reply directly. GetPCBLibraryByPath (already }
+{ open) is tried first by every caller, so an open unsaved library never     }
+{ reaches this.                                                              }
+Function PcbLibLoadable(Path : String) : Boolean;
+Var
+    P : String;
+Begin
+    P := Trim(Path);
+    Result := False;
+    If UpperCase(ExtractFileExt(P)) <> '.PCBLIB' Then Exit;
+    If LooksAbsolutePath(P) And (Not FileExists(P)) Then Exit;
+    Result := True;
 End;
 
 { Lib_MoveFootprints - bulk copy (+ optional delete) of footprints between two  }
@@ -12958,16 +13332,23 @@ Begin
     End;
 
     SourceLib := Nil;
-    Try SourceLib := PCBServer.GetPCBLibraryByPath(SourcePath); Except End;
-    If SourceLib = Nil Then Try SourceLib := PCBServer.LoadPCBLibraryByPath(SourcePath); Except End;
+    { NEEDS PROBE: whether GetPCBLibraryByPath raises for a library that is not }
+    { loaded (the normal case for a destination). No guard that cannot lose an  }
+    { open library exists, so a catch is counted.                               }
+    Try SourceLib := PCBServer.GetPCBLibraryByPath(SourcePath);
+    Except RecordCaughtException('Lib_MoveFootprints:GetPCBLibraryByPath'); End;
+    If (SourceLib = Nil) And PcbLibLoadable(SourcePath) Then
+        Try SourceLib := PCBServer.LoadPCBLibraryByPath(SourcePath); Except End;
     If SourceLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'Failed to open source PCB library at ' + SourcePath);
         Exit;
     End;
     DestLib := Nil;
-    Try DestLib := PCBServer.GetPCBLibraryByPath(DestPath); Except End;
-    If DestLib = Nil Then Try DestLib := PCBServer.LoadPCBLibraryByPath(DestPath); Except End;
+    Try DestLib := PCBServer.GetPCBLibraryByPath(DestPath);
+    Except RecordCaughtException('Lib_MoveFootprints:GetPCBLibraryByPath'); End;
+    If (DestLib = Nil) And PcbLibLoadable(DestPath) Then
+        Try DestLib := PCBServer.LoadPCBLibraryByPath(DestPath); Except End;
     If DestLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'Failed to open destination PCB library at ' + DestPath);
@@ -13065,8 +13446,10 @@ Begin
     SourceLib := Nil;
     If SourceLibPath <> '' Then
     Begin
-        Try SourceLib := PCBServer.GetPCBLibraryByPath(SourceLibPath); Except End;
-        If SourceLib = Nil Then Try SourceLib := PCBServer.LoadPCBLibraryByPath(SourceLibPath); Except End;
+        Try SourceLib := PCBServer.GetPCBLibraryByPath(SourceLibPath);
+        Except RecordCaughtException('Lib_CopyFootprint:GetPCBLibraryByPath'); End;
+        If (SourceLib = Nil) And PcbLibLoadable(SourceLibPath) Then
+            Try SourceLib := PCBServer.LoadPCBLibraryByPath(SourceLibPath); Except End;
     End
     Else
         SourceLib := PCBServer.GetCurrentPCBLibrary;
@@ -13092,8 +13475,10 @@ Begin
     Else
     Begin
         DestLib := Nil;
-        Try DestLib := PCBServer.GetPCBLibraryByPath(DestLibPath); Except End;
-        If DestLib = Nil Then Try DestLib := PCBServer.LoadPCBLibraryByPath(DestLibPath); Except End;
+        Try DestLib := PCBServer.GetPCBLibraryByPath(DestLibPath);
+        Except RecordCaughtException('Lib_CopyFootprint:GetPCBLibraryByPath'); End;
+        If (DestLib = Nil) And PcbLibLoadable(DestLibPath) Then
+            Try DestLib := PCBServer.LoadPCBLibraryByPath(DestLibPath); Except End;
         If DestLib = Nil Then
         Begin
             Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'Failed to open destination PCB library at ' + DestLibPath);
@@ -13598,6 +13983,19 @@ End;
 
 { Join two mechanical layers and give the PAIR its kind.                      }
 {                                                                              }
+{ A build KNOWN to predate mechanical layer kinds (AD17/AD18: Utils'          }
+{ ReadMechKind records LayerObject.Kind faulting there). Board.MasterLayerStack, }
+{ LayerObject.Kind and the layer-pair kind are the members it lacks, and each   }
+{ raised as a modal. An unknown version (-1) is never 'known to predate', so   }
+{ such a build behaves exactly as before (AltiumMajorVersion's gate rule).     }
+Function MechKindsUnsupported(Dummy : Integer) : Boolean;
+Var
+    V : Integer;
+Begin
+    V := AltiumMajorVersion(0);
+    Result := (V >= 0) And (V < 19);
+End;
+
 { AddPair APPENDS WITHOUT CHECKING, so calling it for a pair that already      }
 { exists leaves a duplicate behind rather than returning the existing one.     }
 { Repeated sweeps over one library left fourteen pairs where four were         }
@@ -13626,9 +14024,14 @@ Begin
     Try PairIdx := MechPairs.AddPair(TopL, BotL); Except PairIdx := -1; End;
     If PairIdx < 0 Then Exit;
 
-    Try MechPairs.SetState_LayerPairKind(PairIdx) := PairKind; Except End;
+    { Not asked on a build without pair kinds: both raised there and left  }
+    { KindBack -1, which reads as 'will not report', not as a refusal.     }
     KindBack := -1;
-    Try KindBack := MechPairs.LayerPairKind(PairIdx); Except KindBack := -1; End;
+    If Not MechKindsUnsupported(0) Then
+    Begin
+        Try MechPairs.SetState_LayerPairKind(PairIdx) := PairKind; Except End;
+        Try KindBack := MechPairs.LayerPairKind(PairIdx); Except KindBack := -1; End;
+    End;
     { A build that will not report the pair kind back must not read as a    }
     { failure, so only a value that came back DIFFERENT counts as refused.  }
     Result := (KindBack = PairKind) Or (KindBack < 0);
@@ -13730,7 +14133,8 @@ Begin
     { and the kind write then reports that it did not take rather than   }
     { failing the whole call.                                             }
     MasterStack := Nil;
-    Try MasterStack := Board.MasterLayerStack; Except MasterStack := Nil; End;
+    If Not MechKindsUnsupported(0) Then
+        Try MasterStack := Board.MasterLayerStack; Except MasterStack := Nil; End;
 
     { Where layer PAIRS live. A paired kind cannot be set without one. }
     MechPairs := Nil;
@@ -14061,7 +14465,11 @@ Begin
 
                         { Last resort: the legacy object, for a build with }
                         { no MasterLayerStack at all.                       }
-                        If (KindBack <> KindId) And (MechObj = Nil) Then
+                        { Not on a build known to have no kinds: the write   }
+                        { and the read-back raised there, and KindBack stays  }
+                        { -1, the 'kind did not take' report.                 }
+                        If (KindBack <> KindId) And (MechObj = Nil)
+                            And (Not MechKindsUnsupported(0)) Then
                         Begin
                             Try LayerObj.Kind := KindId; Except End;
                             KindBack := ReadMechKind(LayerObj);
