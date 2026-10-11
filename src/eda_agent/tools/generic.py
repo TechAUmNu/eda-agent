@@ -1077,10 +1077,15 @@ def register_generic_tools(mcp):
         if not op_strings:
             return {"error": "No valid operations provided", "operations_processed": 0}
 
+        # A TERMINATING '~~' on every payload, so ONE op is framed too: a
+        # bridge before 2026.10.11.02 picked its legacy positional parser
+        # for a payload with no '~~' and answered unknown_object_type for
+        # every one-op batch (live 2026-10-11). The parser skips the empty
+        # op after the last separator.
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "generic.batch_modify",
-            {"operations": "~~".join(op_strings)},
+            {"operations": "~~".join(op_strings) + "~~"},
         )
         return result
 

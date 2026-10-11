@@ -2875,7 +2875,16 @@ Begin
     ResultJson := '';
     ResultsJson := '';
     Remaining := Operations;
-    UseTilde := Pos('~~', Operations) > 0;
+    { TILDE FRAMING WHENEVER THE PAYLOAD IS key=value FRAMED (live           }
+    { 2026-10-11). The client joins ops with '~~', so ONE op has none, and   }
+    { 'no ~~' picked the legacy positional parser: every one-op batch came   }
+    { back unknown_object_type with object_type 'object_type=eSchComponent'. }
+    { The legacy form is positional ('active_doc;eSchComponent;...'), so a   }
+    { payload that opens with 'scope=' or names 'object_type=' is the tilde  }
+    { form whatever its op count.                                            }
+    UseTilde := (Pos('~~', Operations) > 0)
+        Or (UpperCase(Copy(Trim(Operations), 1, 6)) = 'SCOPE=')
+        Or (Pos('OBJECT_TYPE=', UpperCase(Operations)) > 0);
 
     { Clear the property-write diagnostics buffer so this call only       }
     { surfaces issues raised by THIS batch, not anything left over.       }
@@ -2988,6 +2997,10 @@ Begin
             { '' where the helper reports none). It was dropped here, so a   }
             { batch could not show a mark that did not take (2026-10-10).    }
             MarkedOp := ExtractJsonValue(OpResult, 'marked_modified');
+            { An op that matched nothing changed nothing and marked nothing: }
+            { its row says null and it is not a mark that failed to read back }
+            { (live 2026-10-11: a no-match row read false and was counted).   }
+            If OpMatched = 0 Then MarkedOp := '';
             If MarkedOp = 'false' Then Inc(MarksUnread);
             TotalMatched := TotalMatched + OpMatched;
             If Pos('"success":false', OpResult) > 0 Then
