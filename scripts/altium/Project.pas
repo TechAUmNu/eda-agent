@@ -2210,7 +2210,11 @@ Var
     NewDesText, TmpPrefix, TmpStr : String;
     AX, AY, BX, BY, ADoc, BDoc : Integer;
     ShouldSwap : Boolean;
-    TmpObj : ISch_Component;
+    { Held as the BASE type, in and out of CompList, and narrowed only by  }
+    { a copy after retrieval (Obj below): the PCB side measured a         }
+    { TInterfaceList item assigned straight into a derived type as an     }
+    { oleaut32 access violation, and holding the base type is its cure.  }
+    TmpObj : ISch_GraphicalObject;
 Begin
     Order := ExtractJsonValue(Params, 'order');
     If Order = '' Then Order := 'down_then_across';
@@ -2314,7 +2318,7 @@ Begin
                         End
                         Else
                         Begin
-                            CompList.Add(Comp);
+                            CompList.Add(Obj);   { the base reference: see TmpObj }
                             Prefixes.Add(ExtractDesignatorPrefix(Comp.Designator.Text));
                             XCoords.Add(IntToStr(CoordToMils(Comp.Location.X)));
                             YCoords.Add(IntToStr(CoordToMils(Comp.Location.Y)));
@@ -2409,7 +2413,9 @@ Begin
 
             NewDesText := TmpPrefix + IntToStr(CounterVal);
             Try
-                Comp := CompList.Items[I];
+                Obj := CompList.Items[I];
+                Comp := Nil;
+                If Obj <> Nil Then Comp := Obj;
                 If Comp <> Nil Then
                 Begin
                     SchBeginModify(Comp);

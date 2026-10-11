@@ -20,9 +20,13 @@ does, on the 'no' branch, exactly what its Except branch did:
   bridge has just authored.
 * install / uninstall / component counts, PcbLib loads, 3D model formats
   and mechanical kinds on builds that predate them ask first too.
-* Where no guard can be conservative (MarkLibDirty, SetOwnerPart, the
-  label write, GetPCBLibraryByPath) the catch is COUNTED with
-  RecordCaughtException for the live probe.
+* Where no guard can be conservative (the label write,
+  GetPCBLibraryByPath) the catch is COUNTED with RecordCaughtException for
+  the live probe. MarkLibDirty, SetOwnerPart and TargetLibComponentName
+  were counted too until 2026-10-11, when the live run showed their read
+  off CurrentSchComponent is the engine's 'Undeclared identifier' HALT,
+  which no Except sees: they no longer read that reference at all
+  (tests/test_live_editor_component_is_never_read.py).
 
 Every test EXECUTES the real Pascal (whole routines, or the exact source
 text of a handler's statements) through tests/pascal_eval.py, and fails on
@@ -92,8 +96,9 @@ class Dead:
 
 
 class Raising:
-    """A component whose member reads raise the way CurrentSchComponent's
-    are suspected to (caught, and expected to be COUNTED)."""
+    """A component whose member reads raise as an ORDINARY, catchable
+    exception. NOT a model of CurrentSchComponent: live 2026-10-11 its
+    member read was the engine's uncatchable halt, which ``Dead`` models."""
 
     def __getattr__(self, name):
         raise PascalError(f"Undeclared identifier: {name}")
@@ -172,13 +177,12 @@ def _held(ns, lib, comp, name):
 def test_held_component_is_dropped_once_its_library_closed():
     """Closing a library frees every component in it; the next member read
     on the held one was the modal. GetTargetLibComponent now drops it and
-    falls through to the editor's current component, the answer it gives
-    when nothing is held."""
+    answers Nil, the answer it gives when nothing is held (it no longer
+    falls back to the editor's current component: 2026-10-11)."""
     docs = {A: Doc()}
     client = Client(docs)
     ns = _ns(client)
-    cur = Comp("SHOWN")
-    lib = SchLib(A, current=cur)
+    lib = SchLib(A, current=Dead())
     held = Comp("MADE")
     _held(ns, lib, held, "MADE")
     assert ns["LastCreatedLibPath"] == A
@@ -186,7 +190,7 @@ def test_held_component_is_dropped_once_its_library_closed():
 
     client.docs.clear()                       # the library was closed
     ns["LastCreatedLibComponent"] = Dead()    # and its components freed
-    assert ns["GetTargetLibComponent"](lib) is cur
+    assert ns["GetTargetLibComponent"](lib) is None
     assert ns["LastCreatedLibComponent"] is None
     assert ns["LastCreatedLibComponentName"] == ""
     assert ns["LastCreatedLibPath"] == "" and ns["LastCreatedLibDoc"] is None
@@ -254,14 +258,11 @@ def test_target_name_is_the_recorded_one_never_read_back():
     held.__class__ = Dead                      # any read would fail the test
     assert ns["TargetLibComponentName"](lib) == "MADE"
 
+    # Nothing held: '' WITHOUT asking the editor's component anything
+    # (3aca481 read its LibReference: the engine halt, live 2026-10-11).
     ns = _ns(client)
-    assert ns["TargetLibComponentName"](lib) == "SHOWN"
+    assert ns["TargetLibComponentName"](SchLib(A, current=Dead())) == ""
     assert ns["_caught"] == []
-
-    ns = _ns(client)
-    assert ns["TargetLibComponentName"](SchLib(A, current=Raising())) == ""
-    assert ns["_caught"] == [
-        "TargetLibComponentName:CurrentSchComponent.LibReference"]
 
 
 def test_in_memory_lookup_answers_the_held_component_only_live_and_here():
@@ -411,29 +412,34 @@ def test_pin_handlers_never_read_the_name_off_a_component(handler):
                      r"TargetLibComponentName\(SchLib\);", head), handler
 
 
-def _split_ns(lib, held=None, held_lib=None):
+def _split_ns(lib, held=None, held_lib=None, name=""):
     client = Client({A: Doc(), B: Doc()})
     ns = _ns(client)
+    ns["ExtractJsonValue"] = lambda p, k: p.get(k, "")
     if held is not None:
         _held(ns, held_lib or lib, held, held.LibReference)
     body = strip_comments(_lib()["Lib_SplitPinFunctions"])
-    m = re.search(r"Component := Nil;\s+If SchLib\.ObjectId = eSchLib Then.*?"
+    m = re.search(r"Component := Nil;.*?If SchLib\.ObjectId = eSchLib Then.*?"
                   r"(?=\n\s+If Component = Nil Then)", body, re.S)
     assert m, "Lib_SplitPinFunctions does not resolve through the library"
-    snip = ("Procedure Snip(SchLib : Variant);\nVar\n    WantName : String;\n"
-            "Begin\n" + m.group(0) + "\n    SnipOut := Component;\nEnd;")
+    snip = ("Procedure Snip(SchLib : Variant; Params : Variant);\nVar\n"
+            "    WantName : String;\nBegin\n" + m.group(0)
+            + "\n    SnipOut := Component;\nEnd;")
     build({"Snip": snip}, ["Snip"], ns)
-    ns["Snip"](lib)
+    ns["Snip"](lib, {"component_name": name} if name else {})
     return ns["SnipOut"]
 
 
 def test_split_pin_functions_resolves_through_the_library():
     """SchIterator_Create on CurrentSchComponent raised 'Undeclared
-    identifier' (measured). The editor's component is now resolved BY NAME
-    through the library, whose answer carries its methods."""
+    identifier' (measured). The target is resolved BY NAME through the
+    library, whose answer carries its methods: the held component's
+    recorded name, or component_name. The editor's own selection is never
+    used (2026-10-11): nothing held and no name is NO_COMPONENT."""
     narrowed = Comp("SHOWN")
-    lib = SchLib(A, comps=[narrowed], current=Comp("SHOWN"))
-    assert _split_ns(lib) is narrowed
+    lib = SchLib(A, comps=[narrowed], current=Dead())
+    assert _split_ns(lib) is None, "the editor's selection is not a target"
+    assert _split_ns(lib, name="SHOWN") is narrowed, "component_name"
     held = Comp("MADE")
     assert _split_ns(SchLib(A), held=held) is held, "the held one, live"
     assert _split_ns(Sheet()) is None, "a sheet with nothing held"
@@ -443,37 +449,11 @@ def test_split_pin_functions_resolves_through_the_library():
 # ---------------------------------------------------------------------------
 # 2. Counted, not guarded (needs probe)
 # ---------------------------------------------------------------------------
-
-def test_mark_lib_dirty_counts_the_component_invalidate():
-    body = strip_comments(_lib()["MarkLibDirty"])
-    m = re.search(r"Try\s+If SchLib\.CurrentSchComponent <> Nil Then.*?End;",
-                  body, re.S)
-    assert m
-    snip = "Procedure Snip(SchLib : Variant);\nBegin\n" + m.group(0) + "\nEnd;"
-
-    class Lib:
-        CurrentSchComponent = Raising()
-
-    ns = _ns(lib_helpers=False)
-    build({"Snip": snip}, ["Snip"], ns)
-    ns["Snip"](Lib())
-    assert ns["_caught"] == [
-        "MarkLibDirty:CurrentSchComponent.GraphicallyInvalidate"]
-
-
-def test_set_owner_part_counts_a_component_without_its_members():
-    class Obj:
-        pass
-
-    ns = _ns(lib_helpers=False)
-    build(_lib(), ["SetOwnerPart"], ns)
-    o = Obj()
-    ns["SetOwnerPart"](o, Comp("X"))
-    assert (o.OwnerPartId, o.OwnerPartDisplayMode) == (1, 0)
-    assert ns["_caught"] == []
-    ns["SetOwnerPart"](Obj(), Raising())
-    assert ns["_caught"] == ["SetOwnerPart:CurrentPartID",
-                             "SetOwnerPart:DisplayMode"]
+# MarkLibDirty's component invalidate and SetOwnerPart's part read used to
+# live here as COUNTED catches. Live 2026-10-11 the read off
+# CurrentSchComponent was the engine's halt, which no Except sees, so a
+# count could never have fired. Both now read only narrowed references
+# (tests/test_live_editor_component_is_never_read.py).
 
 
 class Label:

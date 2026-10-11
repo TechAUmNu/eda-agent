@@ -699,6 +699,7 @@ def register_generic_tools(mcp):
         object_type: str,
         properties: str,
         container: str = "document",
+        component_name: str = "",
     ) -> dict[str, Any]:
         """Create and place a schematic object.
 
@@ -712,18 +713,26 @@ def register_generic_tools(mcp):
                 "Text=MY_NET|Location.X=100|Location.Y=200"
             container: "document" (place on active schematic) or
                       "component" (add to current library component)
+            component_name: With container="component": the library symbol
+                to add to, by library reference. Omit for the symbol held
+                from ``lib_create_symbol`` / ``lib_set_current_component``;
+                with none held the reply is NO_COMPONENT (the symbol merely
+                selected in the editor is never used).
 
         Returns:
             Dictionary confirming creation
         """
+        params: dict[str, Any] = {
+            "object_type": object_type,
+            "properties": properties,
+            "container": container,
+        }
+        if component_name:
+            params["component_name"] = component_name
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "generic.create_object",
-            {
-                "object_type": object_type,
-                "properties": properties,
-                "container": container,
-            },
+            params,
         )
         hint = BulkHintTracker.record_and_hint("obj_create")
         if hint and isinstance(result, dict):
@@ -3130,6 +3139,7 @@ def register_generic_tools(mcp):
     @mcp.tool()
     async def obj_batch_create(
         operations: list[dict[str, str]],
+        component_name: str = "",
     ) -> dict[str, Any]:
         """Create many schematic objects in ONE IPC round-trip.
 
@@ -3147,6 +3157,12 @@ def register_generic_tools(mcp):
                   format as ``obj_create`` accepts.
                 - container: "document" (default) or "component" (for
                   library-symbol contents when a lib is active).
+            component_name: The library symbol every container="component"
+                item is added to, by library reference (resolved once for
+                the whole batch). Omit for the symbol held from
+                ``lib_create_symbol`` / ``lib_set_current_component``; with
+                none held those items fail NO_COMPONENT (the symbol merely
+                selected in the editor is never used).
 
         Example, drop 3 net labels in one call:
             obj_batch_create(operations=[
@@ -3190,10 +3206,13 @@ def register_generic_tools(mcp):
         if not op_strs:
             return {"error": "No valid operations", "created": 0}
 
+        params: dict[str, Any] = {"operations": "~~".join(op_strs)}
+        if component_name:
+            params["component_name"] = component_name
         bridge = get_bridge()
         return await bridge.send_command_async(
             "generic.batch_create",
-            {"operations": "~~".join(op_strs)},
+            params,
         )
 
     @mcp.tool()

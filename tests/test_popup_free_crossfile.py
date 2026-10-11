@@ -64,6 +64,7 @@ def _run_lib_branch(ns, lib):
     ns["RemoveMatchingParamsFromComponent"] = (
         lambda comp, flt, total: got.append(comp))
     ns["TotalMatched"] = 0
+    ns.setdefault("NoteNextStep", lambda text: None)
     build({"LibBranch": _lib_branch_source()}, ["LibBranch"], ns)
     ns["LibBranch"](lib, "Name=Value")
     return got
@@ -72,15 +73,14 @@ def _run_lib_branch(ns, lib):
 def test_library_parameter_delete_drops_a_held_component_whose_library_closed():
     client = Client({A: Doc()})
     ns = _ns(client)
-    cur = Comp("SHOWN")
-    lib = SchLib(A, current=cur)
+    lib = SchLib(A, current=Dead())          # the editor's selection: never read
     held = Comp("MADE")
     _held(ns, lib, held, "MADE")
     assert _run_lib_branch(ns, lib) == [held], "a live held one is used"
 
     client.docs.clear()                      # the library closed
     ns["LastCreatedLibComponent"] = Dead()   # its components freed
-    assert _run_lib_branch(ns, lib) == [cur]
+    assert _run_lib_branch(ns, lib) == [], "nothing held: nothing matched"
     assert ns["LastCreatedLibComponent"] is None
 
 

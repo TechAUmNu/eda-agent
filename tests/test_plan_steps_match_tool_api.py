@@ -226,10 +226,10 @@ def test_the_static_scanner_actually_catches_a_bad_step(signatures):
     literal = ast.parse(
         'x = {"tool": "lib_add_pins", "args": {"library_path": 1}}')
     call = ast.parse(
-        'y = {"tool": "lib_add_pins", "args": dict(base, component_name=1)}')
+        'y = {"tool": "lib_add_pins", "args": dict(base, footprint_name=1)}')
 
     for tree, expected in ((literal, "library_path"),
-                           (call, "component_name")):
+                           (call, "footprint_name")):
         found = list(_iter_step_dicts(tree))
         assert found, "scanner failed to see the step dict"
         _, name, holder = found[0]

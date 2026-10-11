@@ -2414,7 +2414,8 @@ Begin
             'No PCB library is active. Open the .PcbLib and select a footprint.');
         Exit;
     End;
-    Footprint := PcbLib.CurrentComponent;
+    { The iterator's reference when it compares equal, else today's (Library.pas). }
+    Footprint := CurrentFootprintNarrowed(PcbLib);
     If Footprint = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_FOOTPRINT', 'No footprint is selected');
@@ -12209,6 +12210,21 @@ End;
 {..............................................................................}
 { PCB_NormalizeVias - snap every via's diameter + hole to its dominant routing }
 { via-style rule's preferred values.                                          }
+{                                                                              }
+{ NO CONSTRAINT MEMBER IS READ OFF AN IPCB_Rule. FindDominantRuleForObject     }
+{ answers a base IPCB_Rule, and PreferedWidth / PreferedHoleWidth live on the  }
+{ via-style subtype; a constraint member read through an IPCB_Rule-bound      }
+{ reference is the MEASURED room-rule failure (PCB_GetRoomRules: BoundingRect }
+{ was an "Undeclared identifier" per rule). That is the engine's halt, not an }
+{ exception: the old Try + RecordCaughtException + per-rule latch could never }
+{ see it, and PCBServer.PreProcess was open around it. Every board has a      }
+{ default RoutingVias rule, so any free via reached it.                       }
+{ NOW: the values are read in a rule-iterator pass whose local is assigned    }
+{ straight from the iterator (the measured cure: LmRulesSection,              }
+{ PCB_SetRuleProperties, PCB_GetRoomRules), cached by rule NAME, BEFORE the   }
+{ PreProcess. The dominant rule is asked only for its Name (a base member) and}
+{ looked up in that cache. A via whose rule has no cached values is left      }
+{ alone and counted in "no_rule_values".                                      }
 {..............................................................................}
 Function PCB_NormalizeVias(Params : String; RequestId : String) : String;
 Var
@@ -12217,11 +12233,12 @@ Var
     Obj, Prim : IPCB_Primitive;
     Via : IPCB_Via;
     Rule : IPCB_Rule;
+    ViaRule : IPCB_RoutingViaStyleRule;
     Matches : TInterfaceList;
-    FailedRules : TStringList;
-    RuleName : String;
-    I, Checked, Changed, NewSize, NewHole : Integer;
-    ReadOk : Boolean;
+    StyleNames, StyleSizes, StyleHoles : TStringList;
+    RuleName, StyleName : String;
+    I, Idx, Kind, Checked, Changed, NoValues, NewSize, NewHole : Integer;
+    StyleSize, StyleHole : Integer;
 Begin
     Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then
@@ -12232,6 +12249,7 @@ Begin
 
     Checked := 0;
     Changed := 0;
+    NoValues := 0;
 
     { Collect first, THEN modify -- mutating primitives while the BoardIterator
       is walking corrupts the iterator. Collect as the base IPCB_Primitive and
@@ -12253,20 +12271,41 @@ Begin
         Board.BoardIterator_Destroy(Iter);
     End;
 
-    { PreferedWidth / PreferedHoleWidth are routing-via-style members read   }
-    { off a base IPCB_Rule, which constraint members do not narrow onto        }
-    { (PCB_CreateDesignRule / PCB_SetRuleProperties headers) - probably an    }
-    { undeclared identifier, a MODAL per free via. Unmeasured, and no typed    }
-    { read of a via-style rule has ever run here, so the read is COUNTED and   }
-    { LATCHED rather than replaced: a rule whose members failed to read once   }
-    { is not read again this call. The same members of the same rule object   }
-    { fail the same way every time, so the latch only skips reads that could   }
-    { not succeed - a board with one via-style rule pops at most one dialog    }
-    { per call instead of one per via, and a build where the read works is     }
-    { untouched. The values are read BEFORE BeginModify, so a failed read no   }
-    { longer leaves a BeginModify without its EndModify.                       }
-    { Live probe: pcb_normalize_vias on a scratch board with one free via.     }
-    FailedRules := TStringList.Create;
+    { The via-style values, one typed pass, before any edit. ViaRule is      }
+    { assigned straight from the iterator, which is where DelphiScript       }
+    { narrows a rule; RuleKind and Name are base members. The Try is a      }
+    { fault-only backstop for an ordinary raise.                             }
+    StyleNames := TStringList.Create;
+    StyleSizes := TStringList.Create;
+    StyleHoles := TStringList.Create;
+    Iter := Board.BoardIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eRuleObject));
+        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_Method(eProcessAll);
+        ViaRule := Iter.FirstPCBObject;
+        While ViaRule <> Nil Do
+        Begin
+            Kind := -1;
+            Try Kind := ViaRule.RuleKind; Except Kind := -1; End;
+            If Kind = eRule_RoutingViaStyle Then
+            Begin
+                Try
+                    StyleName := ViaRule.Name;
+                    StyleSize := ViaRule.PreferedWidth;
+                    StyleHole := ViaRule.PreferedHoleWidth;
+                    StyleNames.Add(StyleName);
+                    StyleSizes.Add(IntToStr(StyleSize));
+                    StyleHoles.Add(IntToStr(StyleHole));
+                Except
+                End;
+            End;
+            ViaRule := Iter.NextPCBObject;
+        End;
+    Finally
+        Board.BoardIterator_Destroy(Iter);
+    End;
+
     PCBServer.PreProcess;
     Try
         For I := 0 To Matches.Count - 1 Do
@@ -12285,20 +12324,23 @@ Begin
             End;
             If Rule = Nil Then Continue;
 
+            { Name only: a base IPCB_Rule member. }
             RuleName := '';
             Try RuleName := Rule.Name; Except RuleName := ''; End;
-            If FailedRules.IndexOf(RuleName) >= 0 Then Continue;
-
-            ReadOk := False;
-            Try
-                NewSize := Rule.PreferedWidth;
-                NewHole := Rule.PreferedHoleWidth;
-                ReadOk := True;
-            Except
-                RecordCaughtException('PCB_NormalizeVias:PreferedWidth');
-                FailedRules.Add(RuleName);
+            Idx := -1;
+            If RuleName <> '' Then Idx := StyleNames.IndexOf(RuleName);
+            If Idx < 0 Then
+            Begin
+                Inc(NoValues);
+                Continue;
             End;
-            If Not ReadOk Then Continue;
+            NewSize := StrToIntDef(StyleSizes[Idx], 0);
+            NewHole := StrToIntDef(StyleHoles[Idx], 0);
+            If (NewSize <= 0) Or (NewHole <= 0) Then
+            Begin
+                Inc(NoValues);
+                Continue;
+            End;
 
             Try
                 PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast,
@@ -12313,11 +12355,14 @@ Begin
     Finally
         PCBServer.PostProcess;
     End;
-    FailedRules.Free;
+    StyleHoles.Free;
+    StyleSizes.Free;
+    StyleNames.Free;
 
     MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId,
-        '{"checked":' + IntToStr(Checked) + ',"changed":' + IntToStr(Changed) + '}');
+        '{"checked":' + IntToStr(Checked) + ',"changed":' + IntToStr(Changed)
+        + ',"no_rule_values":' + IntToStr(NoValues) + '}');
 End;
 
 {..............................................................................}

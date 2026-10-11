@@ -108,27 +108,51 @@ End;
 { createcomp_in_lib.pas reference, primitives without OwnerPartId /        }
 { OwnerPartDisplayMode are added to the component's collection but the    }
 { editor can't display them, symbols appear empty.                        }
-Procedure SetOwnerPart(Obj : ISch_GraphicalObject; Component : ISch_Component);
+{                                                                            }
+{ THE VALUES ARE READ BEFORE THE EDIT, NOT HERE. The callers read them once }
+{ with OwnerPartIdOf / OwnerDisplayModeOf from the component they resolved  }
+{ (the held one or one found by name through the library: both NARROWED),  }
+{ BEFORE their PreProcess, and pass plain integers in. This procedure reads }
+{ no member of any component, so it cannot halt the engine inside an open  }
+{ PreProcess window.                                                        }
+{                                                                            }
+{ WHY THAT MATTERS (live 2026-10-11, AD 26.10.1.5): this procedure used to  }
+{ read Component.CurrentPartID inside a Try whose Except "counted" the      }
+{ failure. In a fresh session the component was the editor's                }
+{ CurrentSchComponent, and the read was the script engine's "Undeclared     }
+{ identifier: CurrentPartID" box. That is NOT an exception: the engine      }
+{ parks on the line, no Except runs, nothing is counted, the Finally that   }
+{ would PostProcess is skipped, and after OK the polling loop was DEAD.     }
+{ A Try is no guard for a late-bound member that does not resolve.          }
+Procedure SetOwnerPart(Obj : ISch_GraphicalObject; PartId : Integer; DisplayMode : Integer);
 Begin
     If Obj = Nil Then Exit;
-    If Component <> Nil Then
-    Begin
-        { Component is GetTargetLibComponent's answer: the held reference,   }
-        { now dropped before it can go stale (LastCreatedLibIsLive and the   }
-        { ForgetLibComponentIf hooks), or the editor's CurrentSchComponent,  }
-        { which may not carry its members (the Lib_GetPinList measurement). }
-        { No member test exists that cannot itself raise, so a catch here is }
-        { COUNTED for the live probe rather than guarded.                   }
-        Try Obj.OwnerPartId := Component.CurrentPartID;
-        Except RecordCaughtException('SetOwnerPart:CurrentPartID'); End;
-        Try Obj.OwnerPartDisplayMode := Component.DisplayMode;
-        Except RecordCaughtException('SetOwnerPart:DisplayMode'); End;
-    End
-    Else
-    Begin
-        Try Obj.OwnerPartId := 1; Except End;
-        Try Obj.OwnerPartDisplayMode := 0; Except End;
-    End;
+    Try Obj.OwnerPartId := PartId; Except End;
+    Try Obj.OwnerPartDisplayMode := DisplayMode; Except End;
+End;
+
+{ The part a new primitive is owned by: the component's current part, read  }
+{ ONCE before the edit. Component must be NARROWED (GetTargetLibComponent / }
+{ ResolveEditLibComponent / a library lookup), never the editor's           }
+{ CurrentSchComponent. Nil, or a read that raises, answers 1 - the part the }
+{ Nil branch of SetOwnerPart always wrote. A part id below 1 also answers 1: }
+{ SelectLibComponentPart records that a fresh component can report 0 (no    }
+{ part), and a primitive written to part 0 of a single-part symbol is the   }
+{ invisible "added with success, nothing drawn" case.                       }
+Function OwnerPartIdOf(Component : ISch_Component) : Integer;
+Begin
+    Result := 1;
+    If Component = Nil Then Exit;
+    Try Result := Component.CurrentPartID; Except Result := 1; End;
+    If Result < 1 Then Result := 1;
+End;
+
+{ The display mode, read the same way: 0 (normal) on Nil or a raise. }
+Function OwnerDisplayModeOf(Component : ISch_Component) : Integer;
+Begin
+    Result := 0;
+    If Component = Nil Then Exit;
+    Try Result := Component.DisplayMode; Except Result := 0; End;
 End;
 
 {..............................................................................}
@@ -303,62 +327,70 @@ End;
 
 { Resolve the target component for a Lib_Add* primitive helper.             }
 {                                                                              }
-{ SchLib.CurrentSchComponent in DelphiScript reflects the editor's selected }
-{ component, which doesn't update when we add a new component via           }
-{ AddSchComponent (the setter is a no-op). Trusting it would attach        }
-{ primitives to whatever the editor was showing first (usually the default  }
-{ Component_1 placeholder), leaving every newly-created symbol empty.       }
+{ THE HELD COMPONENT, OR NOTHING. LastCreatedLibComponent is set by          }
+{ lib_create_symbol, lib_set_current_component, lib_copy_component and a   }
+{ component_name given to an edit (ResolveEditLibComponent); every one of   }
+{ those got it from the factory or from the library (index or iterator),    }
+{ which hands back a NARROWED reference whose members work.                 }
 {                                                                              }
-{ Use the global LastCreatedLibComponent we set in Lib_CreateSymbol         }
-{ instead, falling back to CurrentSchComponent only if nothing has been     }
-{ created in this session.                                                  }
+{ THE EDITOR'S CurrentSchComponent IS NEVER ANSWERED. It used to be the     }
+{ fallback when nothing was held, and its members do not resolve on a       }
+{ component the script never obtained itself:                               }
+{   2026-08-08  SchIterator_Create on it (Lib_GetPinList)                   }
+{   2026-10-11  CurrentPartID on it (SetOwnerPart, fresh session, AD        }
+{               26.10.1.5: the polling loop DIED after OK)                  }
+{ Both were the script engine's "Undeclared identifier" box, which no Try   }
+{ catches, and copying it into an ISch_Component-typed variable does not    }
+{ narrow it (this Result was typed so both times). So with nothing held    }
+{ the answer is Nil, which every caller reports as NO_COMPONENT naming the  }
+{ fix: pass component_name, or call lib_set_current_component /             }
+{ lib_create_symbol first.                                                  }
 {                                                                              }
 { A held component whose library has gone is DROPPED here, before any caller  }
-{ can read a member off it (LastCreatedLibIsLive), and the lookup falls       }
-{ through exactly as it does when nothing was held. CurrentSchComponent is   }
-{ read only off a schematic LIBRARY: an ISch_Sheet has no such member, and   }
-{ reading it there was the modal (Lib_SplitPinFunctions with a sheet         }
-{ focused); Nil instead is the callers' NO_COMPONENT reply.                  }
+{ can read a member off it (LastCreatedLibIsLive). Pointer compares only.   }
 Function GetTargetLibComponent(SchLib : ISch_Lib) : ISch_Component;
 Begin
     Result := Nil;
-    If (LastCreatedLibComponent <> Nil) And (Not LastCreatedLibIsLive(0)) Then
+    If LastCreatedLibComponent = Nil Then Exit;
+    If Not LastCreatedLibIsLive(0) Then
+    Begin
         ForgetRememberedLibComponent(0);
+        Exit;
+    End;
     Result := LastCreatedLibComponent;
-    If Result <> Nil Then Exit;
-    If SchLib = Nil Then Exit;
-    If SchLib.ObjectId <> eSchLib Then Exit;
-    Result := SchLib.CurrentSchComponent;
 End;
 
 { The NAME of the component GetTargetLibComponent would answer, without ever  }
 { reading it back off the held reference: the recorded name is what           }
 { FindLibComponentInMemory matches the held component by, so looking it up   }
 { resolves the same component while it lives (and nothing once it has gone). }
-{ Only the editor's CurrentSchComponent is asked for LibReference, as today; }
-{ that read is the MarkLibDirty probe, so a catch is counted.                 }
+{ '' when nothing is held: the editor's CurrentSchComponent is NOT asked for  }
+{ its LibReference (a member read on an un-narrowed reference, the engine    }
+{ halt GetTargetLibComponent documents). Every caller answers '' with        }
+{ NO_COMPONENT "pass component_name".                                        }
 Function TargetLibComponentName(SchLib : ISch_Lib) : String;
-Var
-    Cur : ISch_Component;
 Begin
     Result := '';
     If (LastCreatedLibComponent <> Nil) And (Not LastCreatedLibIsLive(0)) Then
         ForgetRememberedLibComponent(0);
     If LastCreatedLibComponent <> Nil Then
-    Begin
         Result := LastCreatedLibComponentName;
-        Exit;
-    End;
-    If SchLib = Nil Then Exit;
-    If SchLib.ObjectId <> eSchLib Then Exit;
-    Cur := SchLib.CurrentSchComponent;
-    If Cur = Nil Then Exit;
-    Try
-        Result := Cur.LibReference;
-    Except
-        RecordCaughtException('TargetLibComponentName:CurrentSchComponent.LibReference');
-        Result := '';
-    End;
+End;
+
+{ The NO_COMPONENT message for an edit that found no target: by name when a   }
+{ name was given, otherwise the two ways to name one.                         }
+Function NoEditComponentMessage(Name : String) : String;
+Begin
+    If Name <> '' Then
+        Result := 'Component not found in the active library: ' + Name
+            + '. A symbol created this session that is no longer the last one '
+            + 'made can be selected with lib_set_current_component first.'
+    Else
+        Result := 'No library component is held for this edit (or the one '
+            + 'held is in another library). Pass component_name, or call '
+            + 'lib_set_current_component (or lib_create_symbol) first. The '
+            + 'symbol selected in the editor is never used: its members cannot '
+            + 'be read safely from a script.';
 End;
 
 { Mark the focused SchLib doc dirty without an immediate full-file save.    }
@@ -434,16 +466,19 @@ Begin
     { component too, and process pending paint messages so the new state     }
     { surfaces immediately.                                                  }
     Try SchLib.GraphicallyInvalidate; Except End;
-    { NEEDS PROBE, not guarded: the Lib_GetPinList measurement says a        }
-    { component taken from CurrentSchComponent may not carry its methods,    }
-    { and no test of that exists that cannot itself raise. The catch is     }
-    { COUNTED so the live run shows whether every edit pops this modal.      }
-    Try
-        If SchLib.CurrentSchComponent <> Nil Then
-            SchLib.CurrentSchComponent.GraphicallyInvalidate;
-    Except
-        RecordCaughtException('MarkLibDirty:CurrentSchComponent.GraphicallyInvalidate');
-    End;
+    { THE HELD COMPONENT, never the editor's CurrentSchComponent. Its       }
+    { GraphicallyInvalidate used to be read off CurrentSchComponent inside a }
+    { Try that "counted" a failure, but a member that does not resolve on  }
+    { that reference is the engine's "Undeclared identifier" halt, not an   }
+    { exception (the 2026-10-11 dead loop): nothing is counted and the     }
+    { polling loop stops. The held reference is narrowed, and after an     }
+    { edit through GetTargetLibComponent / ResolveEditLibComponent it IS   }
+    { the component the edit targeted. Only while it lives and only in     }
+    { THIS library; otherwise the component invalidate is skipped and the  }
+    { library invalidate above stays.                                      }
+    If LastCreatedLibIsLive(0) Then
+        If SameLibAsRemembered(SchLib) Then
+            Try LastCreatedLibComponent.GraphicallyInvalidate; Except End;
     Try Application.ProcessMessages; Except End;
 End;
 
@@ -675,6 +710,42 @@ Begin
         Else If SameLibAsRemembered(SchLib) Then
             Result := LastCreatedLibComponent;
     End;
+End;
+
+{ ResolveEditLibComponent - the component a symbol EDIT lands on.            }
+{                                                                             }
+{ Name empty: GetTargetLibComponent (the held component while it lives and is }
+{ in THIS library, else Nil). Name given: found through the library by       }
+{ FindLibComponentInMemory (the index, the walk, the held one; NEVER the      }
+{ reopening lookup, because the caller edits SchLib next), then made current }
+{ and HELD exactly as                                                         }
+{ lib_set_current_component does (SelectLibComponentPart: the setter, then   }
+{ RememberLibComponent), so MarkLibDirty redraws it and the next call without }
+{ a name lands on it too. Every route answers a NARROWED reference: no member }
+{ is ever read off the editor's CurrentSchComponent. Call it BEFORE the       }
+{ handler's PreProcess, with everything else that reads the component.       }
+Function ResolveEditLibComponent(SchLib : ISch_Lib; Name : String) : ISch_Component;
+Var
+    Comp : ISch_Component;
+Begin
+    Result := Nil;
+    If Name = '' Then
+    Begin
+        { The held one, and only into ITS library: a component held from   }
+        { library A used to take the edit while library B was focused,     }
+        { and B was the one marked dirty. Unknown either side stays True.  }
+        Result := GetTargetLibComponent(SchLib);
+        If Result <> Nil Then
+            If Not SameLibAsRemembered(SchLib) Then Result := Nil;
+        Exit;
+    End;
+    If SchLib = Nil Then Exit;
+    If SchLib.ObjectId <> eSchLib Then Exit;
+    Comp := FindLibComponentInMemory(SchLib, Name);
+    If Comp = Nil Then Exit;
+    Try SchLib.CurrentSchComponent := Comp; Except End;
+    RememberLibComponent(SchLib, Comp, Name);
+    Result := Comp;
 End;
 
 { LookupLibComponent - the index, then the walk, then a reopen.               }
@@ -1409,6 +1480,8 @@ Var
     Hidden : Boolean;
     SchLib : ISch_Lib;
     Component : ISch_Component;
+    CompName : String;
+    OwnerPart, OwnerMode : Integer;
     Pin : ISch_Pin;
 Begin
     Designator := ExtractJsonValue(Params, 'designator');
@@ -1427,12 +1500,22 @@ Begin
         Exit;
     End;
 
-    Component := GetTargetLibComponent(SchLib);
+    { The held component, or the one named by component_name found through  }
+    { the library: never the editor's CurrentSchComponent, whose members    }
+    { halt the engine (ResolveEditLibComponent, GetTargetLibComponent).     }
+    CompName := ExtractJsonValue(Params, 'component_name');
+    Component := ResolveEditLibComponent(SchLib, CompName);
     If Component = Nil Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT', 'No component is selected');
+        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT',
+            NoEditComponentMessage(CompName));
         Exit;
     End;
+    { Read ONCE, here, before PreProcess: nothing inside the edit window  }
+    { below reads a member of the component except AddSchObject on this  }
+    { narrowed reference, so no read can leave a PreProcess open.         }
+    OwnerPart := OwnerPartIdOf(Component);
+    OwnerMode := OwnerDisplayModeOf(Component);
 
     Pin := SchServer.SchObjectFactory(ePin, eCreate_Default);
     If Pin <> Nil Then
@@ -1453,7 +1536,7 @@ Begin
         Pin.Electrical := StrToPinElectrical(ElecType);
 
         SchServer.ProcessControl.PreProcess(SchLib, '');
-        SetOwnerPart(Pin, Component);
+        SetOwnerPart(Pin, OwnerPart, OwnerMode);
         Component.AddSchObject(Pin);
         SchRegisterObject(Component, Pin);
         SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
@@ -1471,6 +1554,8 @@ Var
     FillColorStr, BorderColorStr : String;
     SchLib : ISch_Lib;
     Component : ISch_Component;
+    CompName : String;
+    OwnerPart, OwnerMode : Integer;
     Rect : ISch_Rectangle;
     Loc : TLocation;
 Begin
@@ -1488,12 +1573,22 @@ Begin
         Exit;
     End;
 
-    Component := GetTargetLibComponent(SchLib);
+    { The held component, or the one named by component_name found through  }
+    { the library: never the editor's CurrentSchComponent, whose members    }
+    { halt the engine (ResolveEditLibComponent, GetTargetLibComponent).     }
+    CompName := ExtractJsonValue(Params, 'component_name');
+    Component := ResolveEditLibComponent(SchLib, CompName);
     If Component = Nil Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT', 'No component is selected');
+        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT',
+            NoEditComponentMessage(CompName));
         Exit;
     End;
+    { Read ONCE, here, before PreProcess: nothing inside the edit window  }
+    { below reads a member of the component except AddSchObject on this  }
+    { narrowed reference, so no read can leave a PreProcess open.         }
+    OwnerPart := OwnerPartIdOf(Component);
+    OwnerMode := OwnerDisplayModeOf(Component);
 
     Rect := SchServer.SchObjectFactory(eRectangle, eCreate_Default);
     If Rect <> Nil Then
@@ -1533,7 +1628,7 @@ Begin
             Except End;
 
         SchServer.ProcessControl.PreProcess(SchLib, '');
-        SetOwnerPart(Rect, Component);
+        SetOwnerPart(Rect, OwnerPart, OwnerMode);
         Component.AddSchObject(Rect);
         SchRegisterObject(Component, Rect);
         SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
@@ -1551,6 +1646,8 @@ Var
     X1, Y1, X2, Y2, Width : Integer;
     SchLib : ISch_Lib;
     Component : ISch_Component;
+    CompName : String;
+    OwnerPart, OwnerMode : Integer;
     Line : ISch_Line;
     Loc : TLocation;
 Begin
@@ -1569,12 +1666,22 @@ Begin
         Exit;
     End;
 
-    Component := GetTargetLibComponent(SchLib);
+    { The held component, or the one named by component_name found through  }
+    { the library: never the editor's CurrentSchComponent, whose members    }
+    { halt the engine (ResolveEditLibComponent, GetTargetLibComponent).     }
+    CompName := ExtractJsonValue(Params, 'component_name');
+    Component := ResolveEditLibComponent(SchLib, CompName);
     If Component = Nil Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT', 'No component is selected');
+        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT',
+            NoEditComponentMessage(CompName));
         Exit;
     End;
+    { Read ONCE, here, before PreProcess: nothing inside the edit window  }
+    { below reads a member of the component except AddSchObject on this  }
+    { narrowed reference, so no read can leave a PreProcess open.         }
+    OwnerPart := OwnerPartIdOf(Component);
+    OwnerMode := OwnerDisplayModeOf(Component);
 
     Line := SchServer.SchObjectFactory(eLine, eCreate_Default);
     If Line <> Nil Then
@@ -1595,7 +1702,7 @@ Begin
         Line.LineWidth := Width;
 
         SchServer.ProcessControl.PreProcess(SchLib, '');
-        SetOwnerPart(Line, Component);
+        SetOwnerPart(Line, OwnerPart, OwnerMode);
         Component.AddSchObject(Line);
         SchRegisterObject(Component, Line);
         SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
@@ -1707,6 +1814,46 @@ Begin
     End;
 End;
 
+{ CurrentFootprintNarrowed - the library's current footprint, as the LIBRARY  }
+{ ITERATOR hands it back.                                                     }
+{                                                                             }
+{ PcbLib.CurrentComponent is a property accessor, the PCB twin of the SCH     }
+{ CurrentSchComponent whose members halted the engine on a component the     }
+{ script never obtained itself (2026-08-08 SchIterator_Create, 2026-10-11     }
+{ CurrentPartID). No PCB member read through CurrentComponent has failed on   }
+{ record, so this is a CONSERVATIVE swap, not a fix of a measured fault: the  }
+{ walk compares each iterator footprint to CurrentComponent by POINTER (the   }
+{ measured LibMakeCurrentVerified recipe) and answers the iterator's own,     }
+{ narrowed reference on a match. With no match it answers CurrentComponent    }
+{ exactly as before, so the reply on that branch is today's. Nil stays Nil.  }
+Function CurrentFootprintNarrowed(PcbLib : IPCB_Library) : IPCB_LibComponent;
+Var
+    Cur, Footprint : IPCB_LibComponent;
+    Iter : IPCB_LibraryIterator;
+Begin
+    Result := Nil;
+    If PcbLib = Nil Then Exit;
+    Cur := PcbLib.CurrentComponent;
+    Result := Cur;
+    If Cur = Nil Then Exit;
+    Iter := PcbLib.LibraryIterator_Create;
+    If Iter = Nil Then Exit;
+    Try
+        Footprint := Iter.FirstPCBObject;
+        While Footprint <> Nil Do
+        Begin
+            If Footprint = Cur Then
+            Begin
+                Result := Footprint;
+                Break;
+            End;
+            Footprint := Iter.NextPCBObject;
+        End;
+    Finally
+        PcbLib.LibraryIterator_Destroy(Iter);
+    End;
+End;
+
 {..............................................................................}
 { ResolveLibFootprint - the footprint a footprint-authoring call writes into.  }
 {                                                                              }
@@ -1807,7 +1954,7 @@ Begin
 
     If FpWanted = '' Then
     Begin
-        Target := PcbLib.CurrentComponent;
+        Target := CurrentFootprintNarrowed(PcbLib);
         If Target = Nil Then
         Begin
             ErrCode := 'NO_FOOTPRINT';
@@ -4020,7 +4167,7 @@ Begin
     { Pick the target footprint: by name if given, else the current one. }
     Target := Nil;
     If FpWanted = '' Then
-        Target := PcbLib.CurrentComponent
+        Target := CurrentFootprintNarrowed(PcbLib)
     Else
     Begin
         Iter := PcbLib.LibraryIterator_Create;
@@ -5688,14 +5835,17 @@ Begin
 
     { Resolve the target by component_name so the link lands on the intended
       symbol -- the handler previously ignored it and always used the
-      last-created component. Fall back to last-created/selected when empty. }
+      last-created component. Empty: the held component (GetTargetLibComponent),
+      never the editor's own selection, whose SchIterator_Create below is the
+      measured engine halt. }
     If ComponentName <> '' Then
         Component := SelectLibComponent(ComponentName)
     Else
         Component := GetTargetLibComponent(SchLib);
     If Component = Nil Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT', 'Target component not found (component_name) or nothing selected');
+        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT',
+            NoEditComponentMessage(ComponentName));
         Exit;
     End;
 
@@ -6629,7 +6779,7 @@ Begin
         End;
     End
     Else
-        Footprint := PcbLib.CurrentComponent;
+        Footprint := CurrentFootprintNarrowed(PcbLib);
 
     If Footprint = Nil Then
     Begin
@@ -8388,7 +8538,10 @@ Begin
                     Begin
                         NewParam.Name := ParamName;
                         NewParam.Text := ParamValue;
-                        SetOwnerPart(NewParam, Component);
+                        { Component came from LookupLibComponent: a library
+                          lookup, NARROWED, so its part may be read here. }
+                        SetOwnerPart(NewParam, OwnerPartIdOf(Component),
+                            OwnerDisplayModeOf(Component));
                         Component.AddSchObject(NewParam);
                         SchRegisterObject(Component, NewParam);
                         Inc(Created);
@@ -8666,6 +8819,8 @@ Var
     StartAngle, EndAngle : Double;
     SchLib : ISch_Lib;
     Component : ISch_Component;
+    CompName : String;
+    OwnerPart, OwnerMode : Integer;
     Arc : ISch_Arc;
 Begin
     XCenter := StrToIntDef(ExtractJsonValue(Params, 'x_center'), 0);
@@ -8684,12 +8839,22 @@ Begin
         Exit;
     End;
 
-    Component := GetTargetLibComponent(SchLib);
+    { The held component, or the one named by component_name found through  }
+    { the library: never the editor's CurrentSchComponent, whose members    }
+    { halt the engine (ResolveEditLibComponent, GetTargetLibComponent).     }
+    CompName := ExtractJsonValue(Params, 'component_name');
+    Component := ResolveEditLibComponent(SchLib, CompName);
     If Component = Nil Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT', 'No component is selected');
+        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT',
+            NoEditComponentMessage(CompName));
         Exit;
     End;
+    { Read ONCE, here, before PreProcess: nothing inside the edit window  }
+    { below reads a member of the component except AddSchObject on this  }
+    { narrowed reference, so no read can leave a PreProcess open.         }
+    OwnerPart := OwnerPartIdOf(Component);
+    OwnerMode := OwnerDisplayModeOf(Component);
 
     Arc := SchServer.SchObjectFactory(eArc, eCreate_Default);
     If Arc <> Nil Then
@@ -8701,7 +8866,7 @@ Begin
         Arc.LineWidth := Width;
 
         SchServer.ProcessControl.PreProcess(SchLib, '');
-        SetOwnerPart(Arc, Component);
+        SetOwnerPart(Arc, OwnerPart, OwnerMode);
         Component.AddSchObject(Arc);
         SchRegisterObject(Component, Arc);
         SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
@@ -8723,6 +8888,8 @@ Var
     VerticesStr, Token : String;
     SchLib : ISch_Lib;
     Component : ISch_Component;
+    CompName : String;
+    OwnerPart, OwnerMode : Integer;
     Polygon : ISch_Polygon;
     Remaining : String;
     CommaPos, X, Y, I : Integer;
@@ -8747,12 +8914,22 @@ Begin
         Exit;
     End;
 
-    Component := GetTargetLibComponent(SchLib);
+    { The held component, or the one named by component_name found through  }
+    { the library: never the editor's CurrentSchComponent, whose members    }
+    { halt the engine (ResolveEditLibComponent, GetTargetLibComponent).     }
+    CompName := ExtractJsonValue(Params, 'component_name');
+    Component := ResolveEditLibComponent(SchLib, CompName);
     If Component = Nil Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT', 'No component is selected');
+        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT',
+            NoEditComponentMessage(CompName));
         Exit;
     End;
+    { Read ONCE, here, before PreProcess: nothing inside the edit window  }
+    { below reads a member of the component except AddSchObject on this  }
+    { narrowed reference, so no read can leave a PreProcess open.         }
+    OwnerPart := OwnerPartIdOf(Component);
+    OwnerMode := OwnerDisplayModeOf(Component);
 
     XValues := TStringList.Create;
     YValues := TStringList.Create;
@@ -8802,7 +8979,7 @@ Begin
                     MilsToCoord(StrToIntDef(YValues[I-1], 0)));
 
             SchServer.ProcessControl.PreProcess(SchLib, '');
-            SetOwnerPart(Polygon, Component);
+            SetOwnerPart(Polygon, OwnerPart, OwnerMode);
             Component.AddSchObject(Polygon);
             SchRegisterObject(Component, Polygon);
             SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
@@ -9018,7 +9195,7 @@ Begin
     If WantName = '' Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_COMPONENT',
-            'No component is selected; pass component_name to name one');
+            NoEditComponentMessage(''));
         Exit;
     End;
 
@@ -9320,6 +9497,8 @@ Var
     Hidden, OwnerExplicit : Boolean;
     SchLib : ISch_Lib;
     Component : ISch_Component;
+    CompName : String;
+    OwnerPart, OwnerMode : Integer;
     Pin : ISch_Pin;
     Loc : TLocation;
 Begin
@@ -9337,12 +9516,22 @@ Begin
         Exit;
     End;
 
-    Component := GetTargetLibComponent(SchLib);
+    { The held component, or the one named by component_name found through  }
+    { the library: never the editor's CurrentSchComponent, whose members    }
+    { halt the engine (ResolveEditLibComponent, GetTargetLibComponent).     }
+    CompName := ExtractJsonValue(Params, 'component_name');
+    Component := ResolveEditLibComponent(SchLib, CompName);
     If Component = Nil Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT', 'No component is selected');
+        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT',
+            NoEditComponentMessage(CompName));
         Exit;
     End;
+    { Read ONCE, here, before PreProcess: nothing inside the edit window  }
+    { below reads a member of the component except AddSchObject on this  }
+    { narrowed reference, so no read can leave a PreProcess open.         }
+    OwnerPart := OwnerPartIdOf(Component);
+    OwnerMode := OwnerDisplayModeOf(Component);
 
     Added := 0;
     Failed := 0;
@@ -9427,7 +9616,7 @@ Begin
                 Try Pin.OwnerPartDisplayMode := 0; Except End;
             End
             Else
-                SetOwnerPart(Pin, Component);
+                SetOwnerPart(Pin, OwnerPart, OwnerMode);
 
             Component.AddSchObject(Pin);
             SchRegisterObject(Component, Pin);
@@ -9471,6 +9660,8 @@ Var
     OwnerExplicit, Bold, Italic : Boolean;
     SchLib : ISch_Lib;
     Component : ISch_Component;
+    CompName : String;
+    OwnerPart, OwnerMode : Integer;
     Lbl : ISch_Label;
     Loc : TLocation;
     FontMgr : ISch_FontManager;
@@ -9489,12 +9680,22 @@ Begin
         Exit;
     End;
 
-    Component := GetTargetLibComponent(SchLib);
+    { The held component, or the one named by component_name found through  }
+    { the library: never the editor's CurrentSchComponent, whose members    }
+    { halt the engine (ResolveEditLibComponent, GetTargetLibComponent).     }
+    CompName := ExtractJsonValue(Params, 'component_name');
+    Component := ResolveEditLibComponent(SchLib, CompName);
     If Component = Nil Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT', 'No component is selected');
+        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT',
+            NoEditComponentMessage(CompName));
         Exit;
     End;
+    { Read ONCE, here, before PreProcess: nothing inside the edit window  }
+    { below reads a member of the component except AddSchObject on this  }
+    { narrowed reference, so no read can leave a PreProcess open.         }
+    OwnerPart := OwnerPartIdOf(Component);
+    OwnerMode := OwnerDisplayModeOf(Component);
 
     FontMgr := SchServer.FontManager;
 
@@ -9568,7 +9769,7 @@ Begin
                 Try Lbl.OwnerPartDisplayMode := 0; Except End;
             End
             Else
-                SetOwnerPart(Lbl, Component);
+                SetOwnerPart(Lbl, OwnerPart, OwnerMode);
 
             Component.AddSchObject(Lbl);
             SchRegisterObject(Component, Lbl);
@@ -9596,6 +9797,8 @@ Var
     X1, Y1, X2, Y2, Width : Integer;
     SchLib : ISch_Lib;
     Component : ISch_Component;
+    CompName : String;
+    OwnerPart, OwnerMode : Integer;
     Line : ISch_Line;
     Loc : TLocation;
 Begin
@@ -9613,12 +9816,22 @@ Begin
         Exit;
     End;
 
-    Component := GetTargetLibComponent(SchLib);
+    { The held component, or the one named by component_name found through  }
+    { the library: never the editor's CurrentSchComponent, whose members    }
+    { halt the engine (ResolveEditLibComponent, GetTargetLibComponent).     }
+    CompName := ExtractJsonValue(Params, 'component_name');
+    Component := ResolveEditLibComponent(SchLib, CompName);
     If Component = Nil Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT', 'No component is selected');
+        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT',
+            NoEditComponentMessage(CompName));
         Exit;
     End;
+    { Read ONCE, here, before PreProcess: nothing inside the edit window  }
+    { below reads a member of the component except AddSchObject on this  }
+    { narrowed reference, so no read can leave a PreProcess open.         }
+    OwnerPart := OwnerPartIdOf(Component);
+    OwnerMode := OwnerDisplayModeOf(Component);
 
     Added := 0;
     Failed := 0;
@@ -9658,7 +9871,7 @@ Begin
             Line.Corner := Loc;
             Line.LineWidth := Width;
 
-            SetOwnerPart(Line, Component);
+            SetOwnerPart(Line, OwnerPart, OwnerMode);
             Component.AddSchObject(Line);
             SchRegisterObject(Component, Line);
             Inc(Added);
@@ -11106,23 +11319,27 @@ Begin
     End;
     { RESOLVED THROUGH THE LIBRARY, never straight off CurrentSchComponent:  }
     { SchIterator_Create on a component taken from there raised 'Undeclared  }
-    { identifier' (measured, Lib_GetPinList), as a modal. The name comes     }
-    { from TargetLibComponentName and FindLibComponentInMemory resolves it   }
-    { (never the reopening lookup: SchLib is edited below). On a SHEET there }
-    { is no library to look in, and GetTargetLibComponent answers the held   }
-    { component as before, or Nil instead of the raising member read.       }
+    { identifier' (measured, Lib_GetPinList), as a modal. The name is       }
+    { component_name, else the held one's (TargetLibComponentName: '' with  }
+    { nothing held, never the editor's selection), and                      }
+    { FindLibComponentInMemory resolves it (never the reopening lookup:     }
+    { SchLib is edited below). On a SHEET there is no library to look in,   }
+    { and GetTargetLibComponent answers the held component, or Nil.         }
     Component := Nil;
+    WantName := ExtractJsonValue(Params, 'component_name');
     If SchLib.ObjectId = eSchLib Then
     Begin
-        WantName := TargetLibComponentName(SchLib);
+        If WantName = '' Then
+            WantName := TargetLibComponentName(SchLib);
         If WantName <> '' Then
             Component := FindLibComponentInMemory(SchLib, WantName);
     End
-    Else
+    Else If WantName = '' Then
         Component := GetTargetLibComponent(SchLib);
     If Component = Nil Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT', 'No current library component');
+        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT',
+            NoEditComponentMessage(WantName));
         Exit;
     End;
 
@@ -11157,7 +11374,8 @@ End;
 { sub-part, or to Part Zero (owner_part_id=0) so ONE pin is shared by the     }
 { whole package rather than redrawn at every sub-part origin. Part Zero is    }
 { Altium's documented placement for a multi-part component's supply pins.     }
-{ Params: component_name (optional, defaults to the editor's current symbol), }
+{ Params: component_name (optional, defaults to the HELD symbol; with none  }
+{         held the reply is NO_COMPONENT - never the editor's selection),     }
 {         pin_designators (required, comma-separated), owner_part_id (req).   }
 {..............................................................................}
 Function Lib_SetPinOwnerPart(Params : String; RequestId : String) : String;
@@ -11204,7 +11422,7 @@ Begin
     If WantName = '' Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_COMPONENT',
-            'No component is selected; pass component_name to name one');
+            NoEditComponentMessage(''));
         Exit;
     End;
 

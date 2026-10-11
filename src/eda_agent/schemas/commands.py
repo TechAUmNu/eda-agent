@@ -86,6 +86,7 @@ class CreateObjectParams(BaseModel):
     object_type: str = Field(min_length=1)
     properties: str = Field(min_length=1)
     container: str = "document"
+    component_name: str = ""
 
 
 class DeleteObjectsParams(BaseModel):

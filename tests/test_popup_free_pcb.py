@@ -532,6 +532,8 @@ def _gate_bodies():
 
 def _run_renumber(ns):
     build(_gate_bodies(), _GATE, ns)
+    build(load(_ALTIUM / "Library.pas", minimum=40),
+          ["CurrentFootprintNarrowed"], ns)
     _run(["PCB_RenumberPads"], ns)
 
 
@@ -792,13 +794,32 @@ def test_set_mech_layer_kind_goes_through_the_pair_helper():
 # PCB_NormalizeVias: a rule whose members did not read is not read again
 # ---------------------------------------------------------------------------
 
-def _vias_ns(popups, vias, rule_of, msgs):
-    board = Fx(popups, BoardIterator_Create=_Iter(vias),
-               BoardIterator_Destroy=lambda i: None,
-               FindDominantRuleForObject=lambda v, k: rule_of(v),
-               FileName="b.PcbDoc")
+class _ViaBoardIter(_Iter):
+    """The board iterator, filtered: vias for eViaObject, rules for
+    eRuleObject (PCB_NormalizeVias walks both)."""
+
+    def __init__(self, vias, rules):
+        super().__init__([])
+        self.by = {OIDS["eViaObject"]: vias, OIDS["eRuleObject"]: rules}
+
+    def AddFilter_ObjectSet(self, s):
+        for k in s:
+            self.items = list(self.by.get(k, []))
+
+
+class _ViaBoard(Fx):
+    @property
+    def BoardIterator_Create(self):
+        return _ViaBoardIter(self.vias, self.rules)
+
+
+def _vias_ns(popups, vias, rule_of, msgs, rules=()):
+    board = _ViaBoard(popups, vias=vias, rules=list(rules),
+                      BoardIterator_Destroy=lambda i: None,
+                      FindDominantRuleForObject=lambda v, k: rule_of(v),
+                      FileName="b.PcbDoc")
     return _ns(popups, GetPCBBoardAnywhere=lambda d: board,
-               eRule_RoutingViaStyle="viastyle", eViaObject=3,
+               eRule_RoutingViaStyle="viastyle",
                PCBServer=_server(popups, msgs))
 
 
@@ -807,36 +828,48 @@ def _via(popups, n):
               I_ObjectAddress=f"V{n}", Size=1, HoleSize=1)
 
 
-def test_normalize_vias_pops_at_most_once_per_unreadable_rule():
+def test_normalize_vias_never_reads_a_constraint_off_the_dominant_rule():
+    """FindDominantRuleForObject answers a base IPCB_Rule; PreferedWidth on
+    it was read inside a Try that 'counted' it. A constraint member through
+    an IPCB_Rule binding is the measured room-rule failure, and on the
+    engine that is a halt no Except sees. The values now come from a
+    rule-iterator pass, by rule NAME; the dominant rule is asked its Name
+    only, and nothing is counted."""
     popups = Popups()
     msgs: list = []
     vias = [_via(popups, n) for n in range(3)]
-    rule = Fx(popups, ["PreferedWidth", "PreferedHoleWidth"], Name="RoutingVias")
-    ns = _vias_ns(popups, vias, lambda v: rule, msgs)
+    dominant = Fx(popups, ["PreferedWidth", "PreferedHoleWidth"],
+                  Name="RoutingVias")
+    typed = Fx(popups, RuleKind="viastyle", Name="RoutingVias",
+               PreferedWidth=200, PreferedHoleWidth=100)
+    ns = _vias_ns(popups, vias, lambda v: dominant, msgs, rules=[typed])
     _run(["PCB_NormalizeVias"], ns)
     assert ns["PCB_NormalizeVias"]({}, "r") == (
-        "OK", '{"checked":3,"changed":0}')
-    assert popups == ["PreferedWidth"], popups
-    assert ns["_caught"] == ["PCB_NormalizeVias:PreferedWidth"]
-    assert msgs == [], "a BeginModify was sent for a via whose rule did not read"
-    assert all(v.Size == 1 and v.HoleSize == 1 for v in vias)
+        "OK", '{"checked":3,"changed":3,"no_rule_values":0}')
+    assert popups == [], popups
+    assert ns["_caught"] == []
+    assert msgs == ["Begin", "End"] * 3
+    assert all(v.Size == 200 and v.HoleSize == 100 for v in vias)
 
 
-def test_normalize_vias_still_applies_a_readable_rule():
+def test_normalize_vias_leaves_a_via_whose_rule_was_not_read():
     popups = Popups()
     msgs: list = []
     vias = [_via(popups, n) for n in range(3)]
-    good = Fx(popups, Name="Thin", PreferedWidth=200, PreferedHoleWidth=100)
-    bad = Fx(popups, ["PreferedWidth"], Name="Broken")
+    thin = Fx(popups, ["PreferedWidth"], Name="Thin")
+    other = Fx(popups, ["PreferedWidth"], Name="Unlisted")
+    typed = Fx(popups, RuleKind="viastyle", Name="Thin",
+               PreferedWidth=200, PreferedHoleWidth=100)
     ns = _vias_ns(popups, vias,
-                  lambda v: bad if v.I_ObjectAddress == "V1" else good, msgs)
+                  lambda v: other if v.I_ObjectAddress == "V1" else thin,
+                  msgs, rules=[typed])
     _run(["PCB_NormalizeVias"], ns)
     assert ns["PCB_NormalizeVias"]({}, "r") == (
-        "OK", '{"checked":3,"changed":2}')
+        "OK", '{"checked":3,"changed":2,"no_rule_values":1}')
     assert [(v.Size, v.HoleSize) for v in vias] == [(200, 100), (1, 1),
                                                      (200, 100)]
     assert msgs == ["Begin", "End", "Begin", "End"]
-    assert popups == ["PreferedWidth"]
+    assert popups == []
 
 
 # ---------------------------------------------------------------------------

@@ -1618,10 +1618,19 @@ Begin
         { every parameter off the symbol.                                     }
         If ReducedFilter = '' Then Exit;
         { GetTargetLibComponent (Library.pas): the held component while   }
-        { its library lives, else the editor's current symbol - the same  }
-        { answer as before, minus a held reference whose library closed,  }
-        { whose first member read in the iterator was the modal.          }
+        { its library lives (a lib_component scope holds it), else Nil.   }
+        { It no longer answers the editor's current symbol: the iterator  }
+        { below on that reference is SchIterator_Create, the measured     }
+        { "Undeclared identifier" engine halt, inside the caller's        }
+        { PreProcess. Nil matches nothing, and says why.                  }
         Comp := GetTargetLibComponent(SchDoc);
+        If Comp = Nil Then
+        Begin
+            NoteNextStep('No library component is held, so no parameter was '
+                + 'deleted. Scope the delete with lib_component:NAME, or call '
+                + 'lib_set_current_component first.');
+            Exit;
+        End;
         RemoveMatchingParamsFromComponent(Comp, ReducedFilter, TotalMatched);
         Exit;
     End;
@@ -2397,7 +2406,7 @@ End;
 
 Function Gen_CreateObject(Params : String; RequestId : String) : String;
 Var
-    ObjTypeStr, PropsStr, Container, UnsupportedProp : String;
+    ObjTypeStr, PropsStr, Container, UnsupportedProp, CompName : String;
     ObjTypeInt : Integer;
     SchDoc : ISch_Document;
     SchLib : ISch_Lib;
@@ -2410,6 +2419,7 @@ Begin
     PropsStr := ExtractJsonValue(Params, 'properties');
     Container := ExtractJsonValue(Params, 'container');
     If Container = '' Then Container := 'document';
+    CompName := ExtractJsonValue(Params, 'component_name');
 
     ObjTypeInt := ObjectTypeFromString(ObjTypeStr);
     If ObjTypeInt = -1 Then
@@ -2449,11 +2459,18 @@ Begin
             Result := BuildErrorResponse(RequestId, 'NO_SCHLIB', 'No schematic library is active');
             Exit;
         End;
-        Component := SchLib.CurrentSchComponent;
+        { The held component or the one named by component_name, found     }
+        { through the library (Library.pas ResolveEditLibComponent). This   }
+        { read SchLib.CurrentSchComponent, whose AddSchObject below is a     }
+        { member that does not resolve on the editor's own selection: the   }
+        { engine's "Undeclared identifier" halt, inside the PreProcess,     }
+        { with the polling loop dead after OK (the 2026-10-11 class).       }
+        Component := ResolveEditLibComponent(SchLib, CompName);
         If Component = Nil Then
         Begin
             SchServer.DestroySchObject(NewObj);
-            Result := BuildErrorResponse(RequestId, 'NO_COMPONENT', 'No library component is selected');
+            Result := BuildErrorResponse(RequestId, 'NO_COMPONENT',
+                NoEditComponentMessage(CompName));
             Exit;
         End;
         SchServer.ProcessControl.PreProcess(SchLib, '');
@@ -9706,13 +9723,12 @@ Var
     Op, Scope, ObjTypeStr, PropsStr : String;
     ObjTypeInt : Integer;
     SchDoc : ISch_Document;
-    SchLib : ISch_Lib;
     Component : ISch_Component;
     NewObj : ISch_GraphicalObject;
     ActiveDoc : ISch_Document;
-    ContainerStr : String;
+    ContainerStr, LibCompName : String;
     FailuresJson, ItemReason, UnsupportedProp : String;
-    FirstFailure : Boolean;
+    FirstFailure, IsLib : Boolean;
 Begin
     ResetPropertyDiag(0);
     SchDoc := Nil;
@@ -9730,6 +9746,22 @@ Begin
     Remaining := Operations;
     FailuresJson := '';
     FirstFailure := True;
+
+    { THE LIBRARY COMPONENT, RESOLVED ONCE, BEFORE THE SHARED PreProcess.   }
+    { container=component items used to read SchLib.CurrentSchComponent per }
+    { op INSIDE the PreProcess, and AddSchObject on the editor's own        }
+    { selection is a member that does not resolve: the engine halts there, }
+    { the Finally that PostProcesses never runs, and the polling loop dies  }
+    { (the 2026-10-11 class). Now the held component or the one named by    }
+    { component_name, found through the library; Nil answers NO_COMPONENT   }
+    { per item, as before.                                                   }
+    IsLib := False;
+    Component := Nil;
+    LibCompName := ExtractJsonValue(Params, 'component_name');
+    If ActiveDoc <> Nil Then
+        IsLib := (ActiveDoc.ObjectId = eSchLib);
+    If IsLib Then
+        Component := ResolveEditLibComponent(ActiveDoc, LibCompName);
 
     If ActiveDoc <> Nil Then
         SchServer.ProcessControl.PreProcess(ActiveDoc, '');
@@ -9778,10 +9810,8 @@ Begin
 
                         If ContainerStr = 'component' Then
                         Begin
-                            SchLib := SchServer.GetCurrentSchDocument;
-                            If (SchLib <> Nil) And (SchLib.ObjectId = eSchLib) Then
+                            If IsLib Then
                             Begin
-                                Component := SchLib.CurrentSchComponent;
                                 If Component <> Nil Then
                                 Begin
                                     Component.AddSchObject(NewObj);

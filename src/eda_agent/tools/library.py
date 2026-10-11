@@ -2208,6 +2208,7 @@ def register_library_tools(mcp):
     @mcp.tool()
     async def lib_add_pins(
         pins: list[dict[str, Any]],
+        component_name: str = "",
     ) -> dict[str, Any]:
         """Add MANY pins to the current symbol in ONE call.
 
@@ -2246,6 +2247,14 @@ def register_library_tools(mcp):
                   `hidden`, which hides the pin itself: a resistor shows
                   both pins and neither label. Omit to leave Altium's
                   default.
+            component_name: The symbol to edit, by library reference,
+                in the active SchLib. It becomes the held (current)
+                symbol, as ``lib_set_current_component`` does. Omit to
+                edit the symbol held from ``lib_create_symbol`` /
+                ``lib_set_current_component``; with none held the reply
+                is NO_COMPONENT. The symbol merely selected in the
+                editor is never used (its members cannot be read safely
+                from a script: it halted the bridge on 2026-10-11).
 
         Example, one stage of a dual op-amp (sub-part 1) with shared
         power pins (sub-part 0):
@@ -2279,10 +2288,13 @@ def register_library_tools(mcp):
                 "skipped_invalid": skipped_invalid,
             }
 
+        params: dict[str, Any] = {"pins": payload}
+        if component_name:
+            params["component_name"] = component_name
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "library.add_pins",
-            {"pins": payload},
+            params,
         )
         if isinstance(result, dict) and skipped_invalid:
             result["skipped_invalid"] = skipped_invalid
@@ -2296,6 +2308,7 @@ def register_library_tools(mcp):
         y2: int,
         fill_color: int = -1,
         border_color: int = 0,
+        component_name: str = "",
     ) -> dict[str, Any]:
         """Add a rectangle to the current symbol body.
 
@@ -2313,27 +2326,39 @@ def register_library_tools(mcp):
             y2: Opposite corner Y in mils
             fill_color: Fill color index (-1 = no fill)
             border_color: Border color index
+            component_name: The symbol to edit, by library reference,
+                in the active SchLib. It becomes the held (current)
+                symbol, as ``lib_set_current_component`` does. Omit to
+                edit the symbol held from ``lib_create_symbol`` /
+                ``lib_set_current_component``; with none held the reply
+                is NO_COMPONENT. The symbol merely selected in the
+                editor is never used (its members cannot be read safely
+                from a script: it halted the bridge on 2026-10-11).
 
         Returns:
             Dictionary confirming rectangle addition
         """
+        params: dict[str, Any] = {
+            "x1": _snap(int(x1)),
+            "y1": _snap(int(y1)),
+            "x2": _snap(int(x2)),
+            "y2": _snap(int(y2)),
+            "fill_color": fill_color,
+            "border_color": border_color,
+        }
+        if component_name:
+            params["component_name"] = component_name
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "library.add_symbol_rectangle",
-            {
-                "x1": _snap(int(x1)),
-                "y1": _snap(int(y1)),
-                "x2": _snap(int(x2)),
-                "y2": _snap(int(y2)),
-                "fill_color": fill_color,
-                "border_color": border_color,
-            },
+            params,
         )
         return result
 
     @mcp.tool()
     async def lib_add_symbol_text(
         texts: list[dict[str, Any]],
+        component_name: str = "",
     ) -> dict[str, Any]:
         """Add MANY body-text items to the current symbol in ONE call.
 
@@ -2361,6 +2386,14 @@ def register_library_tools(mcp):
                   ``lib_add_pins``: 1..part_count picks a sub-part, 0
                   shares the text across all of them. Omit for
                   single-part symbols.
+            component_name: The symbol to edit, by library reference,
+                in the active SchLib. It becomes the held (current)
+                symbol, as ``lib_set_current_component`` does. Omit to
+                edit the symbol held from ``lib_create_symbol`` /
+                ``lib_set_current_component``; with none held the reply
+                is NO_COMPONENT. The symbol merely selected in the
+                editor is never used (its members cannot be read safely
+                from a script: it halted the bridge on 2026-10-11).
 
         Returns:
             Dict with ``added``, ``failed``, ``total`` counts. A text whose
@@ -2425,16 +2458,20 @@ def register_library_tools(mcp):
                                + "; ".join(problems[:5]))}
         if not op_strs:
             return {"error": "No texts provided", "added": 0}
+        params: dict[str, Any] = {"texts": join_ops(op_strs)}
+        if component_name:
+            params["component_name"] = component_name
         bridge = get_bridge()
         return await bridge.send_command_async(
             "library.add_symbol_text",
-            {"texts": join_ops(op_strs)},
+            params,
         )
 
     @mcp.tool()
     async def lib_add_symbol_lines(
         lines: list[dict[str, Any]],
         grid: int = 25,
+        component_name: str = "",
     ) -> dict[str, Any]:
         """Add MANY lines to the current symbol body in ONE call.
 
@@ -2453,6 +2490,14 @@ def register_library_tools(mcp):
                 NOT need the 100-mil pin grid (rule 15), so the default is
                 a finer 25 mils for clean glyph detail; pass 100 for the
                 coarse grid or 0/1 to disable snapping.
+            component_name: The symbol to edit, by library reference,
+                in the active SchLib. It becomes the held (current)
+                symbol, as ``lib_set_current_component`` does. Omit to
+                edit the symbol held from ``lib_create_symbol`` /
+                ``lib_set_current_component``; with none held the reply
+                is NO_COMPONENT. The symbol merely selected in the
+                editor is never used (its members cannot be read safely
+                from a script: it halted the bridge on 2026-10-11).
 
         Returns:
             Dict with ``added``, ``failed``, ``total`` counts.
@@ -2469,10 +2514,13 @@ def register_library_tools(mcp):
             op_strs.append(";".join(fields))
         if not op_strs:
             return {"error": "No lines provided", "added": 0}
+        params: dict[str, Any] = {"lines": "~~".join(op_strs)}
+        if component_name:
+            params["component_name"] = component_name
         bridge = get_bridge()
         return await bridge.send_command_async(
             "library.add_symbol_lines",
-            {"lines": "~~".join(op_strs)},
+            params,
         )
 
     # =========================================================================
@@ -3877,8 +3925,10 @@ def register_library_tools(mcp):
             component_name: Name of the schematic component. Resolved by
                 library reference and made current before linking, so the
                 model lands on the symbol you name rather than on whatever
-                was last created. Leave empty to target the current
-                component.
+                was last created. Leave empty to target the symbol held
+                from ``lib_create_symbol`` / ``lib_set_current_component``;
+                with none held the reply is NO_COMPONENT (the editor's own
+                selection is never read).
             footprint_name: Name of the footprint to link
             footprint_library: NOT APPLIED, accepted only so existing
                 callers keep working. The footprint is bound by NAME via
@@ -5760,6 +5810,7 @@ def register_library_tools(mcp):
         end_angle: float = 360,
         width: int = 1,
         grid: int = 25,
+        component_name: str = "",
     ) -> dict[str, Any]:
         """Add an arc to the current library symbol.
 
@@ -5773,21 +5824,32 @@ def register_library_tools(mcp):
             grid: snap grid (mils); arcs are glyph detail and don't need
                 the 100-mil pin grid (rule 15), so the default is a finer
                 25 (e.g. inductor coils). Pass 100 for coarse, 0/1 for none.
+            component_name: The symbol to edit, by library reference,
+                in the active SchLib. It becomes the held (current)
+                symbol, as ``lib_set_current_component`` does. Omit to
+                edit the symbol held from ``lib_create_symbol`` /
+                ``lib_set_current_component``; with none held the reply
+                is NO_COMPONENT. The symbol merely selected in the
+                editor is never used (its members cannot be read safely
+                from a script: it halted the bridge on 2026-10-11).
 
         Returns:
             Dictionary confirming arc addition
         """
+        params: dict[str, Any] = {
+            "x_center": _snap_grid(x_center, grid),
+            "y_center": _snap_grid(y_center, grid),
+            "radius": _snap_grid(radius, grid),
+            "start_angle": start_angle,
+            "end_angle": end_angle,
+            "width": width,
+        }
+        if component_name:
+            params["component_name"] = component_name
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "library.add_symbol_arc",
-            {
-                "x_center": _snap_grid(x_center, grid),
-                "y_center": _snap_grid(y_center, grid),
-                "radius": _snap_grid(radius, grid),
-                "start_angle": start_angle,
-                "end_angle": end_angle,
-                "width": width,
-            },
+            params,
         )
         return result
 
@@ -5795,6 +5857,7 @@ def register_library_tools(mcp):
     async def lib_add_symbol_polygon(
         vertices: str,
         grid: int = 25,
+        component_name: str = "",
     ) -> dict[str, Any]:
         """Add a polygon (filled shape) to the current library symbol.
 
@@ -5807,6 +5870,14 @@ def register_library_tools(mcp):
                 glyph detail (e.g. a diode triangle) and doesn't need the
                 100-mil pin grid (rule 15), so the default is a finer 25;
                 pass 100 for coarse or 0/1 to disable snapping.
+            component_name: The symbol to edit, by library reference,
+                in the active SchLib. It becomes the held (current)
+                symbol, as ``lib_set_current_component`` does. Omit to
+                edit the symbol held from ``lib_create_symbol`` /
+                ``lib_set_current_component``; with none held the reply
+                is NO_COMPONENT. The symbol merely selected in the
+                editor is never used (its members cannot be read safely
+                from a script: it halted the bridge on 2026-10-11).
 
         Returns:
             Dictionary confirming polygon addition with vertex count
@@ -5822,10 +5893,13 @@ def register_library_tools(mcp):
         except (ValueError, AttributeError):
             # Pass through; bridge will reject malformed vertices itself.
             pass
+        params: dict[str, Any] = {"vertices": vertices}
+        if component_name:
+            params["component_name"] = component_name
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "library.add_symbol_polygon",
-            {"vertices": vertices},
+            params,
         )
         return result
 
@@ -5939,7 +6013,9 @@ def register_library_tools(mcp):
 
         Args:
             component_name: library reference of the symbol to read.
-                Empty falls back to the editor's current component.
+                Empty means the symbol held from ``lib_create_symbol`` /
+                ``lib_set_current_component``; with none held the reply
+                is NO_COMPONENT (the editor's own selection is never read).
             output_path: write the full pin array here as JSON and
                 return the summary. Forces the file path regardless of
                 size.
@@ -6002,7 +6078,9 @@ def register_library_tools(mcp):
             pin_designators: comma-separated pin numbers, e.g. "3,12".
             owner_part_id: 0 for Part Zero, or 1..part_count.
             component_name: library reference of the symbol to edit.
-                Empty falls back to the editor's current component.
+                Empty means the symbol held from ``lib_create_symbol`` /
+                ``lib_set_current_component``; with none held the reply
+                is NO_COMPONENT (the editor's own selection is never read).
 
         Returns:
             Dictionary with "component", "owner_part_id", the
@@ -6607,7 +6685,9 @@ def register_library_tools(mcp):
         )
 
     @mcp.tool()
-    async def lib_split_pin_functions() -> dict[str, Any]:
+    async def lib_split_pin_functions(
+        component_name: str = "",
+    ) -> dict[str, Any]:
         """Split slash-delimited pin names into pin function lists.
 
         For the current library symbol, parses each pin whose name is
@@ -6615,11 +6695,21 @@ def register_library_tools(mcp):
         function popup), leaving `PRIMARY` as the visible name. Pins without a
         `/` are unchanged.
 
+        Args:
+            component_name: The symbol, by library reference, in the active
+                SchLib. Omit for the symbol held from ``lib_create_symbol``
+                / ``lib_set_current_component``; with none held the reply
+                is NO_COMPONENT (the editor's own selection is never used).
+
         Returns:
             {"pins_processed": N}.
         """
+        params: dict[str, Any] = {}
+        if component_name:
+            params["component_name"] = component_name
         bridge = get_bridge()
-        return await bridge.send_command_async("library.split_pin_functions", {})
+        return await bridge.send_command_async(
+            "library.split_pin_functions", params)
 
     @mcp.tool()
     async def lib_get_installed_libraries(
