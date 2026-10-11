@@ -1304,6 +1304,64 @@ Begin
     End;
 End;
 
+{ The TLayer for a mechanical layer number, or eNoLayer.                      }
+
+Function MechLayerFromNumber(N : Integer) : TLayer;
+Begin
+    Result := eNoLayer;
+    If (N < 1) Or (N > 1024) Then Exit;
+    If N <= 16 Then
+    Begin
+        Result := GetLayerFromString('Mechanical' + IntToStr(N));
+        Exit;
+    End;
+    { NOT GATED, deliberately. Which build first declares LayerUtils is not   }
+    { known, and mechanical layers above 16 predate AD19, so a version gate   }
+    { could refuse a layer that resolves today. The Except is counted        }
+    { instead (RecordCaughtException), so a live run on any build shows       }
+    { whether it ever fires; an UNDECLARED LayerUtils would not reach it at  }
+    { all (that fault is uncatchable) and would show as the dispatcher's     }
+    { catch. See RELEASE_VERIFICATION section 39.                            }
+    Try
+        Result := LayerUtils.MechanicalLayer(N);
+    Except
+        RecordCaughtException('MechLayerFromNumber:LayerUtils.MechanicalLayer');
+        Result := eNoLayer;
+    End;
+End;
+
+{ THE NAME OF A MECHANICAL LAYER ABOVE 16 (live 2026-10-11).                  }
+{ pcb_set_layer_visibility Mechanical21 resolved the layer and echoed         }
+{ "Unknown", because GetLayerString below names Mechanical1-16 only, though   }
+{ ResolveLayerId's contract says every handler echoes the RESOLVED layer.     }
+{ Called by GetLayerString only when nothing else matched. Two lookups at     }
+{ most, each through MechLayerFromNumber (never raising, its Except counted): }
+{ Mechanical17's id, then the one candidate the offset from it names,         }
+{ VERIFIED by looking that number up - nothing is assumed about the encoding, }
+{ and a layer that does not verify keeps 'Unknown', as before. Not a loop over }
+{ 17..MechScanLimit: GetLayerString runs once per object in the bulk reads.   }
+{ VERSION GATE: only on a build known to be AD19 or later (AltiumMajorVersion }
+{ >= 19). LayerUtils predates nothing this is sure of, and an undeclared      }
+{ identifier faults uncatchably at RUN time, so an unknown version (-1) or an }
+{ older build answers '' and GetLayerString keeps 'Unknown'. '' when nothing  }
+{ verifies.                                                                   }
+Function MechLayerNameAbove16(Layer : TLayer) : String;
+Var
+    First, Hit : TLayer;
+    N : Integer;
+Begin
+    Result := '';
+    If Layer = eNoLayer Then Exit;
+    If AltiumMajorVersion(0) < 19 Then Exit;
+    First := MechLayerFromNumber(17);
+    If First = eNoLayer Then Exit;
+    N := 17 + (Layer - First);
+    If (N < 17) Or (N > MechScanLimit) Then Exit;
+    Hit := MechLayerFromNumber(N);
+    If (Hit <> eNoLayer) And (Hit = Layer) Then
+        Result := 'Mechanical' + IntToStr(N);
+End;
+
 Function GetLayerString(Layer : TLayer) : String;
 Begin
     If Layer = eTopLayer Then Result := 'TopLayer'
@@ -1380,7 +1438,11 @@ Begin
     Else If Layer = eMechanical15 Then Result := 'Mechanical15'
     Else If Layer = eMechanical16 Then Result := 'Mechanical16'
     Else If Layer = eKeepOutLayer Then Result := 'KeepOutLayer'
-    Else Result := 'Unknown';
+    Else
+    Begin
+        Result := MechLayerNameAbove16(Layer);
+        If Result = '' Then Result := 'Unknown';
+    End;
 End;
 
 Function ExtractJsonArray(Json : String; Key : String) : String;
@@ -1721,31 +1783,6 @@ Begin
     If (Value >= 1) And (Value <= 1024) Then Result := Value;
 End;
 
-{ The TLayer for a mechanical layer number, or eNoLayer.                      }
-
-Function MechLayerFromNumber(N : Integer) : TLayer;
-Begin
-    Result := eNoLayer;
-    If (N < 1) Or (N > 1024) Then Exit;
-    If N <= 16 Then
-    Begin
-        Result := GetLayerFromString('Mechanical' + IntToStr(N));
-        Exit;
-    End;
-    { NOT GATED, deliberately. Which build first declares LayerUtils is not   }
-    { known, and mechanical layers above 16 predate AD19, so a version gate   }
-    { could refuse a layer that resolves today. The Except is counted        }
-    { instead (RecordCaughtException), so a live run on any build shows       }
-    { whether it ever fires; an UNDECLARED LayerUtils would not reach it at  }
-    { all (that fault is uncatchable) and would show as the dispatcher's     }
-    { catch. See RELEASE_VERIFICATION section 39.                            }
-    Try
-        Result := LayerUtils.MechanicalLayer(N);
-    Except
-        RecordCaughtException('MechLayerFromNumber:LayerUtils.MechanicalLayer');
-        Result := eNoLayer;
-    End;
-End;
 
 
 {..............................................................................}
