@@ -235,6 +235,117 @@ Begin
         Result := False;
 End;
 
+{..............................................................................}
+{ CHECK FIRST, DO NOT CATCH.                                                   }
+{                                                                              }
+{ Altium's DelphiScript engine shows an undeclared-identifier exception as a   }
+{ MODAL 'press OK' dialog BEFORE the surrounding Try/Except runs (measured;    }
+{ see WriteFileContent in Main.pas). A Try around a member some types do not   }
+{ have is therefore not a guard: every object of the wrong type pops a dialog  }
+{ and the polling loop waits on it. The helpers below answer "does this type   }
+{ lack that member" BEFORE the read or write.                                  }
+{                                                                              }
+{ THEY ARE DENYLISTS, AND THAT IS WHAT MAKES THEM SAFE. Each names only types  }
+{ whose interface certainly lacks the member (the polyline, label, port,       }
+{ rectangle and container shapes in docs/altium-delphiscript/02). A True can   }
+{ only send a caller down the branch today's Except already produced; a type   }
+{ nobody has checked (eLine, eBusEntry, eProbe, eParameterSet, eCompileMask)   }
+{ answers False and keeps today's Try, so a wrong guess can never take away a  }
+{ read or write that works today. Grow a list only on a probe's evidence.      }
+{..............................................................................}
+
+{ Types plainly without a library link or pin semantics: the wiring, text,   }
+{ port, graphic and frame shapes. The shared core of the lists below.        }
+Function SchObjectIsPlainShape(Obj : ISch_GraphicalObject) : Boolean;
+Var
+    Id : Integer;
+Begin
+    Result := False;
+    If Obj = Nil Then Exit;
+    Id := Obj.ObjectId;
+    Result := (Id = eNetLabel) Or (Id = ePort) Or (Id = ePowerObject)
+        Or (Id = eWire) Or (Id = eBus) Or (Id = eParameter) Or (Id = eLabel)
+        Or (Id = eRectangle) Or (Id = eSheetEntry) Or (Id = eNoERC)
+        Or (Id = eJunction) Or (Id = eImage) Or (Id = eTextFrame)
+        Or (Id = eNote) Or (Id = eCrossSheetConnector);
+End;
+
+{ No vertex array: GetState_VerticesCount / GetState_Vertex are polyline     }
+{ members (ISch_Wire, bus, polyline, polygon, bezier). eLine, eBusEntry and  }
+{ the unprobed types are deliberately NOT listed: if one of them does carry  }
+{ vertices today, listing it would blank a read that works.                  }
+Function SchObjectLacksVertexArray(Obj : ISch_GraphicalObject) : Boolean;
+Var
+    Id : Integer;
+Begin
+    Result := False;
+    If Obj = Nil Then Exit;
+    Id := Obj.ObjectId;
+    If (Id = eWire) Or (Id = eBus) Then Exit;
+    Result := SchObjectIsPlainShape(Obj) Or (Id = eSchComponent)
+        Or (Id = ePin) Or (Id = eSheetSymbol) Or (Id = eHarnessConnector);
+End;
+
+{ The generic getter's and setter's late-bound names that some types are     }
+{ certain not to have. True means "do not touch it": the getter answers ''   }
+{ and the setter reports the write failed, which is exactly what each one's  }
+{ outer Except produced after the modal. Names not listed answer False, and  }
+{ every name listed is one BOTH the getter and the setter have a case for.   }
+Function SchPropAbsentOn(Obj : ISch_GraphicalObject; PropName : String) : Boolean;
+Var
+    Id : Integer;
+Begin
+    Result := False;
+    If Obj = Nil Then Exit;
+    Id := Obj.ObjectId;
+    { ISch_Component members. }
+    If (PropName = 'LibReference') Or (PropName = 'SourceLibraryName')
+        Or (PropName = 'DesignItemId') Or (PropName = 'ComponentDescription')
+        Or (PropName = 'Description') Then
+        Result := SchObjectIsPlainShape(Obj) Or (Id = ePin)
+    { ISch_Pin members. }
+    Else If (PropName = 'Electrical') Or (PropName = 'PinLength') Then
+        Result := SchObjectIsPlainShape(Obj) Or (Id = eSchComponent)
+            Or (Id = eSheetSymbol) Or (Id = eHarnessConnector)
+    { ISch_RectangularGroup members (sheet symbol, harness connector). }
+    Else If (PropName = 'XSize') Or (PropName = 'YSize') Then
+        Result := SchObjectIsPlainShape(Obj) Or (Id = ePin);
+End;
+
+{ The getter's exact-name polyline reads. Read-only names: the setter has    }
+{ no case for them and must keep answering 'unknown', so they are not in     }
+{ SchPropAbsentOn, which the setter also consults.                           }
+Function SchVertexReadName(PropName : String) : Boolean;
+Begin
+    Result := (PropName = 'VerticesCount') Or (PropName = 'Vertex.1.X')
+        Or (PropName = 'Vertex.1.Y') Or (PropName = 'Vertex.2.X')
+        Or (PropName = 'Vertex.2.Y');
+End;
+
+{ IsMirrored on a NON-component. The component path is SetState_IsMirrored  }
+{ and is dispatched by ObjectId already. The wiring and plain graphics have  }
+{ no mirror at all; the text-like types (labels, net labels, parameters)     }
+{ might, and so might eNoERC and eLine, so they are not listed.             }
+Function SchObjectLacksIsMirrored(Obj : ISch_GraphicalObject) : Boolean;
+Var
+    Id : Integer;
+Begin
+    Result := False;
+    If Obj = Nil Then Exit;
+    Id := Obj.ObjectId;
+    Result := (Id = eWire) Or (Id = eBus) Or (Id = eJunction)
+        Or (Id = eRectangle);
+End;
+
+{ The type tag a RecordCaughtException row carries, so a live run says WHICH }
+{ type popped the modal. ObjectId is on the base interface; Nil gives ''.    }
+Function SchObjTypeTag(Obj : ISch_GraphicalObject) : String;
+Begin
+    Result := '';
+    If Obj = Nil Then Exit;
+    Result := IntToStr(Obj.ObjectId);
+End;
+
 Function GetSchComponentSubText(Obj : ISch_GraphicalObject; PropName : String) : String;
 Var
     C : ISch_Component;
@@ -402,12 +513,18 @@ Var
 Begin
     Result := '';
     U := UpperCase(Trim(PropName));
+    { A type with no vertex array would pop an undeclared-identifier modal  }
+    { at GetState_VerticesCount below, once per object iterated, and then   }
+    { answer '' through the swallowed exception. Answer '' without asking.  }
+    { Types not certainly vertex-less keep the Trys below (they stay as the }
+    { fault backstop).                                                      }
+    If SchObjectLacksVertexArray(Obj) Then Exit;
 
     { Bulk dump. VerticesCount itself stays on the caller's fast path. }
     If U = 'VERTICES' Then
     Begin
         Cnt := 0;
-        Try Cnt := Obj.GetState_VerticesCount; Except End;
+        Try Cnt := Obj.GetState_VerticesCount; Except RecordCaughtException('GetSchVertexProperty:VerticesCount:' + SchObjTypeTag(Obj)); End;
         If Cnt < 1 Then Exit;
         Dump := '';
         For I := 1 To Cnt Do
@@ -437,7 +554,7 @@ Begin
     If IdxStr = '' Then Exit;
 
     Cnt := 0;
-    Try Cnt := Obj.GetState_VerticesCount; Except End;
+    Try Cnt := Obj.GetState_VerticesCount; Except RecordCaughtException('GetSchVertexProperty:VerticesCount:' + SchObjTypeTag(Obj)); End;
     If Cnt < 1 Then Exit;
 
     If IdxStr = 'LAST' Then
@@ -482,6 +599,15 @@ Var
     POrient, PLen, PCoord : Integer;
 Begin
     Result := '';
+    { CHECK FIRST (see SchPropAbsentOn). A name this type certainly lacks    }
+    { popped an undeclared-identifier modal per object, then the Except below }
+    { answered ''. Answer '' without asking. In a FILTER that was one modal   }
+    { for every object of the type on the sheet.                             }
+    If SchPropAbsentOn(Obj, PropName) Then Exit;
+    If SchVertexReadName(PropName) Then
+        If SchObjectLacksVertexArray(Obj) Then Exit;
+    If PropName = 'IsMirrored' Then
+        If SchObjectLacksIsMirrored(Obj) Then Exit;
     Try
         // Identity
         If PropName = 'ObjectId'    Then Result := IntToStr(Obj.ObjectId)
@@ -545,15 +671,27 @@ Begin
         Else If PropName = 'OwnerPartDisplayMode' Then Result := IntToStr(Obj.OwnerPartDisplayMode)
         Else If PropName = 'ComponentDescription' Then Result := Obj.ComponentDescription
         Else If PropName = 'UniqueId'    Then Result := Obj.UniqueId
+        { ISch_Component members: Comp := Obj does not narrow, so on any other }
+        { type the read was an undeclared identifier (a modal) and then ''.   }
         Else If PropName = 'CurrentPartID' Then
         Begin
-            Comp := Obj;
-            Try Result := IntToStr(Comp.CurrentPartID); Except Result := ''; End;
+            If Obj.ObjectId = eSchComponent Then
+            Begin
+                Comp := Obj;
+                Try Result := IntToStr(Comp.CurrentPartID); Except Result := ''; End;
+            End
+            Else
+                Result := '';
         End
         Else If PropName = 'PartCount' Then
         Begin
-            Comp := Obj;
-            Try Result := IntToStr(Comp.PartCount); Except Result := ''; End;
+            If Obj.ObjectId = eSchComponent Then
+            Begin
+                Comp := Obj;
+                Try Result := IntToStr(Comp.PartCount); Except Result := ''; End;
+            End
+            Else
+                Result := '';
         End
 
         // Sub-object string properties (compound interfaces, typed cast required).
@@ -712,6 +850,11 @@ Begin
         Else If PropName = 'IsSolid'     Then Result := BoolToJsonStr(Obj.IsSolid)
         Else If PropName = 'IsMirrored'  Then Result := BoolToJsonStr(Obj.IsMirrored);
     Except
+        { Reached by a name no check above covers on a type that lacks it    }
+        { (Name, FontId, Style, Width, ... on the unprobed types). Counted so }
+        { a live run shows which pairs still pop; the probe matrix turns them }
+        { into SchPropAbsentOn entries.                                     }
+        RecordCaughtException('GetSchProperty:' + PropName + ':' + SchObjTypeTag(Obj));
         Result := '';
     End;
 End;
@@ -755,11 +898,20 @@ Begin
     Matched := True;
     WroteOK := True;
     Try
+        { CHECK FIRST (see SchPropAbsentOn). Writing a name this type          }
+        { certainly lacks popped an undeclared-identifier modal per matched    }
+        { object, then the Except below set Result := -1 ('failed'). Report    }
+        { the same failure without asking. Every name SchPropAbsentOn lists    }
+        { has a case below, so a listed name can never turn 'unknown' into     }
+        { 'failed'.                                                            }
+        If SchPropAbsentOn(Obj, PropName) Then
+            WroteOK := False
+
         // Coordinates (expected in mils). `Obj.Location` returns a copy of
         // the TLocation record via the GetState_Location reader; writing
         // directly to `.X` / `.Y` on that copy is silently discarded. Read
         // the whole record, patch the target field, write it back.
-        If PropName = 'Location.X' Then
+        Else If PropName = 'Location.X' Then
         Begin
             Loc := Obj.Location;
             Loc.X := MilsToCoord(StrToIntDef(Value, 0));
@@ -859,11 +1011,17 @@ Begin
             Try Comp.SetState_UniqueId(Value); Except End;
             Try Comp.UniqueId := Value; Except End;
         End
+        { ISch_Component members. On any other type both writes were an       }
+        { undeclared identifier (two modals), both swallowed, Result 1: the   }
+        { same Result now comes from doing nothing.                           }
         Else If PropName = 'CurrentPartID' Then
         Begin
-            Comp := Obj;
-            Try Comp.SetState_CurrentPartID(StrToIntDef(Value, 1)); Except End;
-            Try Comp.CurrentPartID := StrToIntDef(Value, 1); Except End;
+            If Obj.ObjectId = eSchComponent Then
+            Begin
+                Comp := Obj;
+                Try Comp.SetState_CurrentPartID(StrToIntDef(Value, 1)); Except End;
+                Try Comp.CurrentPartID := StrToIntDef(Value, 1); Except End;
+            End;
         End
         Else If PropName = 'PartCount' Then
         Begin
@@ -875,8 +1033,11 @@ Begin
               Do NOT call SetState_PartCount: that identifier is not on
               ISch_Component in this DelphiScript, and undeclared
               identifiers raise a modal that bypasses Try/Except. }
-            Comp := Obj;
-            Try Comp.PartCount := StrToIntDef(Value, 1); Except End;
+            If Obj.ObjectId = eSchComponent Then
+            Begin
+                Comp := Obj;
+                Try Comp.PartCount := StrToIntDef(Value, 1); Except End;
+            End;
         End
 
         // Sub-object string properties (compound interfaces, typed cast required)
@@ -985,7 +1146,15 @@ Begin
             End
             Else
             Begin
-                Try Obj.IsMirrored := StrToBool(Value); Except End;
+                { A type with no mirror at all popped a modal here and the  }
+                { swallowed write left Result 1; skipping it leaves Result  }
+                { 1 too. Unprobed types keep the write and its counter.     }
+                If Not SchObjectLacksIsMirrored(Obj) Then
+                    Try
+                        Obj.IsMirrored := StrToBool(Value);
+                    Except
+                        RecordCaughtException('SetSchProperty:IsMirrored:' + SchObjTypeTag(Obj));
+                    End;
             End;
         End
         Else If PropName = 'Selection'   Then Obj.Selection := StrToBool(Value)
@@ -999,6 +1168,9 @@ Begin
         Else If Not WroteOK Then Result := -1
         Else Result := 1;
     Except
+        { A name no check above covers, written on a type that lacks it      }
+        { (Name, FontId, Style, Selection, ... on the unprobed types).       }
+        RecordCaughtException('SetSchProperty:' + PropName + ':' + SchObjTypeTag(Obj));
         Result := -1;
     End;
 
@@ -1091,6 +1263,70 @@ Begin
             Result := False;
             Exit;
         End;
+    End;
+End;
+
+{..............................................................................}
+{ A SHEET ENTRY IS FOUND THROUGH ITS OWNER, NOT TRIED ON EVERY SYMBOL.         }
+{                                                                              }
+{ A sheet entry lives in its sheet symbol's child container. The delete path  }
+{ used to find it at document level and then call RemoveSchObject on EVERY    }
+{ sheet symbol until one accepted it; each symbol that did not own it raised, }
+{ and the engine shows that as a modal before the Try/Except runs. One modal  }
+{ per non-owner symbol, per deleted entry, on any hierarchical top sheet.     }
+{ Walking each symbol's OWN entries (the Gen_GetSchGeometry pattern) names    }
+{ the owner, so the remove is asked of exactly one symbol.                    }
+{..............................................................................}
+
+{ The first of Sym's own sheet entries that matches FilterStr, or Nil. }
+Function SheetEntryUnderMatching(Sym : ISch_SheetSymbol; FilterStr : String) : ISch_GraphicalObject;
+Var
+    Iter : ISch_Iterator;
+    Child : ISch_GraphicalObject;
+Begin
+    Result := Nil;
+    If Sym = Nil Then Exit;
+    Iter := Sym.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eSheetEntry));
+    Try
+        Child := Iter.FirstSchObject;
+        While Child <> Nil Do
+        Begin
+            If MatchesFilter(Child, FilterStr) Then
+            Begin
+                Result := Child;
+                Break;
+            End;
+            Child := Iter.NextSchObject;
+        End;
+    Finally
+        Sym.SchIterator_Destroy(Iter);
+    End;
+End;
+
+{ The first sheet symbol on SchDoc owning a sheet entry that matches, or Nil. }
+Function SheetEntryOwnerMatching(SchDoc : ISch_Document; FilterStr : String) : ISch_SheetSymbol;
+Var
+    SymIter : ISch_Iterator;
+    Sym : ISch_SheetSymbol;
+Begin
+    Result := Nil;
+    If SchDoc = Nil Then Exit;
+    SymIter := SchDoc.SchIterator_Create;
+    SymIter.AddFilter_ObjectSet(MkSet(eSheetSymbol));
+    Try
+        Sym := SymIter.FirstSchObject;
+        While Sym <> Nil Do
+        Begin
+            If SheetEntryUnderMatching(Sym, FilterStr) <> Nil Then
+            Begin
+                Result := Sym;
+                Break;
+            End;
+            Sym := SymIter.NextSchObject;
+        End;
+    Finally
+        SchDoc.SchIterator_Destroy(SymIter);
     End;
 End;
 
@@ -1454,9 +1690,9 @@ Function ProcessSchDocObjects(SchDoc : ISch_Document; ObjTypeInt : Integer;
     Mode : String; DocPath : String;
     Var TotalMatched : Integer; Limit : Integer) : String;
 Var
-    Iterator, SymIter : ISch_Iterator;
+    Iterator : ISch_Iterator;
     Obj, FoundObj : ISch_GraphicalObject;
-    Sym : ISch_SheetSymbol;
+    EntryOwner : ISch_SheetSymbol;
     Removed : Boolean;
     ObjJson : String;
     First : Boolean;
@@ -1484,44 +1720,52 @@ Begin
         MaxIter := 100000;
         While MaxIter > 0 Do
         Begin
-            Iterator := SchDoc.SchIterator_Create;
-            Iterator.AddFilter_ObjectSet(MkSet(ObjTypeInt));
-            FoundObj := Nil;
-            Obj := Iterator.FirstSchObject;
-            While Obj <> Nil Do
-            Begin
-                If MatchesFilter(Obj, FilterStr) Then
-                Begin
-                    FoundObj := Obj;
-                    Break;
-                End;
-                Obj := Iterator.NextSchObject;
-            End;
-            SchDoc.SchIterator_Destroy(Iterator);
-            If FoundObj = Nil Then Break;
             { Sheet entries belong to their parent sheet symbol's child       }
             { container, not the SchDoc. SchDoc.RemoveSchObject silently      }
-            { no-ops on them, leaving the entry placed. Walk sheet symbols    }
-            { until one of them accepts the remove. Try/Except absorbs the    }
-            { wrong-parent failures.                                          }
+            { no-ops on them, leaving the entry placed. Find the entry       }
+            { THROUGH its owner (SheetEntryOwnerMatching) and ask that one    }
+            { symbol to remove it; trying every symbol until one accepted     }
+            { raised a modal on each non-owner.                               }
+            FoundObj := Nil;
+            EntryOwner := Nil;
+            If ObjTypeInt = eSheetEntry Then
+            Begin
+                EntryOwner := SheetEntryOwnerMatching(SchDoc, FilterStr);
+                If EntryOwner <> Nil Then
+                    FoundObj := SheetEntryUnderMatching(EntryOwner, FilterStr);
+            End;
+            { Everything else, and an entry no symbol owns, is found at       }
+            { document level exactly as before.                               }
+            If FoundObj = Nil Then
+            Begin
+                Iterator := SchDoc.SchIterator_Create;
+                Iterator.AddFilter_ObjectSet(MkSet(ObjTypeInt));
+                Obj := Iterator.FirstSchObject;
+                While Obj <> Nil Do
+                Begin
+                    If MatchesFilter(Obj, FilterStr) Then
+                    Begin
+                        FoundObj := Obj;
+                        Break;
+                    End;
+                    Obj := Iterator.NextSchObject;
+                End;
+                SchDoc.SchIterator_Destroy(Iterator);
+            End;
+            If FoundObj = Nil Then Break;
             If ObjTypeInt = eSheetEntry Then
             Begin
                 Removed := False;
-                SymIter := SchDoc.SchIterator_Create;
-                SymIter.AddFilter_ObjectSet(MkSet(eSheetSymbol));
-                Try
-                    Sym := SymIter.FirstSchObject;
-                    While Sym <> Nil Do
-                    Begin
-                        Try
-                            Sym.RemoveSchObject(FoundObj);
-                            Removed := True;
-                            Break;
-                        Except End;
-                        Sym := SymIter.NextSchObject;
+                If EntryOwner <> Nil Then
+                Begin
+                    { The owner's own remove. The Try is the fault backstop; }
+                    { a refusal falls through to the document as before.     }
+                    Try
+                        EntryOwner.RemoveSchObject(FoundObj);
+                        Removed := True;
+                    Except
+                        RecordCaughtException('ProcessSchDocObjects:owner-remove');
                     End;
-                Finally
-                    SchDoc.SchIterator_Destroy(SymIter);
                 End;
                 If Not Removed Then
                     Try SchDoc.RemoveSchObject(FoundObj); Except End;
@@ -2955,7 +3199,17 @@ Begin
 
                     If (ObjNet <> '') And (UpperCase(ObjNet) = TargetUpper) Then
                     Begin
-                        Try Obj.Selection := True; Except End;
+                        { NEEDS A LIVE PROBE: whether a sheet entry (a sub-object }
+                        { of its symbol) carries Selection is disputed between   }
+                        { the interface notes and docs/altium-delphiscript/02.   }
+                        { No conservative check exists (skipping entries would   }
+                        { stop highlighting them if they DO carry it), so the    }
+                        { Try stays and the counter names the type that popped.  }
+                        Try
+                            Obj.Selection := True;
+                        Except
+                            RecordCaughtException('Gen_HighlightNet:Selection:' + SchObjTypeTag(Obj));
+                        End;
                         Matched := Matched + 1;
                     End;
                     Obj := SchIter.NextSchObject;
@@ -3038,13 +3292,20 @@ Begin
                 Obj := SchIter.FirstSchObject;
                 While Obj <> Nil Do
                 Begin
+                    { NEEDS A LIVE PROBE: pins and sheet entries are sub-     }
+                    { objects, and whether they carry Selection is disputed.  }
+                    { Skipping them is not conservative (a selected pin that  }
+                    { CAN be cleared today would stay selected and uncounted) }
+                    { so the Try stays and the counter names the type.        }
                     Try
                         If Obj.Selection Then
                         Begin
                             Obj.Selection := False;
                             Cleared := Cleared + 1;
                         End;
-                    Except End;
+                    Except
+                        RecordCaughtException('Gen_ClearHighlights:Selection:' + SchObjTypeTag(Obj));
+                    End;
                     Obj := SchIter.NextSchObject;
                 End;
             Finally
@@ -3275,7 +3536,12 @@ Begin
     Focused := Nil;
     Try Focused := Workspace.DM_FocusedProject; Except Focused := Nil; End;
     If Focused <> Nil Then
-        Try FocusedPath := Focused.DM_ProjectFullPath; Except FocusedPath := ''; End;
+        Try
+            FocusedPath := Focused.DM_ProjectFullPath;
+        Except
+            RecordCaughtException('Gen_WriteProjectFile:DM_ProjectFullPath');
+            FocusedPath := '';
+        End;
 
     { Closing the focused sheet hands the focus to whatever Altium picks,     }
     { possibly outside the project. Show another loaded sheet of THIS         }
@@ -3308,7 +3574,12 @@ Begin
         Focused := Nil;
         Try Focused := Workspace.DM_FocusedProject; Except Focused := Nil; End;
         If Focused <> Nil Then
-            Try FocusedPath := Focused.DM_ProjectFullPath; Except FocusedPath := ''; End;
+            Try
+                FocusedPath := Focused.DM_ProjectFullPath;
+            Except
+                RecordCaughtException('Gen_WriteProjectFile:DM_ProjectFullPath');
+                FocusedPath := '';
+            End;
     End;
     If UpperCase(FocusedPath) <> UpperCase(ProjFile) Then
     Begin
@@ -3376,7 +3647,12 @@ Begin
     End;
 
     ProjFile := '';
-    Try ProjFile := Project.DM_ProjectFullPath; Except ProjFile := ''; End;
+    Try
+        ProjFile := Project.DM_ProjectFullPath;
+    Except
+        RecordCaughtException('Gen_AddSheet:DM_ProjectFullPath');
+        ProjFile := '';
+    End;
 
     // Build the new sheet path in the same directory as the project
     NewDocPath := ProjFile;
@@ -3573,7 +3849,12 @@ Begin
         Exit;
     End;
     ProjFile := '';
-    Try ProjFile := Project.DM_ProjectFullPath; Except ProjFile := ''; End;
+    Try
+        ProjFile := Project.DM_ProjectFullPath;
+    Except
+        RecordCaughtException('Gen_DeleteSheet:DM_ProjectFullPath');
+        ProjFile := '';
+    End;
 
     { What has the focus now, so the reply can say it is still open. That is  }
     { the document the old CloseObject took instead of the one named.         }
@@ -3589,7 +3870,12 @@ Begin
     FocusedProj := Nil;
     Try FocusedProj := Workspace.DM_FocusedProject; Except FocusedProj := Nil; End;
     If (FocusedProj <> Nil) And (ProjFile <> '') Then
-        Try WasFocusedProject := UpperCase(FocusedProj.DM_ProjectFullPath) = UpperCase(ProjFile); Except WasFocusedProject := False; End;
+        Try
+            WasFocusedProject := UpperCase(FocusedProj.DM_ProjectFullPath) = UpperCase(ProjFile);
+        Except
+            RecordCaughtException('Gen_DeleteSheet:FocusedProjectFullPath');
+            WasFocusedProject := False;
+        End;
 
     // Count schematic documents and find the target by its full path
     SchCount := 0;
@@ -7725,9 +8011,21 @@ Begin
         Exit;
     End;
 
-    Doc := SchDoc;
+    { THE DM DOCUMENT, NOT THE EDITOR'S. This was `Doc := SchDoc`, which    }
+    { puts the schematic server's ISch_Document in an IDocument variable    }
+    { without converting it: DM_ConstraintGroupCount was then late-bound on }
+    { an object that does not have it, an undeclared-identifier modal on    }
+    { EVERY call, and the swallowed exception left the reply at zero groups.}
+    { FindDMDocumentByPath reaches the sheet's DM twin; when none is listed }
+    { at the sheet's absolute path the reply is that same zero.            }
+    Doc := FindDMDocumentByPath(ResolveLoadedDocPath(SchDoc.DocumentName));
     GroupCount := 0;
-    Try GroupCount := Doc.DM_ConstraintGroupCount; Except End;
+    If Doc <> Nil Then
+        Try
+            GroupCount := Doc.DM_ConstraintGroupCount;
+        Except
+            RecordCaughtException('Gen_GetConstraintGroups:DM_ConstraintGroupCount');
+        End;
 
     Json := '';
     For I := 0 To GroupCount - 1 Do
@@ -7812,8 +8110,16 @@ Begin
     Harness.Location := Point(MilsToCoord(X), MilsToCoord(Y));
     Harness.XSize := MilsToCoord(W);
     Harness.YSize := MilsToCoord(H);
+    { NEEDS A LIVE PROBE: HarnessType is not a documented member of        }
+    { ISch_HarnessConnector (the label is probably a complex-text sub-      }
+    { object, like a sheet symbol's SheetName). Dropping the write would    }
+    { lose it if the member DOES exist, so it stays, counted.               }
     If HarnessType <> '' Then
-        Try Harness.HarnessType := HarnessType; Except End;
+        Try
+            Harness.HarnessType := HarnessType;
+        Except
+            RecordCaughtException('Gen_PlaceHarnessConnector:HarnessType');
+        End;
 
     SchDoc.RegisterSchObjectInContainer(Harness);
     SchRegisterObject(SchDoc, Harness);
@@ -7870,10 +8176,26 @@ Begin
     Try Conn.Location := Point(MilsToCoord(X), MilsToCoord(Y)); Except End;
     If NetName <> '' Then
         Try Conn.Text := NetName; Except End;
+    { NEEDS A LIVE PROBE: Side is a sheet-entry member; a cross-sheet      }
+    { connector is a power-object descendant and probably carries its      }
+    { direction in Orientation or CrossSheetStyle. Dropping the write would }
+    { lose it if Side DOES exist, so it stays, counted.                     }
     If SideStr = 'left' Then
-        Try Conn.Side := 0; Except End
+    Begin
+        Try
+            Conn.Side := 0;
+        Except
+            RecordCaughtException('Gen_PlaceCrossSheetConnector:Side');
+        End;
+    End
     Else If SideStr = 'right' Then
-        Try Conn.Side := 1; Except End;
+    Begin
+        Try
+            Conn.Side := 1;
+        Except
+            RecordCaughtException('Gen_PlaceCrossSheetConnector:Side');
+        End;
+    End;
 
     SchDoc.RegisterSchObjectInContainer(Conn);
     SchRegisterObject(SchDoc, Conn);
