@@ -231,6 +231,12 @@ def register_application_tools(mcp):
         - ``last_caught``: the last exception a script Try/Except caught,
           ``{where, command, request_id, at}`` from activity.log, or None.
           Each one is a modal dialog that fired in Altium.
+        - ``last_fault``: the fault recorded in the workspace's
+          ``last_fault.json`` (``{fault, diagnosis, steps, when}``, e.g.
+          fault ``dead_loop``), or None. It is removed by the next call that
+          succeeds, so while it is present the polling loop's last known
+          state is DOWN, with ``loop_note`` saying so. ``attached: true``
+          means only that this server attached; it is not a live loop.
 
         MORE THAN ONE ALTIUM. ``candidate_count`` and ``candidate_pids``
         list every instance, and ``selected_by`` says how ``pid`` was
@@ -272,9 +278,11 @@ def register_application_tools(mcp):
 
         WHAT IT DOES NOT TELL YOU: which library component is current.
         That is editor state with no read exposed, and the library
-        authoring tools depend on it. If a lib_add_* call lands somewhere
-        unexpected, set the target explicitly with
-        ``lib_set_current_component`` rather than assuming.
+        authoring tools depend on it. The lib_add_* tools act on the symbol
+        HELD from ``lib_create_symbol`` / ``lib_set_current_component`` or
+        named by their ``component_name``, never on the editor's own
+        selection, and answer NO_COMPONENT when neither exists: name the
+        target explicitly rather than assuming.
 
         Returns:
             ``{"backend": ..., "bridge_answering": bool,

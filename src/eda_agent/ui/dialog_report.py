@@ -39,6 +39,15 @@ from . import windows as win
 #: Every pattern here was measured on a real dialog during the session
 #: that motivated this module, except where noted as conventional.
 _KINDS = (
+    # THE SCRIPT ENGINE'S OWN HALT, matched before everything, "error"
+    # included. MEASURED 2026-10-11 (AD 26.10.1.5): a member that does not
+    # resolve on a late-bound interface ("Undeclared identifier:
+    # CurrentPartID") shows a TMessageForm titled "Error" with only OK -
+    # the same class, caption and button as an ordinary exception box -
+    # but it is NOT an exception: the Script IDE parks on the source line,
+    # no Except runs, and after OK the polling loop stays halted. OCR read
+    # "CurrentPartlD", so the pattern stops at the stable word.
+    ("script_fatal", (r"undeclared\s+ident",)),
     ("nothing_to_do", (r"no differences",
                        r"nothing to (do|update)")),
     ("engineering_change_order", (r"engineering change order",)),
@@ -88,7 +97,19 @@ _TITLE_ONLY_KINDS = (
 #: A dialog of one of these kinds must never be clicked past by an
 #: automation: it is either reporting a problem or asking a human to
 #: decide something the plan did not anticipate.
-NEEDS_A_HUMAN = ("error", "warning", "confirm")
+NEEDS_A_HUMAN = ("error", "warning", "confirm", "script_fatal")
+
+#: What a caller must know about a ``script_fatal`` box before pressing it.
+SCRIPT_FATAL_NOTE = (
+    "This is the script engine's FATAL late-bound error, not an exception "
+    "and not Altium's own message box: the Script IDE parks on the source "
+    "line and no Except runs, so nothing is counted. Pressing OK does NOT "
+    "resume the bridge - the polling loop stays HALTED (app_ping keeps "
+    "answering 'not responding'). Note the text and the line the Script IDE "
+    "shows, press OK, then in the Script IDE press Stop (Run > Stop, or "
+    "Ctrl+F3) and rerun File > Run Script > Altium_API > Dispatcher.pas > "
+    "StartMCPServer (or restart Altium). Report it: the call that raised it "
+    "read a member the bridge must not read.")
 
 
 def classify(title: str, message: list) -> str:
@@ -176,6 +197,9 @@ def describe_dialog(window, use_ocr: bool = True) -> dict:
         "has_unreadable_content": unreadable,
         "hwnd": window.hwnd,
     }
+    if kind == "script_fatal":
+        out["note"] = SCRIPT_FATAL_NOTE
+        out["ok_resumes_the_bridge"] = False
     if not message:
         # Never let an empty list read as "the dialog said nothing".
         # MEASURED: Altium paints message text with Delphi TLabel, which
@@ -254,4 +278,9 @@ def _summarise(found: list, blocked: bool) -> str:
                      f"{said!r}, offering "
                      f"{[b['caption'] for b in dialog['buttons']]}")
     head = "Altium is BLOCKED by a modal. " if blocked else ""
-    return head + "; ".join(parts)
+    tail = ""
+    if any(d["kind"] == "script_fatal" for d in found):
+        tail = (". A script_fatal box: OK will NOT resume the bridge; "
+                "afterwards press Stop in the Script IDE and rerun "
+                "StartMCPServer (or restart Altium)")
+    return head + "; ".join(parts) + tail

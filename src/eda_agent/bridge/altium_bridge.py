@@ -257,6 +257,32 @@ def _with_envelope_notes(data: Any, response: CommandResponse) -> Any:
     return data
 
 
+
+def _last_fault_summary(workspace) -> Optional[dict]:
+    """The recorded fault in ``last_fault.json``, flattened, or None.
+
+    ``{fault, diagnosis, steps, when}``. None when no file is there (no
+    fault recorded, or a call has succeeded since) or it cannot be read.
+    """
+    from .fault_state import read_fault
+    try:
+        payload = read_fault(workspace)
+    except Exception:                            # pragma: no cover - guard
+        return None
+    if not isinstance(payload, dict):
+        return None
+    recovery = payload.get("recovery")
+    if not isinstance(recovery, dict):
+        recovery = {}
+    fault = str(recovery.get("fault") or "").strip() or "unknown"
+    out = {
+        "fault": fault,
+        "diagnosis": str(recovery.get("diagnosis") or ""),
+        "steps": [str(x) for x in (recovery.get("steps") or [])],
+        "when": str(payload.get("when") or ""),
+    }
+    return out
+
 class AltiumBridge:
     """Handles communication with Altium Designer via file-based IPC.
 
@@ -409,6 +435,20 @@ class AltiumBridge:
         workspace = self.config.workspace_dir
         common["in_flight"] = read_in_flight(workspace)
         common["last_caught"] = read_last_caught(workspace)
+        # THE RECORDED FAULT, from last_fault.json, so "attached: true" is
+        # never read as "the polling loop is alive". attached says only that
+        # THIS server attached; live 2026-10-11 it stayed true for twenty
+        # minutes while the loop was dead after a script-engine halt. The
+        # file is written when a fault is diagnosed and removed by the next
+        # call that succeeds, so its presence means the loop's last known
+        # state is down.
+        common["last_fault"] = _last_fault_summary(workspace)
+        if common["last_fault"]:
+            common["loop_note"] = (
+                "A fault is recorded (" + common["last_fault"]["fault"]
+                + "): the polling loop was down at the last call and no call "
+                "has succeeded since, whatever 'attached' says. app_ping "
+                "settles it; the recovery steps are in last_fault.steps.")
         if selection.process:
             return {
                 "running": True,
@@ -932,6 +972,17 @@ class AltiumBridge:
         """One sentence naming what is blocking, for the timeout text."""
         if not probe:
             return ""
+        if "script_fatal" in (probe.get("kinds") or []):
+            # Pressing OK on this one does not bring the call back: the
+            # engine halted on the line (dialog_report.SCRIPT_FATAL_NOTE).
+            return (
+                f" A SCRIPT-ENGINE FATAL ERROR IS ON SCREEN: "
+                f"{probe.get('summary', 'Undeclared identifier')}. Pressing "
+                f"OK will NOT resume the bridge - the polling loop stays "
+                f"halted. Note the text, press OK, then press Stop in the "
+                f"Script IDE (Run > Stop, Ctrl+F3) and rerun StartMCPServer, "
+                f"or restart Altium."
+            )
         return (
             f" A DIALOG IS ON SCREEN, so the loop is blocked rather than "
             f"absent: {probe.get('summary', 'a modal is open')}. Answer it, "
