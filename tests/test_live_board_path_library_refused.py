@@ -21,7 +21,7 @@ import json
 
 import pytest
 
-from tests.live_2026_10_11 import _MAIN, _caught
+from tests.live_2026_10_11 import _MAIN, _caught, file_reader
 from tests.pascal_eval import build
 from tests.pascal_source import load, strip_comments
 from tests.test_bridge_record_names_one_file import _ALTIUM
@@ -58,8 +58,10 @@ def _resolve_ns(on_disk):
     ns = {"Client": client, "FileExists": lambda p: p.upper() in client.on_disk,
           "GetPCBBoardAnywhere": lambda _d: "FALLBACK_BOARD",
           "PCBServer": type("S", (), {"GetCurrentPCBBoard": "NAMED_BOARD"})()}
+    ns.update(file_reader())               # every file on disk reads as a board
     _caught(ns)
     build(_MAIN, [n for n in ("LooksAbsolutePath", "DocumentPresent",
+                              "FileLooksLoadable", "UnopenedFileUnloadable",
                               "BoardPathLibraryRefusal", "ResolvePCBBoard")
                   if n in _MAIN], ns)
     return ns, client

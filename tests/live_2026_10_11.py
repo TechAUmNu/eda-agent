@@ -134,3 +134,50 @@ def _caught(ns):
     ns.setdefault("_caught", [])
     ns["RecordCaughtException"] = lambda where: ns["_caught"].append(where)
     return ns["_caught"]
+
+
+# ---------------------------------------------------------------------------
+# A file's bytes as FileLooksLoadable reads them (the .02b run, N1)
+# ---------------------------------------------------------------------------
+
+# The OLE compound-file magic D0 CF 11 E0 A1 B1 1A E1 as TStringList.Text
+# hands it back on a cp1252 system (the ANSI decode), and on a UTF-8 code
+# page (D0 CF and E0 A1 B1 decode to ONE character each). Chr(17) - the
+# magic's 0x11 - is inside the first four characters either way.
+OLE_HEAD_CP1252 = "\u00d0\u00cf\x11\u00e0\u00a1\u00b1\x1a\u00e1"
+OLE_HEAD_UTF8 = "\u03cf\x11\u0871\x1a"
+
+
+class LockedFile(Exception):
+    """A content value that makes LoadFromFile raise (a locked file)."""
+
+
+def file_reader(contents=None, default=OLE_HEAD_CP1252, loads=None):
+    """``TStringList.Create`` / ``LoadFromFile`` / ``Text`` / ``Free`` over a
+    fake disk: ``contents`` maps an UPPER-CASED path to the decoded text
+    ('' = a 0-byte file; ``LockedFile`` = the read raises an ordinary
+    EFOpenError), every other path reads ``default`` (a real board's head).
+    ``loads`` collects every path read, so a test can see a file was never
+    read. Also ``Sleep`` (the retry) and ``Chr``."""
+    contents = {k.upper(): v for k, v in (contents or {}).items()}
+    seen = loads if loads is not None else []
+
+    class _SL:
+        Free = None
+
+        def __init__(self):
+            self.Text = ""
+
+        def LoadFromFile(self, path):
+            seen.append(path)
+            value = contents.get(str(path).upper(), default)
+            if value is LockedFile:
+                raise PascalError("EFOpenError: file in use")
+            self.Text = value
+
+    class _Factory:
+        @property
+        def Create(self):
+            return _SL()
+
+    return {"TStringList": _Factory(), "Sleep": lambda _ms: None, "Chr": chr}

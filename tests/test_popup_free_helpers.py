@@ -37,6 +37,7 @@ import pytest
 
 from tests.pascal_eval import PascalError, build
 from tests.pascal_source import load, strip_comments
+from tests.live_2026_10_11 import file_reader
 
 _ROOT = Path(__file__).resolve().parents[1]
 _ALTIUM = _ROOT / "scripts" / "altium"
@@ -369,7 +370,9 @@ class _Docs:
 def _doc_ns(client):
     ns = {"Client": client, "FileExists": client.file_exists,
           "ExtractFileExt": lambda s: ntpath.splitext(s)[1]}
-    return build(_main(), ["DocumentPresent", "OpenDocumentIfPresent",
+    ns.update(file_reader())               # every file on disk reads as a board
+    return build(_main(), ["DocumentPresent", "FileLooksLoadable",
+                           "UnopenedFileUnloadable", "OpenDocumentIfPresent",
                            "PcbPathOpenable"], ns)
 
 
@@ -513,7 +516,7 @@ def test_find_dm_document_by_path_never_answers_with_a_namesake():
 # ---------------------------------------------------------------------------
 
 _DM_ONLY = ["FocusedDocKindIs", "DocumentPresent", "OpenDocumentIfPresent",
-            "PcbPathOpenable", "PcbEditorDocOpen", "FindDMDocumentByPath",
+            "FileLooksLoadable", "UnopenedFileUnloadable", "PcbPathOpenable", "PcbEditorDocOpen", "FindDMDocumentByPath",
             "AltiumMajorVersion"]
 
 

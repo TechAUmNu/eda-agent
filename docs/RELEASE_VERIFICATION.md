@@ -2938,10 +2938,18 @@ finding, sharing `tests/live_2026_10_11.py`):
   routine (`VarType`,
   `VarIsNull`, ...) is used: none has ever run in this codebase, and an
   undeclared one would fault inside the polling loop. So on this build a
-  bridge mark is expected to read `marked_modified: true`. The live run's
-  PcbDoc and PcbLib flags already read true (`modified_read: true` at close
-  in the 39 run), so D1 looks SCHEMATIC-side: the diagnostic below is most
-  informative on a SchDoc mark (step 2's free sheet).
+  bridge mark is expected to read `marked_modified: true`. CORRECTED BY
+  MEASUREMENT (the second 2026-10-11 build re-run on a fresh Altium, the
+  ".02b" run, AD 26.10.1.5): the odd value follows `SetModified(True)` on
+  EVERY kind measured - the free SchDoc, project sheets, the namesake copy
+  AND the free PcbLib (`lib_set_footprint_height`) all read `flag_raw`
+  `odd` / `if=0,not=0`, more than 25 marks - while a document nobody marked
+  reads a normal False (`modified_read: false`; `odd` was never seen on a
+  clean read). D1 is not schematic-side, and this text's earlier "PcbDoc
+  and PcbLib flags already read true" was wrong. Consequence: no bridge
+  edit reads `marked_modified: false` on this Altium, so step 4's
+  record-route variant (an edit whose mark reads FALSE) is UNREACHABLE
+  here; run its plain version.
 * **The diagnostic.** Every `mark` now carries `flag_raw` and
   `flag_tests`, read right after `SetModified(True)`, from the two proven
   tests ONLY. `flag_raw`: `true` / `false` when `If X` / `If Not X` held,
@@ -3038,7 +3046,9 @@ of a .PcbLib opened on its own.
    `lib_modify_footprint_pads` (both read `modified:false` on earlier builds).
    If no bridge edit reads false on this build, record that and skip: the
    record path is then unreachable in practice. ON 2026.10.11.03 THAT IS
-   THE EXPECTED OUTCOME (D1: a mark now reads true): record "no bridge edit
+   THE EXPECTED OUTCOME (D1: a mark now reads true; MEASURED on the .02b
+   run - every mark on every kind read `odd`, which counts as modified, so
+   the variant could not be run): record "no bridge edit
    reads false" with the `flag_raw` / `flag_tests` of the edit tried, and
    run instead the plain version - after a bridge edit that reads true,
    `app_save_all` writes the copy, lists it in NEITHER `skipped_unmodified`
@@ -3201,6 +3211,73 @@ the walk wrote the file as if modified; a second visit of the same file
 spelling) then read the now-clean flag and listed it as skipped. Nothing
 was lost - only the replies were wrong.
 
+### Results 2026-10-11 (the second 2026-10-11 build re-run on a fresh Altium, the ".02b" run, AD 26.10.1.5)
+
+Run 21:03-21:17 on scratch copies; the carrier folder (41 of 41 files, 99
+with subfolders) and the scripts folder (15 of 15) baselined at the start,
+after every save and at the end: unchanged. `caught_exceptions` 0,
+`cast_errors` 0, `last_caught` null around every step; no dialog.
+EVERY save-all ran as `only_modified=true` (marked SUB): the walk reached
+the bridge's own `Altium_API.PrjScr`, and a no-argument save-all would have
+rewritten the loaded `...\EDA Agent\scripts\Library.pas`, which all 14
+save-alls listed in `skipped_unmodified` (N2 below).
+
+| Step | Verdict | What happened |
+|---|---|---|
+| 1 | PASS | version matched, 0 / 0 / null, `in_flight` [] |
+| 2 | PASS | free sheet: `marked_modified` true, `pending_save` true, no `save_hint`, `mark.found` true, `via` `path`, `flag_raw` `odd` / `if=0,not=0`; the PcbLib height mark read `odd` too (see D1); the no-match half `mark: null` |
+| 3 | PASS | doc: scope (`focused_modified_read` null), project scope `sheets_marked` 1, a one-op batch (`eSchComponent`, D3 fixed), a two-op batch (`marked_modified` null, D4 fixed) |
+| 4 | PASS (SUB, plain version) | no bridge edit reads false (D1); the library written, in NEITHER skip list (D2 fixed), its height on disk; the repeat attempted 0; the sheet half written |
+| 5 | PASS (SUB) | `bridge_edited` true then false; the within-tick save-all wrote it, not in `libraries_skipped` |
+| 6 | PASS (SUB) | only the free sheet edited: attempted 1, written 1, not skipped |
+| 7 | PASS | nothing attempted, no mtime moved |
+| 8 | PASS | offline heights as documented, 108 of 108 footprints |
+| 9 main, 9a, 9b, 9d | PASS (SUB) | the free copy marked by path; bare scopes refused `AMBIGUOUS_NAME` in all three focus cases; the mirror marked its doc_path copy; the discard close passed every field |
+| 9c, 11, 13 | OWNER-GATED | hand actions |
+| 10 | PASS | refused `MODIFIED` with "This bridge edited the document..." (D5 fixed); the discard close read `modified_read` true |
+| 12 | PASS (SUB) | `proj_close save=false` discarded; reopened, attempted 0, U816 at the saved value |
+| 12b (D2 re-check) | PASS | `proj_save` and `proj_close save=true` after an `app_save_all` each wrote the later edit (mtimes moved; the final read showed E4). Both replies carried only `success` / `project_path` (N4 below) |
+
+Fixed after this run (each with an executed test that fails on the
+second build, `tests/test_live_02b_findings.py`):
+
+* **N2: save-all touches design documents only.** The walks skip any
+  project whose file is a `.PrjScr` (`IsScriptProject`: `SaveAllDirty`,
+  `SaveProjectMembers` - so a `proj_save` with the script project focused
+  writes nothing either - `CountDirtyDocuments`, `WorkspaceDocPaths`), and
+  a document is written or listed only when its kind is on an ALLOW-list
+  (`IsSaveableDesignDoc`: SCH, SCHLIB, PCB, PCBLIB, OUTPUTJOB; a kind that
+  cannot be read falls back to the same five extensions). A script unit is
+  never in `skipped_unmodified`, `free_documents_not_reached`,
+  `documents_seen` or `still_dirty`, and never reaches `WriteDocAndNote`.
+  Other document kinds (a harness, a BOM document) are no longer written
+  by `app_save_all` either.
+* **N4: `proj_save` and `proj_close save=true` say what reached disk.**
+  Both replies carry `only_modified`, `documents_attempted`,
+  `documents_written` (file ages before and after, as `app_save_all`
+  measures), `skipped_unmodified` and `bridge_record_pending`. A new
+  optional `only_modified` (default false = unchanged: every open member is
+  written) skips a member whose flag reads clean, sheet or library, unless
+  the bridge's record holds an edit to it.
+
+Re-check on 2026.10.11.03 (after the steps above):
+
+14. **A no-argument save-all leaves the script units alone (N2).** With
+    the script project loaded and a script unit open (Library.pas is,
+    after any script error), and ONLY scratch documents open otherwise:
+    `app_save_all` with NO arguments. No path under the scripts folder in
+    `skipped_unmodified`, `free_documents_not_reached` or anywhere else in
+    the reply; the scripts folder byte-identical (sizes and mtimes) before
+    and after; `documents_seen` counts design documents only.
+15. **proj_save reports (N4).** In the scratch project, a bridge edit on a
+    sheet, wait 3 s, `proj_save`: `documents_attempted` >= 1,
+    `documents_written` >= 1 (the sheet's mtime moved),
+    `bridge_record_pending` `[]`, `only_modified` false. Then with nothing
+    edited, `proj_save only_modified=true`: `documents_attempted` 0,
+    `documents_written` 0, every loaded member in `skipped_unmodified`, no
+    mtime moved. Then a sheet edit and `proj_close save=true`: the close
+    reply carries the same fields, with `documents_written` >= 1.
+
 ---
 
 ## 39. Popup-free run (run live 2026-10-11 on the first and second 2026-10-11 builds, results at the end; re-check on 2026.10.11.03)
@@ -3295,8 +3372,11 @@ which are listed because they may raise.
 
 **NO INCREASE DOES NOT MEAN NO DIALOG.** The counter sees the script
 engine's exception box only, and only for a CATCHABLE exception. Two other
-boxes are never counted, before or after OK, and all three can be class
-`TMessageForm` (39.5 tells them apart): the script engine's FATAL
+boxes are never counted, before or after OK, and all three are class
+`TMessageForm` (live 2026-10-11: the fatal box AND Altium's own "Warning"
+both reported that class), so the CLASS TELLS NOTHING: classify a box by
+its TITLE, its TEXT and whether the Script IDE jumped to a source line
+(39.5). They are the script engine's FATAL
 late-bound error (title "Error", text "Undeclared identifier: ...", OK
 only - the same caption and button as the exception box; live 2026-10-11
 on the second build, after which the loop was dead), and Altium's OWN
@@ -3336,13 +3416,20 @@ Each must answer with no dialog and leave `caught_exceptions` unchanged.
    `bridge_edited: true`, i.e. `pcb_place_components` very likely placed its
    part INTO THE LIBRARY. A modal followed by a silent write into a library
    is why this is a refusal, not an open and not a fallback. Count the
-   components on the scratch board before and after: unchanged.
+   components on the scratch board before and after: unchanged. A `.PcbDoc`
+   that is NOT open, IS on disk and cannot be a board (0 bytes, unreadable,
+   or a head that is neither an OLE compound file nor the ASCII `|` record
+   form) is refused `BOARD_FILE_UNREADABLE` the same way, nothing opened -
+   probe P6b, now a check.
 3. **A project that lists a board missing on disk.** Copy a scratch
    project without its `.PcbDoc`, open it, focus a sheet, run
    `app_get_preferences`: `"pcb": null` (or another open board).
 4. **Home page focused.** With a project holding a PcbDoc open and the
-   Home page focused, `app_get_preferences`. The view is not restored to
-   the Home page afterwards (there was never a document to restore).
+   Home page focused, `app_get_preferences`. The board opens in a
+   BACKGROUND tab and focus stays on the Home page throughout: the active
+   document afterwards is still the Home page, the new board tab sits
+   behind it, and nothing is restored because nothing moved (measured on
+   the .02b run). `"pcb"` carries that board's settings.
 5. **A file into a missing folder.** `app_create_document kind=SCH
    file_path=C:\no_such_dir\x.SchDoc add_to_project=false`: `saved:
    false`, no Save As dialog, no error dialog.
@@ -3396,8 +3483,8 @@ StartMCPServer (39.5).
 | P4 | `MechLayerFromNumber:LayerUtils.MechanicalLayer` | Any tool given the layer `Mechanical21` on a board or library (e.g. `pcb_get_mech_layer_names` on one using mechanical 17+), and `pcb_set_layer_visibility layer=Mechanical21` | 0 expected on AD26; on a pre-AD19 build, record the result (an undeclared `LayerUtils` would show as `dispatcher` or a stopped loop). 2026.10.11.03: the visibility reply echoes `"layer":"Mechanical21"` (the first 2026-10-11 build echoed `Unknown`; `GetLayerString` now names Mechanical17-64 by a verified `MechLayerFromNumber` lookup, only on AD19 and later) |
 | P5 | `ReadMechKind:Kind` | Only on a build below AD19: `pcb_get_mech_layer_names` | kinds read -1 and nothing is counted (the read is gated off below 19) |
 | P6 | `App_CreateDocument:DoFileSave`, `App_CreateDocument:SaveObject` | 39.3 item 5, and the same with a folder that exists but is read-only | 0 confirms the folder test is the whole story; a count means a save raises in an existing folder |
-| P6b | `ResolvePCBBoard:OpenDocument`, `GetPCBBoardAnywhere:OpenDocument` | A 0-byte file renamed `scratch.PcbDoc`: pass it as `pcb_place_components` `board_path`, then list it in a scratch project and run `app_get_preferences` with a sheet focused | These are the residual opens of a board that IS on disk; 0 = Altium answers Nil for a broken file, 1 = it raises (a genuine fault, now counted rather than silent) |
-| P7 | `Lib_Link3DModel:ModelFactory_FromFilename`, `PCB_Place3DBody:ModelFactory_FromFilename` | `pcb_place_3d_body` and `lib_link_3d_model` with a `.wrl`, an `.igs` and an `.stl` model, then with a renamed `.dat` file | `Model3DExtMayLoad` is a DENY-list (only no extension, `.txt`, `.pdf`, `.csv`, `.json`, `.png`, `.jpg` are refused before the call), so each of these reaches the loader exactly as before. 0 = the loader answers (a model or `MODEL_LOAD_FAILED` via Nil); 1 = it raises on that format, now `MODEL_LOAD_FAILED` after the dialog - add the extension to the deny-list only if Altium never loads it |
+| P6b | `ResolvePCBBoard:OpenDocument`, `GetPCBBoardAnywhere:OpenDocument` | A 0-byte file renamed `scratch.PcbDoc`: pass it as `pcb_place_components` `board_path`, then list it in a scratch project and run `app_get_preferences` with a sheet focused | THREE possible outcomes for a broken file, not two: 0 = Altium answers Nil; 1 = it raises (counted); and the THIRD, the one measured on the .02b run: an UNCOUNTED Altium modal ("Warning", "File type not recognised.", class (c)) blocking ~13 s, then a NON-Nil BLANK document - `pcb_place_components` placed its part into it and `app_get_preferences` reported its settings. On 2026.10.11.03 neither call reaches the open: `pcb_place_components` (and `pcb_focus_board`) are refused `BOARD_FILE_UNREADABLE` (the message names the path and says "Nothing was opened or changed"), and `app_get_preferences` answers `"pcb": null` (or another open board), with no dialog, 0 catches, and `scratch.PcbDoc` still closed and still 0 bytes. A box = the pre-open file test (`FileLooksLoadable`) let it through: record the file's size and first bytes |
+| P7 | `Lib_Link3DModel:ModelFactory_FromFilename`, `PCB_Place3DBody:ModelFactory_FromFilename`, `PCB_Place3DBody:RemovePCBObject` | `pcb_place_3d_body` and `lib_link_3d_model` with a `.wrl`, an `.igs` and an `.stl` model, then with a renamed `.dat` file; count the bodies on the board (and on the footprint) before and after each call | `Model3DExtMayLoad` is a DENY-list (only no extension, `.txt`, `.pdf`, `.csv`, `.json`, `.png`, `.jpg` are refused before the call), so each of these reaches the loader exactly as before. MEASURED on the .02b run with placeholder stubs (NOT real files of those formats): the loader answered NON-Nil with an EMPTY model, 0 catches; `pcb_place_3d_body` said success with `bbox` null and `overall_height_mils` 0 and left one empty body per call; `lib_link_3d_model` said `ok` false but left the body too; a renamed STEP `.dat` LOADED (Altium reads the content). On 2026.10.11.03 an empty model (no readable box AND an overall height of 0) is `MODEL_LOAD_FAILED` "loaded as an empty model", and the body is taken off again inside the same transaction (board: `PCB_DeleteObject`'s broadcast + `RemovePCBObject`, its catch counted at `PCB_Place3DBody:RemovePCBObject`; footprint: `RemoveLibBodyByAddress`, the footprint half only), so the body counts are unchanged; the renamed STEP and a real `.step` still place. Do NOT add an extension to the deny-list: the content decides |
 
 The rows below are the per-file stages' sites (Library, Generic, PCB,
 Project), filled in at integration. A `<prop>` / `<id>` in a `where` is
@@ -3454,10 +3541,18 @@ unproven read is gone, so it is an ordinary check.
 Do not press OK straight away. First call `app_get_status`: `in_flight`
 must name the command and request that are blocked, and the status form
 must show the same command, request id and start time. Then
-`app_list_open_dialogs`. ALL THREE kinds below can be class
-`TMessageForm`, and the first two are both titled "Error" with only OK,
-so the class and the caption tell nothing: tell them apart by the TEXT and
-by the Script IDE.
+`app_list_open_dialogs`. ALL THREE kinds below are class `TMessageForm`
+(measured 2026-10-11 for (b) and (c)), so NEVER classify by class.
+Classify by three things together, all readable while the box is up:
+
+| Kind | Title | Text | Script IDE |
+|---|---|---|---|
+| (a) catchable exception | "Error" | the exception's message (a failed conversion, "Access violation", ...) | does NOT take over |
+| (b) fatal late-bound error | "Error" | starts "Undeclared identifier" | opens a `.pas` unit with the execution point on a source line |
+| (c) Altium's own box | "Warning" (or another Altium caption) | Altium's sentence, e.g. "File type not recognised." | does NOT take over |
+
+(a) and (b) share the caption and the single OK, so the text and the IDE
+decide between them; (c) differs by caption and text.
 
 * **(a) A catchable script exception** (a failed conversion, a call that
   raised). The Script IDE does not take over. Press OK: the call returns
@@ -3544,6 +3639,54 @@ the proven component-iterator shape after review, the rest probes P35 and
 P37-P40). A `owner_part_id`
 on every pin would not have saved P9: the next line, `AddSchObject`, is a
 member of the same reference.
+
+### Results 2026-10-11 (the second 2026-10-11 build re-run on a fresh Altium, the ".02b" run, AD 26.10.1.5)
+
+Run 21:00-21:32 after an Altium restart, on scratch copies; the carrier
+folder (41 of 41, 99 with subfolders) and the scripts folder (15 of 15)
+unchanged at every checkpoint, including while each modal below was up.
+`caught_exceptions` 0, `cast_errors` 0 and `last_caught` null before and
+after EVERY step. The section 38 re-check ran in the same session (its
+results above: all PASS, every save-all as `only_modified=true`).
+
+| Item | Verdict | What happened | On 2026.10.11.03 |
+|---|---|---|---|
+| 39.1, P1 | PASS | 0 / 0 / null; P1 (only a SchLib open) `app_exit_active_command` answered with no dialog | unchanged |
+| 39.3 item 4 + P3 | PASS | `app_get_preferences` returned the project board's settings; the board opened in a background tab, focus never left the Home page; P3 = 0 (the Nil owner test was enough) | item 4's wording corrected |
+| P2 | PASS | `CREATE_FAILED` for `NOTAKIND`, nothing created, no dialog | unchanged |
+| 39.3 item 5 / P6 first half | PASS | `saved: false`, `added_to_project` false, no folder, no dialog | unchanged |
+| 39.3 item 3 | PASS | `"pcb": null`, no dialog, the missing board not created | unchanged |
+| 39.3 item 8 | PASS | `NO_OUTJOB` in 15 ms, nothing opened, no dialog | unchanged |
+| P4 | PASS | the visibility reply echoed `"layer":"Mechanical21"` (from the script's own activity.log row) | unchanged |
+| 39.3 item 2 | PASS | `C:\nope.PcbDoc` and an existing `.SchDoc` took the fallback (one part each, the SchDoc not opened); an EXISTING and a MISSING `.PcbLib` refused `BOARD_PATH_IS_LIBRARY` in 32 ms, nothing opened; `pcb_focus_board` the same | unchanged |
+| P1b | PASS | `pcb_post_process: true` after the library closed; dirty 0 -> 0 | unchanged |
+| **P6b** | **FAIL** | BOTH halves: Altium's own "Warning" / "File type not recognised." (class `TMessageForm`, OK only, uncounted, `in_flight` named the call) blocked ~13.5 s; after OK `OpenDocument` handed back a NON-Nil blank document - `pcb_place_components` placed its part INTO `scratch.PcbDoc` (`placed 1`), and `app_get_preferences` reported that blank document's settings as `"pcb"`. Both closed with discard; the file stayed 0 bytes | refused before the open (N1): `BOARD_FILE_UNREADABLE` from the board_path handlers, the board walk skips the listing, `OpenDocumentIfPresent` answers Nil; the P6b row rewritten |
+| **P7** | **reply defect** | 0 catches, 0 dialogs on all 12 calls; the stubs loaded EMPTY: `pcb_place_3d_body` success with `bbox` null / height 0 and one empty body left per call; `lib_link_3d_model` `ok` false with the body left; the renamed STEP `.dat` and a real `.step` loaded | empty model = `MODEL_LOAD_FAILED`, the body removed in the same transaction (N3); the P7 row rewritten |
+| P6 second half, items 1, 6, 7, P10, the 38 hand steps | OWNER-GATED | a read-only folder, Altium restarts, hand edits | owner sessions |
+| P8, P9 | DEFERRED | the known fatal symbol-edit path on the second build | run on 2026.10.11.03 |
+
+Fixed after this run, each with an executed test that fails on the second
+build (`tests/test_live_02b_findings.py`):
+
+* **N1: a file that cannot be loaded never reaches `Client.OpenDocument`.**
+  One pre-open predicate, `FileLooksLoadable`, asked only of a document
+  that is NOT open (`UnopenedFileUnloadable`: `Client.GetDocumentByPath`
+  answers Nil) and IS on disk: the file must read (TStringList.LoadFromFile,
+  the `ReadFileContent` route proven on every request - an ordinary,
+  catchable EFOpenError, retried; NOT AssignFile / Reset, which modals
+  before the Except), must not be empty, and a `.PcbDoc` / `.SchDoc` must
+  start like one (the OLE magic's 0x11 within its first characters, or the
+  ASCII form's leading `|`). `ResolvePCBBoard` answers Nil for such a named
+  board and never falls back; `pcb_place_component(s)` and
+  `pcb_focus_board` refuse `BOARD_FILE_UNREADABLE` before it;
+  `GetPCBBoardAnywhere` skips such a listing (Continue);
+  `OpenDocumentIfPresent` (`proj_load_sheets`' `SCH` opens - a 0-byte
+  member is counted `failed` - and `proj_run_outjob`) answers Nil. The
+  read-only callers (`app_get_preferences` and every board read) KEEP the
+  walk that opens a real board in a background tab: 39.3 item 4 measured it
+  with focus never leaving the Home page, and with the unloadable listings
+  skipped, what the walk still opens is a real board.
+* **N3: an empty model is a failed load.** See the P7 row.
 
 ---
 

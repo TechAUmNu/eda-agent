@@ -35,6 +35,7 @@ import pytest
 
 from tests.pascal_eval import BUILTINS, PascalError, build, translate
 from tests.pascal_source import load
+from tests.live_2026_10_11 import file_reader
 
 _ROOT = Path(__file__).resolve().parents[1]
 _ALTIUM = _ROOT / "scripts" / "altium"
@@ -649,9 +650,13 @@ def _project_world(rec, fs, client, workspace=None):
         "FocusedProjectPathIs": lambda p: False,
         "CRLF": "\r\n",
     })
+    # Every file on this disk reads as loadable: the unloadable-file guard
+    # (N1 of the .02b run) is tested in its own module.
+    ns.update(file_reader())
     main = load(_ALTIUM / "Main.pas", minimum=40)
     utils = load(_ALTIUM / "Utils.pas", minimum=40)
-    build(main, ["DocumentPresent", "OpenDocumentIfPresent"], ns)
+    build(main, ["DocumentPresent", "FileLooksLoadable",
+                 "UnopenedFileUnloadable", "OpenDocumentIfPresent"], ns)
     build(utils, ["TargetDirExists"], ns)
     return ns
 

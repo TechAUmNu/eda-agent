@@ -1511,6 +1511,79 @@ Begin
     Result := UpperCase(Doc.DM_DocumentKind) = UpperCase(Kind);
 End;
 
+{ DOES THIS FILE LOOK LIKE SOMETHING Client.OpenDocument CAN LOAD? For a     }
+{ document that is NOT open only (UnopenedFileUnloadable asks that first: an }
+{ open document is answered from memory and its file is never read).        }
+{ LIVE 2026-10-11 (bridge 2026.10.11.02, AD 26.10.1.5, probe P6b): a 0-byte  }
+{ scratch.PcbDoc handed to OpenDocument('PCB', ...) put up Altium's OWN      }
+{ modal 'Warning - File type not recognised.' - not an exception, so no      }
+{ Except and no counter saw it - blocked the loop ~13 s, and after OK handed }
+{ back a NON-Nil blank document: pcb_place_components placed its part into   }
+{ it and app_get_preferences reported its settings as the board's.           }
+{ False for: no file; a file that cannot be read; an empty file (nothing     }
+{ decodes); and, for a .PcbDoc or .SchDoc, a head that is neither an OLE     }
+{ compound file nor the ASCII record form. Every other type (.Pcb, .OutJob)  }
+{ is judged on "readable and not empty" only.                                }
+{ THE READ is ReadFileContent's, construct for construct (that function sits }
+{ after the callers of this one in the unit): TStringList.LoadFromFile goes  }
+{ through a TFileStream, so a locked or vanished file raises an ordinary    }
+{ EFOpenError the Except takes, retried for a transient lock (Defender). NOT }
+{ AssignFile / Reset: the RTL's EInOutError is a modal BEFORE the Except.    }
+{ THE HEAD is text decoded through the ANSI code page, so the OLE magic      }
+{ D0 CF 11 E0 A1 B1 1A E1 is not compared byte for byte (D0 CF decodes to one }
+{ or two characters, depending on the code page). Its third byte, 0x11, is   }
+{ ASCII and below every DBCS trail byte, so it decodes to Chr(17) in every   }
+{ code page and lands within the first three characters: Chr(17) within the  }
+{ first four is the OLE test. The ASCII form starts every record with '|'    }
+{ ('|RECORD=' on a board, '|HEADER=' on a sheet). A file whose first byte is }
+{ NUL may decode to nothing: no board or sheet starts with one.              }
+{ CONSERVATIVE the other way too: a raise on every attempt is "cannot be     }
+{ read" (Altium could not have read it either, and the box is the cost of   }
+{ guessing wrong); Result is assigned from locals only, last (the            }
+{ delphiscript_result_clobber note on ReadFileContent).                     }
+Function FileLooksLoadable(Path : String) : Boolean;
+Var
+    SL : TStringList;
+    Content, Head, Ext : String;
+    Attempt : Integer;
+    Ok, Looks : Boolean;
+Begin
+    Result := False;
+    Looks := False;
+    If Trim(Path) = '' Then Exit;
+    If Not FileExists(Path) Then Exit;
+    Content := '';
+    Ok := False;
+    Attempt := 0;
+    While (Attempt < 12) And (Not Ok) Do
+    Begin
+        Inc(Attempt);
+        SL := TStringList.Create;
+        Try
+            Try
+                SL.LoadFromFile(Path);
+                Content := SL.Text;
+                Ok := True;
+            Except
+                Ok := False;
+            End;
+        Finally
+            SL.Free;
+        End;
+        If Not Ok Then Sleep(15);
+    End;
+    Head := Copy(Content, 1, 8);
+    If Ok And (Head <> '') Then
+    Begin
+        Ext := UpperCase(ExtractFileExt(Trim(Path)));
+        If (Ext = '.PCBDOC') Or (Ext = '.SCHDOC') Then
+            Looks := (Pos(Chr(17), Copy(Head, 1, 4)) > 0) Or (Copy(Head, 1, 1) = '|')
+        Else
+            Looks := True;
+    End;
+    Result := Looks;
+End;
+
 { A document Client.OpenDocument can be handed without raising: one already  }
 { open (GetDocumentByPath answers, which covers an unsaved new document that }
 { has no file yet) or one on disk. '' is never present.                      }
@@ -1531,14 +1604,39 @@ Begin
         Result := FileExists(Path);
 End;
 
+{ A file OpenDocument must NOT be handed: not open (GetDocumentByPath answers }
+{ Nil), on disk, and FileLooksLoadable says no (empty, unreadable, or not    }
+{ the file type its extension claims). False whenever the question does not }
+{ arise - open already (answered from memory, the file is never read), or   }
+{ not on disk (DocumentPresent and the callers' own tests judge that) - so  }
+{ a caller that adds this test can only skip an open that would have put up }
+{ Altium's 'File type not recognised.' box and then a blank document.       }
+Function UnopenedFileUnloadable(Path : String) : Boolean;
+Var
+    Doc : IServerDocument;
+Begin
+    Result := False;
+    If Trim(Path) = '' Then Exit;
+    Doc := Nil;
+    Try Doc := Client.GetDocumentByPath(Path); Except Doc := Nil; End;
+    If Doc <> Nil Then Exit;
+    If Not FileExists(Path) Then Exit;
+    Result := Not FileLooksLoadable(Path);
+End;
+
 { Client.OpenDocument(Kind, Path) only when the document is present; Nil     }
 { otherwise, which is what every caller already does on an OpenDocument that }
 { returned Nil or raised. The Try stays as the backstop for a GENUINE fault  }
-{ (a file that is there but will not load).                                 }
+{ (a file that is there but will not load). A file present on disk that is  }
+{ empty or not its claimed type answers Nil too, before the open: Altium's  }
+{ answer to one is its own uncounted box and then a blank document (live    }
+{ 2026-10-11, P6b; UnopenedFileUnloadable). Callers: proj_load_sheets       }
+{ ('SCH', a 0-byte member is counted failed) and proj_run_outjob.           }
 Function OpenDocumentIfPresent(Kind : String; Path : String) : IServerDocument;
 Begin
     Result := Nil;
     If Not DocumentPresent(Path) Then Exit;
+    If UnopenedFileUnloadable(Path) Then Exit;
     Try
         Result := Client.OpenDocument(Kind, Path);
     Except
@@ -1743,6 +1841,16 @@ Begin
             { keeps today's attempt. The Except is counted, so a residual    }
             { raise shows in a live run.                                     }
             If LooksAbsolutePath(Path) And (Not DocumentPresent(Path)) Then Continue;
+            { A LISTED BOARD THAT IS ON DISK BUT CANNOT BE ONE (0 bytes,      }
+            { unreadable, not a board file) is skipped the same way: live    }
+            { 2026-10-11 (P6b) OpenDocument put up Altium's own uncounted    }
+            { 'File type not recognised.' box for a 0-byte listing, then     }
+            { handed back a blank document whose settings app_get_preferences }
+            { reported. Only a board that is NOT open is judged (an open one }
+            { is answered from memory). The walk itself stays for the reads: }
+            { opening a real board in a background tab is what 39.3 item 4   }
+            { measured and passed (focus never left the Home page).          }
+            If UnopenedFileUnloadable(Path) Then Continue;
 
             ServerDoc := Nil;
             Try
@@ -1802,6 +1910,33 @@ Begin
         + 'board_path takes a .PcbDoc.';
 End;
 
+{ A board_path that names a board FILE nothing can load: a .PcbDoc (or .Pcb) }
+{ that is not open, is on disk, and is empty, unreadable or not an Altium    }
+{ board file (UnopenedFileUnloadable). Live 2026-10-11 (bridge 2026.10.11.02,}
+{ probe P6b): a 0-byte scratch.PcbDoc reached OpenDocument('PCB', ...),     }
+{ Altium put up its OWN uncounted 'Warning - File type not recognised.' box,}
+{ and after OK handed back a NON-Nil blank document that                    }
+{ pcb_place_components then placed its part into. Falling back to another   }
+{ board would edit a board the caller did not name, so the handlers that    }
+{ take board_path refuse first with BOARD_FILE_UNREADABLE and this message; }
+{ '' when the path is not such a file (an open board, a missing path - the  }
+{ fallback's case - or a loadable file).                                    }
+Function BoardPathFileRefusal(Path : String) : String;
+Var
+    Ext : String;
+Begin
+    Result := '';
+    Ext := UpperCase(ExtractFileExt(Trim(Path)));
+    If (Ext <> '.PCBDOC') And (Ext <> '.PCB') Then Exit;
+    If Not UnopenedFileUnloadable(Path) Then Exit;
+    Result := 'board_path names a file that cannot be loaded as a board: '
+        + Path + ' is empty, could not be read, or does not start like an '
+        + 'Altium board file. Nothing was opened or changed. Altium answers '
+        + 'such a file with its own "File type not recognised." box and then '
+        + 'a blank document, which an edit would have landed in. Check the '
+        + 'path, or name a board that is open (pcb_focus_board).';
+End;
+
 { ResolvePCBBoard - get a SPECIFIC board by path when several PcbDocs are     }
 { open. GetPCBBoardAnywhere returns the focused/current board, which is the   }
 { WRONG one when the caller meant a different (e.g. newly created) board.     }
@@ -1845,6 +1980,14 @@ Begin
         Result := GetPCBBoardAnywhere(0);
         Exit;
     End;
+    { A board FILE that is on disk and cannot be loaded (0 bytes,           }
+    { unreadable, not a board file) never reaches OpenDocument either: live }
+    { 2026-10-11 (P6b) Altium answered a 0-byte .PcbDoc with its own        }
+    { uncounted box and then a blank document that got edited. The handlers }
+    { refuse it first (BoardPathFileRefusal, BOARD_FILE_UNREADABLE); here   }
+    { it answers Nil, never the fallback, because the fallback would edit a }
+    { DIFFERENT board than the one named.                                   }
+    If UnopenedFileUnloadable(Path) Then Exit;
     ServerDoc := Nil;
     Try
         ServerDoc := Client.OpenDocument('PCB', Path);
@@ -2073,6 +2216,58 @@ Begin
     End;
 End;
 
+{ THE SAVE WALKS TOUCH DESIGN DOCUMENTS ONLY (live 2026-10-11, bridge       }
+{ 2026.10.11.02). Workspace.DM_Projects holds the bridge's OWN script       }
+{ project, Altium_API.PrjScr, and Altium reopens a script unit (Library.pas }
+{ that run) after a script error: every save-all reply listed               }
+{ ...\EDA Agent\scripts\Library.pas in skipped_unmodified, and a save-all   }
+{ WITHOUT only_modified would have run SetModified(True) + DoFileSave on it }
+{ (WriteDocAndNote), rewriting the running bridge's source. Script units    }
+{ also padded documents_seen and still_dirty.                               }
+{ IsScriptProject: a project whose file is a .PrjScr. SaveAllDirty,         }
+{ SaveProjectMembers, CountDirtyDocuments and WorkspaceDocPaths skip it.    }
+Function IsScriptProject(Project : IProject) : Boolean;
+Var
+    Path : String;
+Begin
+    Result := False;
+    If Project = Nil Then Exit;
+    Path := '';
+    Try Path := Project.DM_ProjectFullPath; Except Path := ''; End;
+    Result := UpperCase(ExtractFileExt(Trim(Path))) = '.PRJSCR';
+End;
+
+{ IsSaveableDesignDoc: an ALLOW-list of the kinds this bridge writes - a    }
+{ sheet, a schematic library, a board, a PCB library, an output job (the     }
+{ DM_DocumentKind spellings every unit here compares: SCH, SCHLIB, PCB,      }
+{ PCBLIB, OUTPUTJOB). A script unit reads EditScriptDS / TEXT and is never  }
+{ one. A kind that cannot be read (or reads empty) falls back to the file   }
+{ extension of the same five types. The walks list nothing else and write   }
+{ nothing else: a script unit (or any other document kind) never reaches    }
+{ WriteDocAndNote, skipped_unmodified, free_documents_not_reached,          }
+{ documents_seen or still_dirty.                                            }
+Function IsSaveableDesignDoc(Doc : IDocument) : Boolean;
+Var
+    Kind, Path, Ext : String;
+Begin
+    Result := False;
+    If Doc = Nil Then Exit;
+    Kind := '';
+    Try Kind := UpperCase(Trim(Doc.DM_DocumentKind)); Except Kind := ''; End;
+    If (Kind = 'SCH') Or (Kind = 'SCHLIB') Or (Kind = 'PCB') Or (Kind = 'PCBLIB')
+        Or (Kind = 'OUTPUTJOB') Then
+    Begin
+        Result := True;
+        Exit;
+    End;
+    If Kind <> '' Then Exit;
+    Path := '';
+    Try Path := Doc.DM_FullPath; Except Path := ''; End;
+    Ext := UpperCase(ExtractFileExt(Trim(Path)));
+    Result := (Ext = '.SCHDOC') Or (Ext = '.SCHLIB') Or (Ext = '.PCBDOC')
+        Or (Ext = '.PCBLIB') Or (Ext = '.OUTJOB');
+End;
+
 { Save every modified IServerDocument the workspace knows about, both     }
 { project-attached docs and free-floating docs (libraries opened           }
 { standalone, scratch docs). Free docs live inside the synthetic           }
@@ -2084,6 +2279,9 @@ Var
     Ext, DiskPath, DocPath : String;
 Begin
     If Doc = Nil Then Exit;
+    { Design documents only, before ANY lookup, write or listing: a script }
+    { unit is never written and never listed (IsSaveableDesignDoc).       }
+    If Not IsSaveableDesignDoc(Doc) Then Exit;
     Try
         { Only a document OPEN in the editor has an IServerDocument. A
           closed project member returns Nil and is skipped, correctly: it
@@ -2220,6 +2418,9 @@ Var
     ProjectServerDoc : IServerDocument;
 Begin
     If Project = Nil Then Exit;
+    { The bridge's own script project is never saved, by any route (a      }
+    { proj_save with Altium_API.PrjScr focused included): IsScriptProject. }
+    If IsScriptProject(Project) Then Exit;
     For J := 0 To Project.DM_LogicalDocumentCount - 1 Do
         SaveOneDocByDocRef(Project.DM_LogicalDocuments(J));
     // The project file itself, when it's a real on-disk project
@@ -2246,10 +2447,11 @@ Var
 Begin
     Result := 0;
     If Project = Nil Then Exit;
+    If IsScriptProject(Project) Then Exit;
     For J := 0 To Project.DM_LogicalDocumentCount - 1 Do
     Begin
         Doc := Project.DM_LogicalDocuments(J);
-        If Doc <> Nil Then
+        If (Doc <> Nil) And IsSaveableDesignDoc(Doc) Then
         Begin
             Try
                 ServerDoc := Client.GetDocumentByPath(Doc.DM_FullPath);
@@ -2268,6 +2470,7 @@ Begin
     Result := 0;
     Workspace := GetWorkspace;
     If Workspace = Nil Then Exit;
+    { Script projects and units are skipped inside CountDirtyInProject. }
     For I := 0 To Workspace.DM_ProjectCount - 1 Do
         Result := Result + CountDirtyInProject(Workspace.DM_Projects(I));
     Try
@@ -2478,11 +2681,15 @@ Begin
             Project := Nil;
         End;
         If Project = Nil Then Continue;
+        { Design documents only, as the save walk (IsScriptProject,     }
+        { IsSaveableDesignDoc): a script unit is not seen or aged.      }
+        If IsScriptProject(Project) Then Continue;
         For J := 0 To Project.DM_LogicalDocumentCount - 1 Do
         Begin
             Doc := Nil;
             Try Doc := Project.DM_LogicalDocuments(J); Except End;
             If Doc = Nil Then Continue;
+            If Not IsSaveableDesignDoc(Doc) Then Continue;
             Path := '';
             Try Path := Doc.DM_FullPath; Except End;
             If (Path <> '') And (Not LooksAbsolutePath(Path)) Then
@@ -2600,9 +2807,11 @@ Begin
     If Workspace = Nil Then Exit;
     SaveWalkPass := True;
     Try
-        // Real projects + their member docs
+        // Real projects + their member docs. Never the bridge's own script
+        // project (IsScriptProject; SaveProjectMembers refuses it too).
         For I := 0 To Workspace.DM_ProjectCount - 1 Do
-            SaveProjectMembers(Workspace.DM_Projects(I));
+            If Not IsScriptProject(Workspace.DM_Projects(I)) Then
+                SaveProjectMembers(Workspace.DM_Projects(I));
 
         // Free documents live inside the synthetic FreeDocumentsProject
         Try SaveProjectMembers(Workspace.DM_FreeDocumentsProject); Except End;

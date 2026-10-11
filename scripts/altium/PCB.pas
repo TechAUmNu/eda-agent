@@ -4739,6 +4739,7 @@ Var
     WantRotation, DidRotation, DidStandoff, DidMove, DidLayer : Boolean;
     HaveRect, HaveNewRect, Stale : Boolean;
     X1, Y1, X2, Y2, NX1, NY1, NX2, NY2, DX, DY, Overall : TCoord;
+    EmptyRemoved : Boolean;
 Begin
     ModelPath := ExtractJsonValue(Params, 'model_path');
     If ModelPath = '' Then
@@ -4885,6 +4886,56 @@ Begin
 
             { The move, from the box as it stands after the add. }
             Body3D_ReadRect(Body, X1, Y1, X2, Y2, HaveRect);
+
+            { AN EMPTY MODEL IS A FAILED LOAD (live 2026-10-11, bridge         }
+            { 2026.10.11.02, probe P7). ModelFactory_FromFilename answered     }
+            { NON-Nil for placeholder .wrl / .igs / .stl / .dat stubs (bytes   }
+            { that are no model): the body landed with no box and an overall   }
+            { height of 0, the reply said success with bbox null, and an empty }
+            { body stayed on the board per call. Altium reads a model by its   }
+            { CONTENT (a renamed STEP .dat loaded fine), so the extension      }
+            { deny-list cannot catch this; the result can. No readable box AND }
+            { a 0 overall height is MODEL_LOAD_FAILED, and the body is taken   }
+            { off the board again INSIDE this transaction, in PCB_DeleteObject's}
+            { shape (broadcast, then RemovePCBObject). OverallHeight is read   }
+            { only when the box is missing, so a real model runs exactly the   }
+            { calls it ran before.                                             }
+            EmptyRemoved := False;
+            If Not HaveRect Then
+            Begin
+                Overall := 0;
+                Try Overall := Body.OverallHeight; Except Overall := 0; End;
+                If Overall = 0 Then
+                Begin
+                    Try
+                        PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                            PCBM_BoardRegisteration, Body.I_ObjectAddress);
+                        Board.RemovePCBObject(Body);
+                        EmptyRemoved := True;
+                    Except
+                        RecordCaughtException('PCB_Place3DBody:RemovePCBObject');
+                        EmptyRemoved := False;
+                    End;
+                    FailCode := 'MODEL_LOAD_FAILED';
+                    If EmptyRemoved Then
+                        Failure := 'Could not load a 3D model from ' + ModelPath
+                            + ': it loaded as an empty model (no readable bounding '
+                            + 'box and an overall height of 0), so the file is not '
+                            + 'a model Altium can read, whatever its extension. The '
+                            + 'empty body was taken off the board again; nothing '
+                            + 'else changed.'
+                    Else
+                        Failure := 'Could not load a 3D model from ' + ModelPath
+                            + ': it loaded as an empty model (no readable bounding '
+                            + 'box and an overall height of 0), and the empty body '
+                            + 'could NOT be taken off the board again: remove it '
+                            + 'with obj_delete (object_type eComponentBodyObject).';
+                End;
+            End;
+        End;
+
+        If Failure = '' Then
+        Begin
             If AlignStr = 'none' Then
             Begin
                 DX := MilsToCoordF(BodyX);
@@ -8657,7 +8708,7 @@ Var
     Linked : Boolean;
     Rotation : Double;
     Footprint, LibPath, LibRef, Designator, Comment, LayerStr, LoadStr : String;
-    UniqueIdStr, PadNetsStr, PadName, NetName, BoardPathStr : String;
+    UniqueIdStr, PadNetsStr, PadName, NetName, BoardPathStr, BoardRefusal : String;
     CompLayer : TLayer;
 Begin
     { Target a specific board by path when several PcbDocs are open, so a    }
@@ -8669,6 +8720,14 @@ Begin
     Begin
         Result := BuildErrorResponse(RequestId, 'BOARD_PATH_IS_LIBRARY',
             BoardPathLibraryRefusal(BoardPathStr));
+        Exit;
+    End;
+    { Nor a board FILE nothing can load (BoardPathFileRefusal): Altium's }
+    { own box, then a blank document the edit would land in (P6b).     }
+    BoardRefusal := BoardPathFileRefusal(BoardPathStr);
+    If BoardRefusal <> '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BOARD_FILE_UNREADABLE', BoardRefusal);
         Exit;
     End;
     Board := ResolvePCBBoard(BoardPathStr);
@@ -8839,7 +8898,7 @@ Var
     GrpIter : IPCB_GroupIterator;
     Pad : IPCB_Pad;
     Net : IPCB_Net;
-    PlacementsStr, BoardPathStr, OnePlace, Remaining, LoadStr : String;
+    PlacementsStr, BoardPathStr, OnePlace, Remaining, LoadStr, BoardRefusal : String;
     Footprint, LibPath, LibRef, Designator, Comment, LayerStr : String;
     UniqueIdStr, PadNetsStr, PadName, NetName, BadLayers : String;
     X, Y, PlacedCount, FailedCount, SepPos : Integer;
@@ -8853,6 +8912,14 @@ Begin
     Begin
         Result := BuildErrorResponse(RequestId, 'BOARD_PATH_IS_LIBRARY',
             BoardPathLibraryRefusal(BoardPathStr));
+        Exit;
+    End;
+    { Nor a board FILE nothing can load (BoardPathFileRefusal): Altium's }
+    { own box, then a blank document the edit would land in (P6b).     }
+    BoardRefusal := BoardPathFileRefusal(BoardPathStr);
+    If BoardRefusal <> '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BOARD_FILE_UNREADABLE', BoardRefusal);
         Exit;
     End;
     Board := ResolvePCBBoard(BoardPathStr);
@@ -8985,7 +9052,7 @@ End;
 Function PCB_FocusBoard(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
-    BoardPathStr : String;
+    BoardPathStr, BoardRefusal : String;
 Begin
     BoardPathStr := ExtractJsonValue(Params, 'board_path');
     { A .PcbLib never reaches ResolvePCBBoard (BoardPathLibraryRefusal). }
@@ -8993,6 +9060,14 @@ Begin
     Begin
         Result := BuildErrorResponse(RequestId, 'BOARD_PATH_IS_LIBRARY',
             BoardPathLibraryRefusal(BoardPathStr));
+        Exit;
+    End;
+    { Nor a board FILE nothing can load (BoardPathFileRefusal): Altium's }
+    { own box, then a blank document the edit would land in (P6b).     }
+    BoardRefusal := BoardPathFileRefusal(BoardPathStr);
+    If BoardRefusal <> '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BOARD_FILE_UNREADABLE', BoardRefusal);
         Exit;
     End;
     Board := ResolvePCBBoard(BoardPathStr);

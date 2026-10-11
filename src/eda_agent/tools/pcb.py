@@ -363,7 +363,11 @@ def register_pcb_tools(mcp):
                 refused ``BOARD_PATH_IS_LIBRARY`` before anything is opened
                 (Altium answers that open with its own modal box); a
                 library is edited with the library tools
-                (``lib_create_footprint`` and the rest).
+                (``lib_create_footprint`` and the rest). A .PcbDoc that is
+                not open and cannot be loaded (0 bytes, unreadable, not an
+                Altium board file) is refused ``BOARD_FILE_UNREADABLE``,
+                nothing opened: Altium would show its own box and then
+                hand back a blank document.
 
         Returns:
             Dict with ``focused`` and the resolved ``board`` file name.
@@ -5328,7 +5332,10 @@ def register_pcb_tools(mcp):
             "bbox_expected", "bbox_readback_stale"}``. ``x`` and ``y`` are the centre of
             the body's box READ BACK, not echoed (from ``bbox_expected``
             when the read box is stale). ``bbox`` is in absolute board
-            mils.
+            mils. A file Altium loads as an EMPTY model (no readable box
+            and an overall height of 0 - bytes that are no model, whatever
+            the extension) is ``MODEL_LOAD_FAILED`` and the empty body is
+            taken off the board again, nothing else changed.
         """
         bad = _non_finite({
             "x": x, "y": y, "standoff_height": standoff_height,
@@ -5638,7 +5645,11 @@ def register_pcb_tools(mcp):
             board_path: Absolute .PcbDoc path to place onto (optional). A
                 .PcbLib is refused ``BOARD_PATH_IS_LIBRARY`` before anything
                 is opened; edit a library with the library tools
-                (``lib_create_footprint`` and the rest).
+                (``lib_create_footprint`` and the rest). A .PcbDoc that is
+                not open and cannot be loaded (0 bytes, unreadable, not an
+                Altium board file) is refused ``BOARD_FILE_UNREADABLE``:
+                the part would otherwise land in the blank document Altium
+                hands back after its own "File type not recognised." box.
 
         Returns:
             Dict with ``placed`` (count), ``failed`` (count), ``total``.

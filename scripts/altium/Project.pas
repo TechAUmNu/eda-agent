@@ -424,13 +424,67 @@ Begin
     End;
 End;
 
+{ SAVE ONE PROJECT'S MEMBERS AND SAY WHAT REACHED DISK (live 2026-10-11, the }
+{ .02 run's section 38 step 12b): proj_save and proj_close save=true replied }
+{ only success and project_path, so a caller could not tell a write from a }
+{ save the editor declined except by reading mtimes. App_SaveAll's own       }
+{ measure around the same walk: the members' file ages before and after     }
+{ (AgesForPaths / CountChangedAges - FileAge, the ground truth), the pass    }
+{ counters reset first, and the record read after. Returns the JSON fields  }
+{ (each with a leading comma) for the caller's reply: only_modified,         }
+{ documents_attempted, documents_written, skipped_unmodified,               }
+{ bridge_record_pending.                                                     }
+{ OnlyModified False (the default) is the walk proj_save has always run:    }
+{ both skip flags False, every open member written. True skips a member     }
+{ whose flag reads clean - sheet or library - unless the bridge's record    }
+{ holds an edit to it (written then, as app_save_all does).                  }
+{ The age list is the members' DM_FullPath: absolute for a real project; a  }
+{ free document's bare listing has no age (-1) and is never counted         }
+{ written. The skip flags are put back to False whatever happens.           }
+Function SaveProjectMembersReport(Project : IProject; OnlyModified : Boolean) : String;
+Var
+    Paths, AgesBefore, AgesAfter : String;
+    Written : Integer;
+Begin
+    Result := '';
+    If Project = Nil Then Exit;
+    Paths := ProjectMemberPaths(Project);
+    AgesBefore := AgesForPaths(Paths);
+    SaveAttempts := 0;
+    SaveSkipped := 0;
+    SaveSkippedPaths := '';
+    SaveBridgeRecordPaths := '';
+    SaveBridgeRecordUnwritten := '';
+    SaveBridgeRecordSameTick := '';
+    SaveAttemptedKeys := '';
+    SaveUnresolvedPaths := '';
+    SaveUnnamedCount := 0;
+    SaveSkipCleanLibs := OnlyModified;
+    SaveSkipCleanSheets := OnlyModified;
+    Try
+        SaveProjectMembers(Project);
+    Finally
+        SaveSkipCleanLibs := False;
+        SaveSkipCleanSheets := False;
+    End;
+    AgesAfter := AgesForPaths(Paths);
+    Written := CountChangedAges(AgesBefore, AgesAfter);
+    Result := ',"only_modified":' + BoolToJsonStr(OnlyModified)
+        + ',"documents_attempted":' + IntToStr(SaveAttempts)
+        + ',"documents_written":' + IntToStr(Written)
+        + ',"skipped_unmodified":' + PipeListToJsonArray(SaveSkippedPaths)
+        + ',"bridge_record_pending":' + PipeListToJsonArray(BridgeRecordKeys(0));
+End;
+
 Function Proj_Save(Params : String; RequestId : String) : String;
 Var
-    ProjectPath : String;
+    ProjectPath, Report : String;
+    OnlyModified : Boolean;
     Workspace : IWorkspace;
     Project : IProject;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
+    OnlyModified := LowerCase(ExtractJsonValue(Params, 'only_modified')) = 'true';
 
     Workspace := GetWorkspace;
     If Workspace <> Nil Then
@@ -447,10 +501,11 @@ Begin
             { scratch project wrote every dirty document in the workspace,    }
             { client projects included. app_save_all is the tool for that,    }
             { and its name says so.                                           }
-            SaveProjectMembers(Project);
+            { The counters ride on the reply (SaveProjectMembersReport).      }
+            Report := SaveProjectMembersReport(Project, OnlyModified);
             Result := BuildSuccessResponse(RequestId,
                 '{"success":true,"project_path":"'
-                + EscapeJsonString(Project.DM_ProjectFullPath) + '"}');
+                + EscapeJsonString(Project.DM_ProjectFullPath) + '"' + Report + '}');
         End
         Else
             Result := BuildErrorResponse(RequestId, 'PROJECT_NOT_FOUND', 'Project not found');
@@ -475,14 +530,16 @@ End;
 Function Proj_Close(Params : String; RequestId : String) : String;
 Var
     ProjectPath, Discarded, StillDirty, More : String;
-    ClosedInstead, BeforeClose, Why, MemberPaths : String;
-    SaveFirst, Closed : Boolean;
+    ClosedInstead, BeforeClose, Why, MemberPaths, Report : String;
+    SaveFirst, Closed, OnlyModified : Boolean;
     Attempts : Integer;
     Workspace : IWorkspace;
     Project : IProject;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
     SaveFirst := ExtractJsonValue(Params, 'save') <> 'false';
+    OnlyModified := LowerCase(ExtractJsonValue(Params, 'only_modified')) = 'true';
+    Report := '';
     Discarded := '';
 
     Workspace := GetWorkspace;
@@ -514,7 +571,7 @@ Begin
             End;
 
             If SaveFirst Then
-                SaveProjectMembers(Project)
+                Report := SaveProjectMembersReport(Project, OnlyModified)
             Else
             Begin
                 { DISCARD BEFORE CLOSING, then check the discard took. A close }
@@ -594,7 +651,7 @@ Begin
                     + ',"saved":' + BoolToJsonStr(SaveFirst)
                     + ',"discarded":' + PipePathsToJsonArray(Discarded)
                     + ',"attempts":' + IntToStr(Attempts)
-                    + ',"closed_instead":[]}')
+                    + ',"closed_instead":[]' + Report + '}')
             Else
             Begin
                 If ClosedInstead <> '' Then
@@ -613,6 +670,7 @@ Begin
                     + ',"discarded":' + PipePathsToJsonArray(Discarded)
                     + ',"attempts":' + IntToStr(Attempts)
                     + ',"closed_instead":' + PipePathsToJsonArray(ClosedInstead)
+                    + Report
                     + ',"reason":"' + Why + '"}');
             End;
         End

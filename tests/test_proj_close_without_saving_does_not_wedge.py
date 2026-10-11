@@ -53,7 +53,8 @@ def _before_the_close(body: str) -> str:
 def test_without_saving_the_edits_are_discarded_before_the_close(close):
     pre = _before_the_close(close)
     arm = re.search(
-        r"If SaveFirst Then\s+SaveProjectMembers\(Project\)\s+Else\s+Begin"
+        r"If SaveFirst Then\s+(?:Report := SaveProjectMembersReport\(Project, "
+        r"OnlyModified\)|SaveProjectMembers\(Project\))\s+Else\s+Begin"
         r"(.*?)\bEnd;", pre, re.S)
     assert arm, "save=false has no arm of its own ahead of the close"
     assert "DiscardProjectMembers(Project)" in arm.group(1), (
@@ -86,7 +87,11 @@ def test_the_retry_is_only_for_a_close_without_saving(close):
 def test_the_close_is_still_confirmed_and_still_saves_when_asked(close):
     """The two properties this handler already had must survive."""
     assert "FindProjectByPath(Workspace, ProjectPath) = Nil" in close
-    assert "SaveProjectMembers(Project)" in close
+    # Since 2026.10.11.03 (N4) the save goes through SaveProjectMembersReport,
+    # which runs SaveProjectMembers itself and measures what reached disk.
+    assert "SaveProjectMembersReport(Project, OnlyModified)" in close
+    report = load(_ALTIUM / "Project.pas", minimum=10)["SaveProjectMembersReport"]
+    assert "SaveProjectMembers(Project);" in report
     assert "WorkspaceManager:SaveAll" not in close
 
 

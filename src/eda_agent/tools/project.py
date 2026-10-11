@@ -65,25 +65,47 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def proj_save(project_path: Optional[str] = None) -> dict[str, Any]:
-        """Save the current or specified project.
+    async def proj_save(
+        project_path: Optional[str] = None, only_modified: bool = False
+    ) -> dict[str, Any]:
+        """Save the current or specified project's open documents.
+
+        Only THIS project's members are written (never the bridge's own
+        script project). ``only_modified=False`` (default, unchanged) writes
+        every open member, edited or not, which can churn parameter
+        UniqueIDs in clean sheets. ``only_modified=True`` leaves a member
+        whose modified flag reads clean alone, sheet or library, unless
+        this bridge recorded an edit to it (written then, as
+        ``app_save_all`` does).
 
         Args:
             project_path: Optional path to specific project. If None, saves active project.
+            only_modified: write only members that read modified (or that
+                the bridge edited).
 
         Returns:
-            Dictionary confirming save operation
+            ``success``, ``project_path``, and what reached disk, measured
+            by file timestamp as ``app_save_all`` does: ``only_modified``,
+            ``documents_attempted`` (open members written to),
+            ``documents_written`` (members whose file got newer),
+            ``skipped_unmodified`` (members left alone by only_modified)
+            and ``bridge_record_pending`` (bridge edits still not on disk).
+            ``documents_written`` below ``documents_attempted`` means the
+            editor declined a save (an active command does that).
         """
         bridge = get_bridge()
-        params = {}
+        params: dict[str, Any] = {}
         if project_path:
             params["project_path"] = project_path
+        if only_modified:
+            params["only_modified"] = True
         result = await bridge.send_command_async("project.save", params)
         return result
 
     @mcp.tool()
     async def proj_close(
-        project_path: Optional[str] = None, save: bool = True
+        project_path: Optional[str] = None, save: bool = True,
+        only_modified: bool = False,
     ) -> dict[str, Any]:
         """Close a project, saving its documents or discarding their edits.
 
@@ -138,6 +160,10 @@ def register_project_tools(mcp):
                 ``save=False`` then leaves any prompt for a human.
             save: write modified documents first (True), or discard their
                 unsaved edits (False).
+            only_modified: with ``save=True``, write only members that
+                read modified (or that the bridge edited), as
+                ``proj_save only_modified=True``. Default False: every
+                open member is written, as before.
 
         Returns:
             ``success`` and ``closed``, checked by looking the project up
@@ -146,16 +172,22 @@ def register_project_tools(mcp):
             When one was left, ``prompt`` and ``reason``: the bridge stays
             blocked until it is answered. Without a prompt, ``discarded``
             lists the loaded members closed without saving and
-            ``attempts`` how many closes it took. The modified flag cannot
+            ``attempts`` how many closes it took. With ``save=True`` the
+            reply also carries ``proj_save``'s counters:
+            ``only_modified``, ``documents_attempted``,
+            ``documents_written``, ``skipped_unmodified`` and
+            ``bridge_record_pending``. The modified flag cannot
             be read reliably, so a path in ``discarded`` is not proof that
             document had edits.
         """
         import asyncio as _asyncio
 
         bridge = get_bridge()
-        params = {"save": save}
+        params: dict[str, Any] = {"save": save}
         if project_path:
             params["project_path"] = project_path
+        if save and only_modified:
+            params["only_modified"] = True
         members = None
         if not save and project_path:
             members = await _close_members(bridge, project_path)

@@ -32,6 +32,7 @@ import pytest
 
 from tests.pascal_eval import PascalError, build, translate
 from tests.pascal_source import load, strip_comments
+from tests.live_2026_10_11 import file_reader
 
 _ROOT = Path(__file__).resolve().parents[1]
 _ALTIUM = _ROOT / "scripts" / "altium"
@@ -261,6 +262,9 @@ def _board_ns(client, **extra):
     ns = {"Client": client, "PCBServer": _PCBServer(client),
           "FileExists": lambda p: p in client.on_disk,
           "Trim": _delphi_trim, "RecordCaughtException": rec, "_rec": rec}
+    # Every file on this disk reads as a real board (an OLE head): the
+    # unloadable-file test (N1 of the .02b run) has its own module.
+    ns.update(file_reader())
     ns.update(extra)
     return ns
 
@@ -268,6 +272,7 @@ def _board_ns(client, **extra):
 def _resolve(client):
     ns = _board_ns(client, GetPCBBoardAnywhere=lambda d: "ANYWHERE")
     build(_main(), ["LooksAbsolutePath", "DocumentPresent", "PcbPathOpenable",
+                    "FileLooksLoadable", "UnopenedFileUnloadable",
                     "ResolvePCBBoard"], ns)
     return ns
 
@@ -340,6 +345,7 @@ class _Ws:
 def _anywhere(client, ws):
     ns = _board_ns(client, GetWorkspace=ws)
     build(_main(), ["LooksAbsolutePath", "DocumentPresent",
+                    "FileLooksLoadable", "UnopenedFileUnloadable",
                     "GetPCBBoardAnywhere"], ns)
     return ns
 

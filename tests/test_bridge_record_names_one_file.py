@@ -245,6 +245,7 @@ _MAIN_NAMES = [
     "BridgeRecordKeys", "ForgetBridgeEditsIfClosed", "ProjectMemberPaths",
     "MarkDocDirty", "MarkDocDirtyByPath", "AmbiguousBareDocName",
     "DocIsModified", "ListedServerDoc", "AgeIsThisTick", "WriteDocAndNote",
+    "IsScriptProject", "IsSaveableDesignDoc",
     "SaveOneDocByDocRef", "SaveProjectMembers", "SaveAllDirty",
     "SaveBridgeRecordSweep",
 ]

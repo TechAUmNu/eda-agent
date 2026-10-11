@@ -2608,6 +2608,68 @@ Begin
     End;
 End;
 
+{ RemoveLibBodyByAddress - take ONE 3D body out of a footprint:                }
+{ Lib_Link3DModel's undo of a body whose model loaded EMPTY (live 2026-10-11, }
+{ probe P7). RemoveLibTextByAddress line for line - the same walk to the     }
+{ address, the removal while the iterator is open, two passes, the same      }
+{ BeginModify / EndModify bracket, footprint only (rule 1) - with the        }
+{ object set Body3D_RemoveAll walks (eComponentBodyObject). The caller owns  }
+{ PreProcess / PostProcess. False when the footprint does not list the       }
+{ address (or the removal raised): the caller says so.                       }
+Function RemoveLibBodyByAddress(Footprint : IPCB_LibComponent; Addr : String; Var Entries : String) : Boolean;
+Var
+    GrpIter : IPCB_GroupIterator;
+    Prim : IPCB_Primitive;
+    ThisAddr : String;
+    Pass, Oid : Integer;
+    Hit : Boolean;
+Begin
+    Result := False;
+    If (Footprint = Nil) Or (Addr = '') Then Exit;
+    PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
+        c_Broadcast, PCBM_BeginModify, c_NoEventData);
+    Try
+        For Pass := 1 To 2 Do
+        Begin
+            Hit := False;
+            GrpIter := Footprint.GroupIterator_Create;
+            Try
+                GrpIter.AddFilter_ObjectSet(MkSet(eComponentBodyObject));
+                Prim := GrpIter.FirstPCBObject;
+                While Prim <> Nil Do
+                Begin
+                    ThisAddr := '';
+                    Try ThisAddr := IntToStr(Prim.I_ObjectAddress); Except End;
+                    If ThisAddr = Addr Then
+                    Begin
+                        Hit := True;
+                        Break;
+                    End;
+                    Prim := GrpIter.NextPCBObject;
+                End;
+                If Hit And (Prim <> Nil) Then
+                Begin
+                    Oid := -1;
+                    Try Oid := Prim.ObjectId; Except Oid := -1; End;
+                    Try
+                        Footprint.RemovePCBObject(Prim);
+                        Result := True;
+                        Entries := LibAddRemovalEntry(Entries, Oid, Addr);
+                    Except
+                        Hit := False;
+                    End;
+                End;
+            Finally
+                Footprint.GroupIterator_Destroy(GrpIter);
+            End;
+            If Not Hit Then Break;
+        End;
+    Finally
+        PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
+            c_Broadcast, PCBM_EndModify, c_NoEventData);
+    End;
+End;
+
 {..............................................................................}
 { PAD SHAPE ON EVERY COPPER LAYER                                              }
 {                                                                              }
@@ -6687,6 +6749,9 @@ Var
     X1, Y1, X2, Y2, NX1, NY1, NX2, NY2, PX1, PY1, PX2, PY2 : TCoord;
     RX1, RY1, RX2, RY2, GapX, GapY, Gap, BX1, BY1, BX2, BY2 : TCoord;
     PadCount, Removed, RemovedDistinct, Remaining, BoardRemoved, BoardStill : Integer;
+    EmptyOverall : TCoord;
+    EmptyRemoved : Boolean;
+    EmptyAddr, EmptyEntries : String;
 Begin
     ModelPath := ExtractJsonValue(Params, 'model_path');
     ComponentName := ExtractJsonValue(Params, 'component_name');
@@ -7003,6 +7068,54 @@ Begin
             { footprint origin plus the offsets; 'center' and 'pads' from the }
             { box as it stands after the add.                                 }
             Body3D_ReadRect(Body, X1, Y1, X2, Y2, HaveRect);
+
+            { AN EMPTY MODEL IS A FAILED LOAD (live 2026-10-11, probe P7):     }
+            { placeholder .wrl / .igs / .stl / .dat stubs loaded NON-Nil, the  }
+            { body had no box, the reply said success false / placement_ok    }
+            { false - and the empty body stayed on the footprint. Altium reads }
+            { a model by its CONTENT, so no extension list catches it; no box  }
+            { AND a 0 overall height (read only when the box is missing) is    }
+            { MODEL_LOAD_FAILED, and the body comes off the footprint again    }
+            { inside this transaction (RemoveLibBodyByAddress, the footprint   }
+            { half: rule 1 beside RemoveLibTextByAddress). With replace=true   }
+            { the old bodies went before the add (they go only after a NON-Nil }
+            { load, and an empty model is non-Nil), so the reply says so.      }
+            EmptyRemoved := False;
+            EmptyEntries := '';
+            If Not HaveRect Then
+            Begin
+                EmptyOverall := 0;
+                Try EmptyOverall := Body.OverallHeight; Except EmptyOverall := 0; End;
+                If EmptyOverall = 0 Then
+                Begin
+                    EmptyAddr := '';
+                    Try EmptyAddr := IntToStr(Body.I_ObjectAddress); Except EmptyAddr := ''; End;
+                    EmptyRemoved := RemoveLibBodyByAddress(Footprint, EmptyAddr, EmptyEntries);
+                    FailCode := 'MODEL_LOAD_FAILED';
+                    If EmptyRemoved Then
+                        Failure := 'Could not load a 3D model from ' + ModelPath
+                            + ': it loaded as an empty model (no readable bounding '
+                            + 'box and an overall height of 0), so the file is not a '
+                            + 'model Altium can read, whatever its extension. The '
+                            + 'empty body was taken off the footprint again.'
+                    Else
+                        Failure := 'Could not load a 3D model from ' + ModelPath
+                            + ': it loaded as an empty model (no readable bounding '
+                            + 'box and an overall height of 0), and the empty body '
+                            + 'could NOT be taken off the footprint again: remove it '
+                            + 'with lib_delete_footprint_primitives (object_type '
+                            + 'componentbody).';
+                    If Replace And (RemovedDistinct > 0) Then
+                        Failure := Failure + ' replace=true had ALREADY removed '
+                            + IntToStr(RemovedDistinct) + ' existing bod(ies) before '
+                            + 'the model could be judged; nothing is saved, so '
+                            + 'lib_reload_library goes back to the last save.';
+                End;
+            End;
+        End;
+
+        If Failure = '' Then
+        Begin
             If AlignStr = 'none' Then
             Begin
                 DX := OrgX + MilsToCoordF(OffX);

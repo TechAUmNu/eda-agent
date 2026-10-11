@@ -405,6 +405,12 @@ def register_application_tools(mcp):
         Detach also triggers save_all automatically, so you don't need this
         as the very last step.
 
+        DESIGN DOCUMENTS ONLY: sheets, schematic and PCB libraries, boards
+        and output jobs. The bridge's own script project (a ``.PrjScr``)
+        and any script unit open in Altium are never written, listed or
+        counted (live 2026-10-11: the walk reached the running bridge's
+        Library.pas and a no-argument save would have rewritten it).
+
         TO SAVE ONE LIBRARY, USE ``lib_save_library``. This writes every
         open sheet and board (and, by default, only those libraries that
         read modified; see below), and each save rewrites open SchDocs and

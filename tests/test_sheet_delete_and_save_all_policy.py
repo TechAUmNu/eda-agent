@@ -396,8 +396,12 @@ def test_save_all_is_dispatched_with_its_params():
 
 
 def test_only_save_all_ever_arms_the_skip():
-    """Every other caller of the save pass (stop_server, proj_save,
-    proj_close, the compile paths) must keep writing everything."""
+    """Every other caller of the save pass (stop_server, the compile paths)
+    must keep writing everything. proj_save / proj_close save=true arm it
+    ONLY on their opt-in only_modified (2026.10.11.03, N4 of the .02 live
+    run): SaveProjectMembersReport arms both flags from its OnlyModified
+    argument, and both handlers pass a value that is True only for an
+    explicit only_modified=true, so their default still writes everything."""
     armed = []
     for pas in sorted(_ALTIUM.glob("*.pas")):
         if pas.name == "Altium_MCP.pas":
@@ -406,7 +410,16 @@ def test_only_save_all_ever_arms_the_skip():
             for m in re.finditer(r"SaveSkipClean(?:Libs|Sheets)\s*:=\s*([^;]+);", body):
                 if m.group(1).strip() != "False":
                     armed.append((pas.name, name, m.group(1).strip()))
-    assert armed and all(fn == "App_SaveAll" for _, fn, _ in armed), armed
+    assert armed and all(
+        fn == "App_SaveAll"
+        or (fn == "SaveProjectMembersReport" and value == "OnlyModified")
+        for _, fn, value in armed), armed
+    project = load(_ALTIUM / "Project.pas", minimum=10)
+    for handler in ("Proj_Save", "Proj_Close"):
+        body = project[handler]
+        assert ("OnlyModified := LowerCase(ExtractJsonValue(Params, "
+                "'only_modified')) = 'true';") in body, handler
+        assert "SaveProjectMembersReport(Project, OnlyModified)" in body, handler
 
     pump = load(_ALTIUM / "StatusForm.pas", minimum=10)["StartMCPPump"]
     assert "SaveSkipCleanLibs := False;" in pump
