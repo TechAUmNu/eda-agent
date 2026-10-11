@@ -1,4 +1,4 @@
-# Release verification: 2026.10.11.02
+# Release verification: 2026.10.11.03
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by the linter (and by FPC where a section says so) but **not
@@ -289,7 +289,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.11.02`, `version_match` =
+Expect `altium_script_version` = `2026.10.11.03`, `version_match` =
 `true`, and `mcp_server_version` = `0.6.1`. On a freshly started loop
 `caught_exceptions` is `0` and `last_caught` null (section 39): note both,
 since every later section is read against them.
@@ -2077,7 +2077,7 @@ sheets, `A`, `B` and `STUBS`, all saved and loaded, plus one open
 library `<lib>` (a scratch copy) that has not been edited. Confirm
 `app_ping` answers after each call.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.02`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.03`.
 
 2. **The default save-all leaves an unedited library alone.** Note
    `<lib>`'s mtime. `app_save_all` with no arguments. Expect
@@ -2245,7 +2245,7 @@ compile is what is new.
 Work on the live project only if the .PrjPcb is committed (the check is a
 `git diff`), or on a copy. Focus some other sheet `A` first.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.02`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.03`.
 
 2. **A default add writes the project.** Note the .PrjPcb's mtime and two
    SchDoc mtimes. `proj_add_sheet name=ZZ33`. Expect `success: true,
@@ -2330,7 +2330,7 @@ confirm it) and write the project only for a sheet that is on disk.
 
 Focus some other sheet `A` of the focused project first.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.02`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.03`.
 
 2. **The add still takes the document save.** `proj_add_sheet name=ZZ35`:
    as step 33's step 2, plus `project_save_route: document_save`.
@@ -2403,7 +2403,7 @@ after `MarkDocDirtyByPath`. They now answer `saved: false` with
 `marked_modified`, `pending_save` and `written_to_disk: false` (the fields
 `lib_delete_footprint` already uses). No Altium call changed; only the reply.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.02`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.03`.
 2. **The reply is honest.** Focus a sheet, `obj_modify` a net label to its
    own current text. Expect `saved: false, marked_modified: true,
    pending_save: true, written_to_disk: false`, and the sheet's mtime
@@ -2460,7 +2460,7 @@ only from the new handler, and every sender reports its absence (the tool as
 a `warning`, the plan paths as a note), so step 2 below detects a stale
 script by itself.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.02`
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.03`
    (the 2026-10-08 build is the one the results below were measured on),
    `version_match` true.
 2. **Exact values.** On a scratch sheet with a placed part (say `R1`) that has
@@ -2647,7 +2647,7 @@ section): the heights reach the file and the discard reply holds, but
 (section 38). On any re-run, run 37.6 FIRST: it is the step that can stop
 the loop.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.02`,
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.03`,
    `version_match` true.
 2. **Heights survive the save.** On a COPY of a .PcbLib with at least three
    footprints, focus footprint A, then `lib_set_footprint_height` on B and C
@@ -2770,7 +2770,7 @@ this build: section 38.
 
 ---
 
-## 38. A dirty mark that says whether it took, and a save-all that writes what the bridge edited (run live 2026-10-11 on the first 2026-10-11 build, results at the end; re-check on 2026.10.11.02)
+## 38. A dirty mark that says whether it took, and a save-all that writes what the bridge edited (run live 2026-10-11 on the first 2026-10-11 build, results at the end; re-check on 2026.10.11.03)
 
 Found by section 37's live run (2026-10-10, the 2026-10-10 build): the
 library's modified flag read false after every `lib_set_footprint_height`
@@ -2893,8 +2893,8 @@ Application.pas):
 * `lib_read_pcblib_file` reports each footprint's `height_raw`,
   `height_mils` and `height_mm` from the file (Python, offline).
 
-**2026.10.11.02, after the 2026-10-11 live run** (results at the end of
-this section; the fixes, each with an executed test that fails on the
+**The second 2026-10-11 build, after the 2026-10-11 live run** (carried
+unchanged into 2026.10.11.03; results at the end of this section; the fixes, each with an executed test that fails on the
 first 2026-10-11 build, are in `tests/test_live_*.py`, one module per
 finding, sharing `tests/live_2026_10_11.py`):
 
@@ -2967,14 +2967,16 @@ finding, sharing `tests/live_2026_10_11.py`):
   that matched.
 * **The close refusal names the bridge edit whenever there is one (D5).**
 
-The steps below are the 2026-10-11 procedure with the .02 expectations.
-SCRIPT_VERSION is `2026.10.11.02`. Use scratch copies only:
+The steps below are the 2026-10-11 procedure with the second-build
+expectations, unchanged on 2026.10.11.03 (its re-check on the second
+build never started: the loop was dead, see the section 39 results).
+SCRIPT_VERSION is `2026.10.11.03`. Use scratch copies only:
 a scratch sheet opened as a free document, a scratch PROJECT copy with at
 least one sheet, a byte copy of one of that project's sheets saved under the
 SAME FILE NAME in another folder (opened as a free document), and a byte copy
 of a .PcbLib opened on its own.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.02`,
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.11.03`,
    `version_match` true.
 2. **Read-back on a FREE document.** On the free scratch sheet (focused),
    `obj_modify` one property (say a part's `Location.X`). Expect
@@ -2995,7 +2997,7 @@ of a .PcbLib opened on its own.
    path lookup reaches a different object from the focused tab; both false
    means `IServerDocument.Modified` does not reflect `SetModified` on this
    Altium at all. Either way the reply now SAYS so (`save_hint`), and step 4
-   is the safety net. On 2026.10.11.02 a false here comes with `flag_raw`
+   is the safety net. On 2026.10.11.03 a false here comes with `flag_raw`
    `false` (`If Not X` held: the flag really reads False after
    `SetModified(True)`, or an unassigned value, which converts to False) or
    `unreadable` (the problem then says "the modified flag could not be
@@ -3021,7 +3023,7 @@ of a .PcbLib opened on its own.
    if it still does, else `lib_add_footprint_tracks` or
    `lib_modify_footprint_pads` (both read `modified:false` on earlier builds).
    If no bridge edit reads false on this build, record that and skip: the
-   record path is then unreachable in practice. ON 2026.10.11.02 THAT IS
+   record path is then unreachable in practice. ON 2026.10.11.03 THAT IS
    THE EXPECTED OUTCOME (D1: a mark now reads true): record "no bridge edit
    reads false" with the `flag_raw` / `flag_tests` of the edit tried, and
    run instead the plain version - after a bridge edit that reads true,
@@ -3054,7 +3056,7 @@ of a .PcbLib opened on its own.
    may land in `bridge_record_same_tick` (not a failure, no
    `bridge_record_warning`) or in `written_by_bridge_record`; it must not be
    in `bridge_record_not_written`. Record which. On
-   2026.10.11.02, with the edit reading `marked_modified: true`, the walk
+   2026.10.11.03, with the edit reading `marked_modified: true`, the walk
    writes it as a modified document: it is counted in `documents_written`,
    both lists may be empty, and it must NOT be in `libraries_skipped`.
 6. **A pass that writes only free documents counts them.** With only the
@@ -3121,7 +3123,7 @@ of a .PcbLib opened on its own.
     copy still open. Then with `discard_changes=true`: `closed: true`,
     `discarded: true`, `bridge_edited: true`, `file_unchanged_on_disk:
     true`, and `modified_read` the flag as `ModifiedFlagOf` reads it (`true`
-    on 2026.10.11.02 when the mark read true; `false` only when it did
+    on 2026.10.11.03 when the mark read true; `false` only when it did
     not - record which).
 11. **A file written outside the record is not rewritten (F4).** Bridge
     edit on the library copy, then save it in Altium by hand (Ctrl+S on its
@@ -3134,7 +3136,7 @@ of a .PcbLib opened on its own.
     mtime does not move and `bridge_record_pending` is `[]`.
 13. **A reload whose save is declined does not close the sheet.** After a
     bridge edit on the free scratch sheet whose `marked_modified` reads
-    FALSE (as step 4; on 2026.10.11.02 a mark is expected to read true, so
+    FALSE (as step 4; on 2026.10.11.03 a mark is expected to read true, so
     run it with that edit and record the flag: a declined save then keeps
     the flag reading modified, which is `SAVE_FAILED` too, and the final
     save-all writes the sheet as a modified document rather than from the
@@ -3155,7 +3157,7 @@ Because the carrier was open, every "app_save_all with NO arguments" ran
 as `only_modified=true` instead (marked SUB). `caught_exceptions` 0,
 `cast_errors` 0 and `last_caught` null before and after EVERY step.
 
-| Step | Verdict | What happened | On 2026.10.11.02 |
+| Step | Verdict | What happened | On 2026.10.11.03 |
 |---|---|---|---|
 | 1 | PASS | version matched | re-check the new version |
 | 2 | FAIL | `marked_modified` false, `modified_read` false with `*` on the tab, NO `save_hint`, `mark.problem` empty; the no-match half passed | D1 fixed (`ModifiedFlagState` / `ModifiedFlagOf`, `If X` / `If Not X` only); record `flag_raw` / `flag_tests` |
@@ -3173,6 +3175,11 @@ as `only_modified=true` instead (marked SUB). `caught_exceptions` 0,
 | 12 | PASS | the closed edit was not written; `bridge_record_pending` `[]` | unchanged |
 | 13 | NOT RUN | needs an interactive command left running (owner session) | still owner-gated |
 
+The second 2026-10-11 build's re-check of this section (2026-10-11
+20:24-20:27) did NOT START: the polling loop was dead after section 39's
+P8 (results there) and Altium was not restarted. Nothing was run and the
+scratch and carrier folders were unchanged. Run it on 2026.10.11.03.
+
 Why the replies contradicted the writes: the raw flag read neither true
 nor false, so `If Not WasModified` (the record's route) did not run and
 the walk wrote the file as if modified; a second visit of the same file
@@ -3182,7 +3189,7 @@ was lost - only the replies were wrong.
 
 ---
 
-## 39. Popup-free run (run live 2026-10-11 on the first 2026-10-11 build, results at the end; re-check on 2026.10.11.02)
+## 39. Popup-free run (run live 2026-10-11 on the first and second 2026-10-11 builds, results at the end; re-check on 2026.10.11.03)
 
 **Why.** Altium's script engine shows an exception as a modal "press OK"
 dialog BEFORE the surrounding `Try/Except` runs, and the polling loop
@@ -3192,6 +3199,20 @@ test, a folder or file test, a syntax-and-range test before a
 conversion) and COUNTS what is left: every `Except` that is not a
 fault-only backstop now calls `RecordCaughtException`, and so does the
 dispatcher's catch-all.
+
+**THE COUNT SEES ORDINARY EXCEPTIONS ONLY (corrected 2026-10-11).** A
+member that does not resolve on a late-bound interface - "Undeclared
+identifier: X" - is not an exception: the script engine halts on the line,
+the Script IDE parks there, no `Except` runs, nothing is counted, a
+`Finally` is skipped, and after OK the polling loop is DEAD. The first
+popup-free build filed three sites as "counted, not guarded"
+(`SetOwnerPart`, `TargetLibComponentName`, `MarkLibDirty`, all reading the
+editor's `CurrentSchComponent`) on the premise that a failure would be
+counted; live on the second build the first of them halted the loop (39
+results, P8). 2026.10.11.03 reads no member of that reference anywhere,
+and of the IPCB_Rule constraint read in `PCB_NormalizeVias` (P23). For
+every site still counted below, "0 catches" means only "no ordinary
+raise": a dead loop is the undeclared-identifier answer.
 
 What carries the count (all new in this build):
 
@@ -3230,11 +3251,15 @@ every section, except a probe in 39.4 and step 2's first failure shape,
 which are listed because they may raise.
 
 **NO INCREASE DOES NOT MEAN NO DIALOG.** The counter sees the script
-engine's exception box only. Altium's OWN message boxes (class
-`TMessageForm`, e.g. title "Warning", text "File type not recognised.",
-which `Client.OpenDocument` put up live on 2026-10-11) are not exceptions
-at all: no `Except` runs and nothing is counted, before or after OK is
-pressed. While one is up the call never returns, `app_ping` answers "not
+engine's exception box only, and only for a CATCHABLE exception. Two other
+boxes are never counted, before or after OK, and all three can be class
+`TMessageForm` (39.5 tells them apart): the script engine's FATAL
+late-bound error (title "Error", text "Undeclared identifier: ...", OK
+only - the same caption and button as the exception box; live 2026-10-11
+on the second build, after which the loop was dead), and Altium's OWN
+message boxes (e.g. title "Warning", text "File type not recognised.",
+which `Client.OpenDocument` put up live on 2026-10-11). Neither is an
+exception: no `Except` runs. While one is up the call never returns, `app_ping` answers "not
 responding" and its counters are unreadable. Only `app_get_status`
 (`in_flight` names the stuck call and its age) and `app_list_open_dialogs`
 (the box's title, class and text) see it. So after any call that does not
@@ -3311,13 +3336,21 @@ No conservative pre-check exists for these, so the `Try` stays and its
 39.2 readings around it, and record: dialog or not, the
 `caught_exceptions` change, `last_caught.where`, and the reply.
 
+A count settles only an ORDINARY raise. Where a probe's failure would be
+an undeclared identifier (a member the interface lacks, or one read on an
+un-narrowed reference), it is not counted at all: it is 39.5's class (b),
+the loop is dead after OK, and every later probe in the session is lost.
+Rows marked **FATAL-IF-WRONG** are that kind: run them deliberately, LAST
+in the session, with a human present to stop the Script IDE and rerun
+StartMCPServer (39.5).
+
 | Probe | Site (`where`) | Setup and call | What settles it |
 |---|---|---|---|
 | P1 | `App_ExitActiveCommand:PCBServer.PostProcess` | Restart Altium, open ONLY a SchLib, `app_exit_active_command` | 0 = `PCBServer` answers with no board open; 1 = it raises and the loop now stops after the first (it used to raise 8 times); a stopped loop or `where` = `dispatcher` = an undeclared identifier, which no `Try` catches |
 | P1b | same | Open a PcbLib, close it, `app_exit_active_command` | `pcb_post_process: true` confirms a closed library leaves the server registered (why this site is NOT gated on an open PCB document) |
 | P2 | `dispatcher` (in `App_CreateDocument`) | `app_create_document kind=NOTAKIND file_path=<scratch>\x.dat add_to_project=false` | `CREATE_FAILED` = `OpenNewDocument` answers Nil, nothing to do; `INTERNAL_ERROR` + a dialog = it raises, and unknown kinds need a refusal |
 | P3 | `GetPCBBoardAnywhere:OwnerDocument` | 39.3 item 4 | 0 = the Nil test was enough; 1 = reading `OwnerDocument` itself raises on a non-document view |
-| P4 | `MechLayerFromNumber:LayerUtils.MechanicalLayer` | Any tool given the layer `Mechanical21` on a board or library (e.g. `pcb_get_mech_layer_names` on one using mechanical 17+), and `pcb_set_layer_visibility layer=Mechanical21` | 0 expected on AD26; on a pre-AD19 build, record the result (an undeclared `LayerUtils` would show as `dispatcher` or a stopped loop). 2026.10.11.02: the visibility reply echoes `"layer":"Mechanical21"` (the first 2026-10-11 build echoed `Unknown`; `GetLayerString` now names Mechanical17-64 by a verified `MechLayerFromNumber` lookup, only on AD19 and later) |
+| P4 | `MechLayerFromNumber:LayerUtils.MechanicalLayer` | Any tool given the layer `Mechanical21` on a board or library (e.g. `pcb_get_mech_layer_names` on one using mechanical 17+), and `pcb_set_layer_visibility layer=Mechanical21` | 0 expected on AD26; on a pre-AD19 build, record the result (an undeclared `LayerUtils` would show as `dispatcher` or a stopped loop). 2026.10.11.03: the visibility reply echoes `"layer":"Mechanical21"` (the first 2026-10-11 build echoed `Unknown`; `GetLayerString` now names Mechanical17-64 by a verified `MechLayerFromNumber` lookup, only on AD19 and later) |
 | P5 | `ReadMechKind:Kind` | Only on a build below AD19: `pcb_get_mech_layer_names` | kinds read -1 and nothing is counted (the read is gated off below 19) |
 | P6 | `App_CreateDocument:DoFileSave`, `App_CreateDocument:SaveObject` | 39.3 item 5, and the same with a folder that exists but is read-only | 0 confirms the folder test is the whole story; a count means a save raises in an existing folder |
 | P6b | `ResolvePCBBoard:OpenDocument`, `GetPCBBoardAnywhere:OpenDocument` | A 0-byte file renamed `scratch.PcbDoc`: pass it as `pcb_place_components` `board_path`, then list it in a scratch project and run `app_get_preferences` with a sheet focused | These are the residual opens of a board that IS on disk; 0 = Altium answers Nil for a broken file, 1 = it raises (a genuine fault, now counted rather than silent) |
@@ -3330,9 +3363,9 @@ row itself names the pair that popped.
 
 | Probe | Site (`where`) | Setup and call | What settles it |
 |---|---|---|---|
-| P8 | `MarkLibDirty:CurrentSchComponent.GraphicallyInvalidate` | Fresh session; open a SchLib with a symbol selected in the editor and nothing created through the bridge; `lib_add_symbol_lines` on it | 0 = the editor's current component carries the member; 1 per call = it does not, and the invalidate needs the component narrowed first (this would have been a dialog on EVERY library edit) |
-| P9 | `SetOwnerPart:CurrentPartID`, `SetOwnerPart:DisplayMode`, `TargetLibComponentName:CurrentSchComponent.LibReference` | Same fresh session: `lib_add_pins` (two pins), then `lib_get_pin_list` | 0 = the editor's current component answers; a count = the un-narrowed reference lacks the member (the Lib_GetPinList measurement), and these reads need the component found by name instead |
-| P10 | (none: the held component's liveness) | `lib_create_symbol X`, then close and reopen that SchLib in the UI, then `lib_add_pins` | The pins land on the editor's CURRENT symbol, no dialog, no count. A dialog = `Client.GetDocumentByPath` hands back the same interface after a reopen, so `LastCreatedLibIsLive` cannot see it (record whether two lookups return the same object) |
+| P8 | (none: nothing is read off the editor's selection any more) | **FATAL-IF-WRONG; first in a session of its own, after every other section.** Restart Altium; open a SchLib by hand (a symbol is selected in the editor; nothing created through the bridge). WITHOUT component_name: `lib_add_symbol_lines lines=[{x1:0,y1:0,x2:100,y2:0}]`, `lib_add_pins` (two pins), `lib_add_symbol_rectangle`, `lib_get_pin_list`, `lib_split_pin_functions`, `obj_create object_type=eLine container=component`, `lib_link_footprint footprint_name=X` | Every one answers `NO_COMPONENT` (the edits' message names component_name and lib_set_current_component), no dialog, no count, the library file unchanged and not marked modified. On the second 2026-10-11 build the first call halted the loop ("Undeclared identifier: CurrentPartID", 39 results). A box now is class (b): stop the run and record the unit and line the Script IDE shows |
+| P9 | (none) | Same session, after P8. `lib_add_pins component_name=<the selected symbol>` with two pins, one carrying `owner_part_id=0`; then `lib_add_symbol_lines` and `lib_get_pin_list` WITHOUT a name | The pins land on that symbol (visible in the editor without reselecting it: MarkLibDirty redraws the held component), the symbol is now current, the explicit pin reads `owner_part_id` 0 and the other the symbol's current part (1 on a single-part symbol, never 0); the nameless calls act on the same symbol (it is now held). No dialog, no count. `NO_COMPONENT` for a name that exists = the index and the walk both missed it (record whether `lib_set_current_component` finds it) |
+| P10 | (none: the held component's liveness) | `lib_create_symbol X`, then close and reopen that SchLib in the UI, then `lib_add_pins` without a name | `NO_COMPONENT`, no dialog, no count: the held component was dropped when its library closed (`LastCreatedLibIsLive`), and the editor's selection is no longer a fallback. **FATAL-IF-WRONG**: a dialog = `Client.GetDocumentByPath` hands back the same interface after a reopen, so the freed held component was used (record which 39.5 class, and whether two lookups return the same object) |
 | P11 | `ApplyLabelFormat:write` | Scratch SchLib: `lib_set_label_formats ops=[{target: designator, orientation: 90}]`, then `[{target: designator, justification: 12}]` | 1 = an out-of-range ordinal raises, and both fields need a range refusal (0..3, 0..8); 0 = check with `lib_audit_styles` whether the value was stored as given |
 | P12 | `Lib_InstallLibrary:InstallLibrary`, `Lib_UninstallLibrary:UnInstallLibrary` | Install and uninstall a real scratch `.SchLib`; then install a RELATIVE name that does not exist; then uninstall a name that is installed under another spelling of its path | 0 for the real file; the relative and respelled cases are still asked and show whether either call raises (the absolute-missing and never-installed cases are refused before the call) |
 | P13 | `Lib_MoveFootprints:GetPCBLibraryByPath`, `Lib_CopyFootprint:GetPCBLibraryByPath` | `lib_copy_footprint` and `lib_move_footprints` into a destination `.PcbLib` that exists on disk but is NOT open | 0 = the lookup answers Nil for a closed library and the load route runs; 1 = it raises |
@@ -3345,7 +3378,7 @@ row itself names the pair that popped.
 | P20 | `Gen_PlaceHarnessConnector:HarnessType` | `sch_place_harness_connector` with `harness_type` set | 1 = the member does not exist; drop the write |
 | P21 | `Gen_PlaceCrossSheetConnector:Side` | `sch_place_cross_sheet_connector` with `side=left`, then `side=right` | 1 = the member does not exist; drop the write |
 | P22 | `ProcessSchDocObjects:owner-remove` | `obj_delete object_type=eSheetEntry` with a filter matching one entry on a hierarchical sheet | 0 and the entry gone = removal through the owning symbol works; 1 = the owner refused and the document-level fallback ran |
-| P23 | `PCB_NormalizeVias:PreferedWidth` | `pcb_normalize_vias` on a scratch board with one free via | 1 = a base `IPCB_Rule` lacks the member: iterate the routing-via rules typed instead (now at most one dialog per rule, not per via) |
+| P23 | (none: the read is no longer counted) | **FATAL-IF-WRONG.** `pcb_normalize_vias` on a scratch board with one free via and only the default RoutingVias rule | `changed: 1`, `no_rule_values: 0`, the via at the rule's preferred size and hole. The values now come from a rule-iterator pass (a local assigned straight from the iterator, the measured room-rule cure) matched by the dominant rule's NAME, and the dominant `IPCB_Rule` is asked its `Name` only (the second 2026-10-11 build read `PreferedWidth` off it inside a counted `Try`, the measured room-rule failure, which is an engine halt, not a count). `no_rule_values: 1` = the iterator did not yield that rule name (record it). A box = class (b): the typed member is not `PreferedWidth` on this build |
 | P24 | `PCB_PlaceEmbeddedBoard:XLocation`, `PCB_PlaceEmbeddedBoard:YLocation`, `PCB_PlaceEmbeddedBoard:DocumentPath`, `PCB_PlaceEmbeddedBoard:RowCount`, `PCB_PlaceEmbeddedBoard:ColCount`, `PCB_PlaceEmbeddedBoard:RowSpacing`, `PCB_PlaceEmbeddedBoard:ColSpacing`, `PCB_PlaceEmbeddedBoard:MirrorFlag` | One `pcb_place_embedded_board` call on a scratch board | Each row names a member `IPCB_EmbeddedBoard` lacks; for the locations, position the board with `MoveByXY` from its bounding rectangle instead |
 | P25 | `PCB_SetMechLayerKind:AddPair` | `pcb_set_mech_layer_kind` with a paired kind and `partner_layer` on two layers that are ALREADY paired | 0 = `AddPair` is idempotent; 1 = it raises on an existing pair, and the add needs a `PairDefined` check too |
 | P26 | `PCB_ModifyLayer:CopperThickness`, `PCB_ModifyLayer:DielectricType`, `PCB_ModifyLayer:DielectricHeight`, `PCB_ModifyLayer:DielectricConstant`, `PCB_ModifyLayer:DielectricMaterial`, `DielectricTypeToken:Dielectric` | `pcb_modify_layer` on Mechanical1 with `copper_thickness_mils`, and on TopSolder with `dielectric_constant` | A row names a member that layer kind lacks: refuse it for that kind up front |
@@ -3358,18 +3391,52 @@ row itself names the pair that popped.
 | P33 | (none: syntax check) | `audit_find_via_antennas` on a board with an internal plane | No dialog. A dialog per via and plane layer = `Via.IsConnectedToPlane[LayerId]` needs parentheses, not brackets (the docs show `( )`) |
 | P34 | `ModifiedFlagState:Modified`, `ModifiedFlagRaw:Modified`, `ModifiedFlagTests:Modified` | Every bridge edit (section 38 step 2 on the free SchDoc is the one that matters): the mark reads the flag through these readers | 0 expected for the `:Modified` sites: the read and the two proven tests (`If X`, `If Not X`) never raised live. A `:Modified` count = the read raised; the mark then reads `marked_modified: false` with problem "the modified flag could not be read" and `flag_raw` `unreadable` (saves still write it: doubt writes). The readers run no compare of the value at all (the `:compare` sites of the first cut are gone, review of d198b65: they ran on every SchDoc mark, and a `Try` does not stop the engine's modal), so nothing here can raise on the odd value itself. A count, a modal or a `dispatcher` catch on the first mark = the READ raised - record the modal text and `last_caught` |
 
+The rows below are the 2026-10-11 sweep's UNKNOWN sites (a member read on
+a reference that may not be narrowed, never measured). Each is
+**FATAL-IF-WRONG**: run them last, one per session if possible, with a
+human present.
+
+| Probe | Site | Setup and call | What settles it |
+|---|---|---|---|
+| P35 | `CurrentFootprintNarrowed` (Library.pas; `ResolveLibFootprint`, `Lib_GetFootprintPads`, `Lib_Link3DModel`, `PCB_RenumberPads`) | Restart Altium, open a PcbLib by hand and select a footprint (nothing through the bridge). With NO footprint name: `lib_export_kicad_footprint output_path=<a scratch .kicad_mod>` (it reads the pads through `Lib_GetFootprintPads`), `lib_add_footprint_pad designator=99`, `pcb_renumber_pads`; then `lib_link_3d_model model_path=<a scratch .step>` | Each acts on the selected footprint, no dialog. 2026.10.11.03 takes the library iterator's reference when it compares equal to `PcbLib.CurrentComponent` (the measured LibMakeCurrentVerified compare) and `CurrentComponent` itself otherwise, exactly as before - so a box means `CurrentComponent`'s members fail like `CurrentSchComponent`'s AND the compare missed |
+| P36 | `Audit_FindNetLabelConflicts` (`Pin.OwnerSchComponent.Designator.Text`) | `audit_find_net_label_conflicts` on a scratch sheet with a net label sitting on a pin's connection end | The entry names `<designator>.<pin>`, no dialog. A box = `OwnerSchComponent` is un-narrowed like `CurrentSchComponent`: find the owner through a component iterator instead |
+| P37 | `Proj_Annotate` (TInterfaceList items) | `proj_annotate` on a scratch project with three unlocked parts, order `across_then_down` | Designators renumbered, no dialog. 2026.10.11.03 holds the list as the base `ISch_GraphicalObject` and narrows after retrieval (the PCB side's measured cure); a box = the SCH side fails differently |
+| P38 | `FocusedServerDoc` / `GetPCBBoardAnywhere` (`View.OwnerDocument`) | 39.3 item 4 (P3) with the Home page focused, then `app_list_documents` with the Home page focused and at least one document LOADED and clean (each clean loaded document asks the focused view for its owner) | Both answer, no dialog (the 2026-10-11 `app_list_documents` ran with the Home page focused but nothing loaded, so it did not reach the read). A box = `OwnerDocument` is not on a non-document view: use `DM_FocusedDocument.DM_FullPath` + `Client.GetDocumentByPath` |
+| P39 | `PCB_GetSelectedObjects` (`Board.SelectecObject[]`) | Select a track and a pad on a scratch board by hand, `pcb_get_selected_objects` | Both listed with their properties, no dialog. A box = the indexed property hands back an un-narrowed object: collect the selection with the iterator flag scan instead |
+| P40 | `PCB_ModifyLayer` on a non-copper layer (P26) | P26's calls | As P26, but a box there is class (b), not a count: refuse those members for that layer kind up front |
+
 ### 39.5 If a dialog does appear
 
 Do not press OK straight away. First call `app_get_status`: `in_flight`
 must name the command and request that are blocked, and the status form
 must show the same command, request id and start time. Then
-`app_list_open_dialogs`, and tell the two kinds apart by it:
+`app_list_open_dialogs`. ALL THREE kinds below can be class
+`TMessageForm`, and the first two are both titled "Error" with only OK,
+so the class and the caption tell nothing: tell them apart by the TEXT and
+by the Script IDE.
 
-* **The script engine's exception box.** Press OK: the call returns
+* **(a) A catchable script exception** (a failed conversion, a call that
+  raised). The Script IDE does not take over. Press OK: the call returns
   `INTERNAL_ERROR` (or the site's own reply), `caught_exceptions` rises by
   1, and `last_caught.where` names the site or `dispatcher`.
-* **Altium's OWN message box** (class `TMessageForm`, e.g. "Warning -
-  File type not recognised."). It is NOT counted, before or after OK:
+* **(b) The script engine's FATAL late-bound error.** Text starting
+  "Undeclared identifier" (`app_list_open_dialogs` reports kind
+  `script_fatal`, `ok_resumes_the_bridge: false`), and the Script IDE
+  opens a `.pas` unit with the execution point on a source line. It is NOT
+  an exception: no `Except` runs and nothing is counted. Record the text
+  and the unit and line the IDE shows, then press OK. The call does NOT
+  return: `app_ping` keeps answering "not responding", `in_flight` keeps
+  the call, and `app_get_status` reports `last_fault` `dead_loop` with a
+  `loop_note` (while `attached` still reads true). Recovery: in the Script
+  IDE press Stop (Run > Stop, or Ctrl+F3), close the unit's tab without
+  saving, and rerun File > Run Script > Altium_API > Dispatcher.pas >
+  StartMCPServer (or restart Altium). A `PreProcess` the handler opened
+  before the halt is still open; `app_exit_active_command` after the
+  restart unwinds it. Every such box is a defect (a member read the bridge
+  must not make), and the session's remaining probes are lost: this is
+  what ended the 2026-10-11 run at P8.
+* **(c) Altium's OWN message box** (e.g. "Warning - File type not
+  recognised."). It is NOT counted, before or after OK:
   `caught_exceptions` does not rise and `last_caught` does not change.
   The handler resumes after OK with whatever the Altium call answered.
   Record it as a dialog all the same - it is a defect: a path that can
@@ -3382,7 +3449,7 @@ Record all of it, including the dialog's title, class and text.
 39.1 PASS (0 / 0 / null, `in_flight` empty). Counters stayed 0 / 0 / null
 around every call up to the modal below.
 
-| Item | Verdict | What happened | On 2026.10.11.02 |
+| Item | Verdict | What happened | On 2026.10.11.03 |
 |---|---|---|---|
 | 39.3 item 2, `C:\nope.PcbDoc` and an existing `.SchDoc` | PASS | each took the fallback to the focused scratch board (one part placed on it), no dialog | unchanged |
 | 39.3 item 2, an existing `.PcbLib` | FAIL | Altium's own modal "Warning - File type not recognised." inside `OpenDocument('PCB', ...)`; `in_flight` named the call, `caught_exceptions` unreadable while blocked, the library file unchanged while blocked. RUN STOPPED; the owner pressed OK. AFTER OK the library was open and read `modified: true`, `bridge_edited: true`: the part very likely went INTO the library | refused `BOARD_PATH_IS_LIBRARY` before any open (B1); the item's text corrected |
@@ -3395,12 +3462,38 @@ around every call up to the modal below.
 | P10-P33 | NOT RUN | still blocked by the modal | run them |
 | items 1, 4, 6, 7; P1, P3, P8, P9, P18 | NOT RUN | need an Altium restart, the Home page or hand actions (owner sessions) | owner-gated |
 
-Also fixed in 2026.10.11.02 from the same class as item 2 (a caller path
+Also fixed in the second 2026-10-11 build from the same class as item 2 (a caller path
 handed to `OpenDocument` under a kind its file type does not have):
 `proj_run_outjob` refuses an `outjob_path` that is not an `.OutJob`
 (item 8). Every other `OpenDocument` / `OpenDocumentIfPresent` call takes
 a path from a project listing filtered by its document kind, not from the
 caller.
+
+### Results 2026-10-11 (the second 2026-10-11 build, AD 26.10.1.5)
+
+Run 20:18-20:39 on scratch copies, with the carrier folder, the scripts
+folder and every scratch file baselined before and after: all unchanged.
+
+| Item | Verdict | What happened | On 2026.10.11.03 |
+|---|---|---|---|
+| 39.1 | PASS | `caught_exceptions` 0, `cast_errors` 0, `last_caught` null; `in_flight` [] | unchanged |
+| 39.3 item 7 | PASS | with only `fa_lib.SchLib` open and focused, all six calls answered `NO_PCBLIB` (confirmed in activity.log), no dialog, the counters 0 / 0 / null between every call | unchanged |
+| P8 | **FAIL, FATAL** | `lib_add_symbol_lines lines=[{0,0,100,0}]` in the fresh session (the editor's current symbol was `24AA02E48T-I_OT`, the first ALPHABETICAL one, not the first stored; nothing created through the bridge): the script engine's "Undeclared identifier: CurrentPartID" (OCR "CurrentPartlD"), a `TMessageForm` titled "Error" with only OK, and the Script IDE opened Library.pas at line 122 (`SetOwnerPart`). P9's site ran BEFORE P8's own (`MarkLibDirty`), which was never reached. Not counted (`last_caught` stayed null). After OK: `app_ping` "not responding", `in_flight` stuck on the call (age 15 s, then 1120 s), `last_fault.json` `dead_loop`, the IDE still parked on line 122. The `PreProcess` opened before the halt was left open and the factory's line orphaned; the library file was unchanged | GetTargetLibComponent no longer falls back to the editor's selection: NO_COMPONENT before any PreProcess, `component_name` on every symbol-edit tool, the owner part read once from a narrowed component before the PreProcess, `MarkLibDirty` / `TargetLibComponentName` / obj_create / obj_batch_create / the library parameter delete off that reference too; P8-P10 rewritten |
+| P9, P1 (the rest of the fresh-session segment) | NOT RUN | the loop was dead | run P9 after P8; P1 in a fresh session |
+| Section 38 re-check; 39.3 items 2, 3, 4, 5, 8; P1b, P2-P4, P6, P6b, P7; P10-P34 | NOT RUN | three later segments (20:24-20:39) each found the bridge down and stopped with nothing changed: Altium was NOT restarted (the same pid 48856, started 20:02:48) and StartMCPServer was not rerun, although a relayed message said Altium had been restarted. Recovery needed the owner at the Script IDE (39.5 (b)) | run them on 2026.10.11.03 |
+
+What the halt taught, now in 39 "Why", 39.2, 39.4 and 39.5: the
+popup-free premise that a remaining raise is COUNTED does not hold for an
+undeclared identifier, and that box looks exactly like the counted one.
+A whole-code sweep that night (every unit, at 3aca481) found the same
+class at eight sites - every member read off `CurrentSchComponent` (four
+routes into the eight `Lib_Add*` handlers, `lib_link_footprint`, the pin
+readers, obj_create / obj_batch_create into a component and the library
+parameter delete) and the `IPCB_Rule` constraint read in
+`pcb_normalize_vias` - all fixed in 2026.10.11.03, and seven UNKNOWN ones
+(three applied conservatively, the rest probes P35-P40). A `owner_part_id`
+on every pin would not have saved P9: the next line, `AddSchObject`, is a
+member of the same reference.
 
 ---
 
