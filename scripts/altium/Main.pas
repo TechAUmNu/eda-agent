@@ -2084,6 +2084,17 @@ Begin
             { alone, which keeps the 2026-10-06 fix.                           }
             DiskPath := ServerDocFileName(ServerDoc);
             If Not LooksAbsolutePath(DiskPath) Then DiskPath := DocPath;
+            { ONE VISIT PER FILE PER PASS (live 2026-10-11). The walk reaches  }
+            { a document once per listing: a real project's member and the   }
+            { Free Documents listing of the same file (DM_Projects can hold   }
+            { the free project too, which the walk then visits again), or two }
+            { spellings of one path. The first visit wrote it; the second     }
+            { read the now-clean flag and filed the file it had just written  }
+            { under skipped_unmodified / libraries_skipped. A file this pass  }
+            { has already attempted is not looked at again.                   }
+            If Pos('|' + DocPathKey(DiskPath) + '|', '|' + SaveAttemptedKeys + '|') > 0 Then Exit;
+            If LooksAbsolutePath(Trim(DocPath))
+                And (Pos('|' + DocPathKey(DocPath) + '|', '|' + SaveAttemptedKeys + '|') > 0) Then Exit;
             InRecord := BridgeEditRecorded(DocPath) Or BridgeEditRecorded(DiskPath);
             ByRecord := False;
             Skip := False;
@@ -2100,10 +2111,13 @@ Begin
             { ONE ENTRY PER FILE. A library open in two projects, or in a     }
             { project and as a free document, is reached once per walk, and   }
             { was listed and counted twice. The pipe-wrapped compare cannot   }
-            { match part of a longer path.                                    }
+            { match part of a longer path. Keyed by DocPathKey, on the        }
+            { listing AND the file's own name: the carrier library was listed }
+            { twice live, once per slash direction (2026-10-11).              }
             If Skip Then
             Begin
-                If Pos('|' + UpperCase(DocPath) + '|', '|' + UpperCase(SaveSkippedPaths) + '|') = 0 Then
+                If (Pos('|' + DocPathKey(DocPath) + '|', '|' + DocPathKey(SaveSkippedPaths) + '|') = 0)
+                    And (Pos('|' + DocPathKey(DiskPath) + '|', '|' + DocPathKey(SaveSkippedPaths) + '|') = 0) Then
                 Begin
                     SaveSkipped := SaveSkipped + 1;
                     If SaveSkippedPaths <> '' Then SaveSkippedPaths := SaveSkippedPaths + '|';

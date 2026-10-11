@@ -334,8 +334,10 @@ def test_the_save_pass_can_skip_an_unmodified_library():
     assert _at(write, "ServerDoc.SetModified(True)") < _at(write, "ServerDoc.DoFileSave('')")
     assert "SaveSkippedPaths" in body, "a skip must be recorded, not silent"
     # One entry per file: a library open in two projects is reached twice.
-    dedup = _at(body, "If Pos('|' + UpperCase(DocPath) + '|', "
-                      "'|' + UpperCase(SaveSkippedPaths) + '|') = 0 Then")
+    # Keyed by DocPathKey since 2026.10.11.02 (both slash spellings of one
+    # file were listed live); executed in test_live_2026_10_11_findings.py.
+    dedup = _at(body, "If (Pos('|' + DocPathKey(DocPath) + '|', "
+                      "'|' + DocPathKey(SaveSkippedPaths) + '|') = 0)")
     assert dedup < _at(body, "SaveSkipped := SaveSkipped + 1;"), (
         "the skip count must sit behind the already-listed check, or a "
         "library open twice is counted and listed twice")
