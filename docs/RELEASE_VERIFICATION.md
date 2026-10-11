@@ -2830,7 +2830,15 @@ Application.pas):
   once the scratch copy closed and survived a Ctrl+S on it). When the
   caller's absolute spelling differs from the document's own `FileName` (a
   subst drive, an 8.3 or UNC path), only the `FileName` key is kept, so a
-  written edit is never reported lost from a second key. `app_save_all`
+  written edit is never reported lost from a second key. THAT HOLDS ONLY
+  WHEN SOME PROJECT LISTING CARRIES THE CALLER'S SPELLING (a project opened
+  through `F:\` while the document's `FileName` says `H:\`). When the
+  caller spells `F:\` and both the listing and `FileName` say `H:\`, the
+  lookup cannot equate them: the mark answers `found: false`, the `F:\`
+  key stays on the record, and `app_save_all` lists it in
+  `bridge_record_unresolved` (kept, NOT written, with a
+  `bridge_record_hint`) instead of calling the edit lost. Pass the path as
+  the document's tab shows it. `app_save_all`
   writes a recorded document even when its flag reads clean (default
   libraries and `only_modified` sheets included); one the project walk
   cannot reach (a free document whose bare `DM_FullPath` resolves to
@@ -2843,7 +2851,9 @@ Application.pas):
   failure, if the file was last written inside the current tick and the
   flag reads clean (F7 - FileAge has 2 s resolution; the entry stays for
   one more write). A recorded document no longer open is dropped and
-  listed in `bridge_record_closed` with the warning.
+  listed in `bridge_record_closed` with the warning; one whose file exists
+  and is open under another spelling is kept and listed in
+  `bridge_record_unresolved`.
   `free_documents_not_reached` lists free documents whose bare listing the
   walk could not resolve to the free document itself (the name is carried
   by several listed documents, or resolves only to a project member or to

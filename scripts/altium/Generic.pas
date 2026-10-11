@@ -5534,6 +5534,8 @@ Var
     SchDoc : ISch_Document;
     Comp : ISch_Component;
     SrvDoc : IServerDocument;
+    MarkJson : String;
+    Marked : Boolean;
 Begin
     LibPath := ExtractJsonValue(Params, 'library_path');
     LibRef := ExtractJsonValue(Params, 'lib_reference');
@@ -5568,6 +5570,17 @@ Begin
 
     { Resolve target sheet (focus-independent). }
     SchDoc := Nil;
+    { A bare sheet_path several listed documents carry names no one     }
+    { sheet: GetSchDocumentByPath would hand back an arbitrary namesake. }
+    If AmbiguousBareDocName(SheetPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'AMBIGUOUS_NAME',
+            SheetPath + ' is the file name of more than one open document, so '
+            + 'it names no one sheet. Pass sheet_path as an absolute path. '
+            + 'Nothing was changed.');
+        Exit;
+    End;
+
     If SheetPath <> '' Then
     Begin
         Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
@@ -5707,11 +5720,13 @@ Begin
     SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
-    { Explicitly flag the IServerDocument dirty so save_all flushes it.    }
-    Try
-        SrvDoc := Client.GetDocumentByPath(SchDoc.DocumentName);
-        If SrvDoc <> Nil Then SrvDoc.SetModified(True);
-    Except End;
+    { MARK THE FILE THIS CALL EDITED (MarkDocDirty): the absolute       }
+    { sheet_path when one was given, else the sheet's own name. The raw  }
+    { GetDocumentByPath(DocumentName).SetModified it replaces could flag }
+    { a namesake for a free copy's bare name, recorded nothing, and read }
+    { nothing back (re-review of a0c9da9).                               }
+    Marked := MarkDocDirty(SchDocMarkPath(SheetPath, SchDoc));
+    MarkJson := MarkOutcomeJson(0);
 
     Result := BuildSuccessResponse(RequestId,
         '{"placed":true,'
@@ -5719,7 +5734,7 @@ Begin
         + '"lib_reference":"' + EscapeJsonString(LibRef) + '",'
         + '"x":' + IntToStr(X) + ',"y":' + IntToStr(Y) + ','
         + '"rotation":' + IntToStr(Rotation) + ','
-        + '"designator":"' + EscapeJsonString(DesigStr) + '"}');
+        + '"designator":"' + EscapeJsonString(DesigStr) + '"' + ',"marked_modified":' + BoolToJsonStr(Marked) + ',"mark":' + MarkJson + '}');
 End;
 
 {..............................................................................}
@@ -6024,7 +6039,8 @@ Var
     SchDoc : ISch_Document;
     NetLabel : ISch_NetLabel;
     Loc : TLocation;
-    SrvDoc : IServerDocument;
+    MarkJson : String;
+    Marked : Boolean;
     InfFont, InfColor : Integer;
     StyleFound : Boolean;
 Begin
@@ -6041,6 +6057,17 @@ Begin
     End;
 
     SchDoc := Nil;
+    { A bare sheet_path several listed documents carry names no one     }
+    { sheet: GetSchDocumentByPath would hand back an arbitrary namesake. }
+    If AmbiguousBareDocName(SheetPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'AMBIGUOUS_NAME',
+            SheetPath + ' is the file name of more than one open document, so '
+            + 'it names no one sheet. Pass sheet_path as an absolute path. '
+            + 'Nothing was changed.');
+        Exit;
+    End;
+
     If SheetPath <> '' Then
     Begin
         Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
@@ -6093,14 +6120,17 @@ Begin
     SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
-    Try
-        SrvDoc := Client.GetDocumentByPath(SchDoc.DocumentName);
-        If SrvDoc <> Nil Then SrvDoc.SetModified(True);
-    Except End;
+    { MARK THE FILE THIS CALL EDITED (MarkDocDirty): the absolute       }
+    { sheet_path when one was given, else the sheet's own name. The raw  }
+    { GetDocumentByPath(DocumentName).SetModified it replaces could flag }
+    { a namesake for a free copy's bare name, recorded nothing, and read }
+    { nothing back (re-review of a0c9da9).                               }
+    Marked := MarkDocDirty(SchDocMarkPath(SheetPath, SchDoc));
+    MarkJson := MarkOutcomeJson(0);
 
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"text":"' + EscapeJsonString(Text) +
-        '","x":' + IntToStr(X) + ',"y":' + IntToStr(Y) + '}');
+        '","x":' + IntToStr(X) + ',"y":' + IntToStr(Y) + ',"marked_modified":' + BoolToJsonStr(Marked) + ',"mark":' + MarkJson + '}');
 End;
 
 {..............................................................................}
@@ -6514,7 +6544,8 @@ Var
     SchDoc : ISch_Document;
     PowerObj : ISch_PowerObject;
     Loc : TLocation;
-    SrvDoc : IServerDocument;
+    MarkJson : String;
+    Marked : Boolean;
 Begin
     Text := ExtractJsonValue(Params, 'text');
     SheetPath := ExtractJsonValue(Params, 'sheet_path');
@@ -6530,6 +6561,17 @@ Begin
     End;
 
     SchDoc := Nil;
+    { A bare sheet_path several listed documents carry names no one     }
+    { sheet: GetSchDocumentByPath would hand back an arbitrary namesake. }
+    If AmbiguousBareDocName(SheetPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'AMBIGUOUS_NAME',
+            SheetPath + ' is the file name of more than one open document, so '
+            + 'it names no one sheet. Pass sheet_path as an absolute path. '
+            + 'Nothing was changed.');
+        Exit;
+    End;
+
     If SheetPath <> '' Then
     Begin
         Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
@@ -6593,14 +6635,17 @@ Begin
     SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
-    Try
-        SrvDoc := Client.GetDocumentByPath(SchDoc.DocumentName);
-        If SrvDoc <> Nil Then SrvDoc.SetModified(True);
-    Except End;
+    { MARK THE FILE THIS CALL EDITED (MarkDocDirty): the absolute       }
+    { sheet_path when one was given, else the sheet's own name. The raw  }
+    { GetDocumentByPath(DocumentName).SetModified it replaces could flag }
+    { a namesake for a free copy's bare name, recorded nothing, and read }
+    { nothing back (re-review of a0c9da9).                               }
+    Marked := MarkDocDirty(SchDocMarkPath(SheetPath, SchDoc));
+    MarkJson := MarkOutcomeJson(0);
 
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"text":"' + EscapeJsonString(Text) +
-        '","x":' + IntToStr(X) + ',"y":' + IntToStr(Y) + '}');
+        '","x":' + IntToStr(X) + ',"y":' + IntToStr(Y) + ',"marked_modified":' + BoolToJsonStr(Marked) + ',"mark":' + MarkJson + '}');
 End;
 
 {..............................................................................}
@@ -9107,7 +9152,8 @@ Var
     Comp, TargetComp : ISch_Component;
     Found : Boolean;
     P, Applied, Created : Integer;
-    SrvDoc : IServerDocument;
+    MarkJson : String;
+    Marked : Boolean;
 Begin
     DesigStr := ExtractJsonValue(Params, 'designator');
     SheetPath := ExtractJsonValue(Params, 'sheet_path');
@@ -9129,6 +9175,17 @@ Begin
     { Resolve target sheet (focus-independent). Mirrors                         }
     { Gen_PlaceSchComponentFromLibrary's resolution rules.                       }
     SchDoc := Nil;
+    { A bare sheet_path several listed documents carry names no one     }
+    { sheet: GetSchDocumentByPath would hand back an arbitrary namesake. }
+    If AmbiguousBareDocName(SheetPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'AMBIGUOUS_NAME',
+            SheetPath + ' is the file name of more than one open document, so '
+            + 'it names no one sheet. Pass sheet_path as an absolute path. '
+            + 'Nothing was changed.');
+        Exit;
+    End;
+
     If SheetPath <> '' Then
     Begin
         Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
@@ -9222,16 +9279,18 @@ Begin
         SchDoc.GraphicallyInvalidate;
     End;
 
-    { Flag the server doc dirty so save_all flushes it. }
-    Try
-        SrvDoc := Client.GetDocumentByPath(SchDoc.DocumentName);
-        If SrvDoc <> Nil Then SrvDoc.SetModified(True);
-    Except End;
+    { MARK THE FILE THIS CALL EDITED (MarkDocDirty): the absolute       }
+    { sheet_path when one was given, else the sheet's own name. The raw  }
+    { GetDocumentByPath(DocumentName).SetModified it replaces could flag }
+    { a namesake for a free copy's bare name, recorded nothing, and read }
+    { nothing back (re-review of a0c9da9).                               }
+    Marked := MarkDocDirty(SchDocMarkPath(SheetPath, SchDoc));
+    MarkJson := MarkOutcomeJson(0);
 
     Result := BuildSuccessResponse(RequestId,
         '{"designator":"' + EscapeJsonString(DesigStr) + '",'
         + '"applied":' + IntToStr(Applied) + ','
-        + '"created":' + IntToStr(Created) + '}');
+        + '"created":' + IntToStr(Created) + ',"marked_modified":' + BoolToJsonStr(Marked) + ',"mark":' + MarkJson + '}');
 End;
 
 {..............................................................................}
@@ -10465,7 +10524,8 @@ Var
     OpsList : TStringList;
     OpStr, FieldStr, Key, Val, KeyU, CompDesig, EncodingStr : String;
     P, EqPos, SemiPos : Integer;
-    SrvDoc : IServerDocument;
+    MarkJson : String;
+    Marked : Boolean;
     Encoded, ShowNew : Boolean;
     PropsSet, ParamsModified, ParamsCreated, SkippedReadOnly : Integer;
     CreatedJson, ShowNewStr, DescParamJson : String;
@@ -10483,6 +10543,17 @@ Begin
     End;
 
     SchDoc := Nil;
+    { A bare sheet_path several listed documents carry names no one     }
+    { sheet: GetSchDocumentByPath would hand back an arbitrary namesake. }
+    If AmbiguousBareDocName(SheetPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'AMBIGUOUS_NAME',
+            SheetPath + ' is the file name of more than one open document, so '
+            + 'it names no one sheet. Pass sheet_path as an absolute path. '
+            + 'Nothing was changed.');
+        Exit;
+    End;
+
     If SheetPath <> '' Then
         Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
     If SchDoc = Nil Then
@@ -10638,10 +10709,13 @@ Begin
         OpsList.Free;
     End;
 
-    Try
-        SrvDoc := Client.GetDocumentByPath(SchDoc.DocumentName);
-        If SrvDoc <> Nil Then SrvDoc.SetModified(True);
-    Except End;
+    { MARK THE FILE THIS CALL EDITED (MarkDocDirty): the absolute       }
+    { sheet_path when one was given, else the sheet's own name. The raw  }
+    { GetDocumentByPath(DocumentName).SetModified it replaces could flag }
+    { a namesake for a free copy's bare name, recorded nothing, and read }
+    { nothing back (re-review of a0c9da9).                               }
+    Marked := MarkDocDirty(SchDocMarkPath(SheetPath, SchDoc));
+    MarkJson := MarkOutcomeJson(0);
 
     If ShowNew Then ShowNewStr := 'true' Else ShowNewStr := 'false';
 
@@ -10658,7 +10732,7 @@ Begin
         ',"created":[' + CreatedJson + ']' +
         ',"description_parameters_also_set":[' + DescParamJson + ']' +
         ',"new_parameters_visible":' + ShowNewStr +
-        ',"value_encoding":"' + EscapeJsonString(EncodingStr) + '"}');
+        ',"value_encoding":"' + EscapeJsonString(EncodingStr) + '"' + ',"marked_modified":' + BoolToJsonStr(Marked) + ',"mark":' + MarkJson + '}');
 End;
 
 {..............................................................................}
@@ -10684,7 +10758,8 @@ Var
     Comp : ISch_Component;
     DesigList, OpsList : TStringList;
     Loc : TLocation;
-    SrvDoc : IServerDocument;
+    MarkJson : String;
+    Marked : Boolean;
 Begin
     PosStr := ExtractJsonValue(Params, 'positions');
     SheetPath := ExtractJsonValue(Params, 'sheet_path');
@@ -10695,6 +10770,17 @@ Begin
     End;
 
     SchDoc := Nil;
+    { A bare sheet_path several listed documents carry names no one     }
+    { sheet: GetSchDocumentByPath would hand back an arbitrary namesake. }
+    If AmbiguousBareDocName(SheetPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'AMBIGUOUS_NAME',
+            SheetPath + ' is the file name of more than one open document, so '
+            + 'it names no one sheet. Pass sheet_path as an absolute path. '
+            + 'Nothing was changed.');
+        Exit;
+    End;
+
     If SheetPath <> '' Then
         Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
     If SchDoc = Nil Then
@@ -10785,15 +10871,18 @@ Begin
         OpsList.Free;
     End;
 
-    Try
-        SrvDoc := Client.GetDocumentByPath(SchDoc.DocumentName);
-        If SrvDoc <> Nil Then SrvDoc.SetModified(True);
-    Except End;
+    { MARK THE FILE THIS CALL EDITED (MarkDocDirty): the absolute       }
+    { sheet_path when one was given, else the sheet's own name. The raw  }
+    { GetDocumentByPath(DocumentName).SetModified it replaces could flag }
+    { a namesake for a free copy's bare name, recorded nothing, and read }
+    { nothing back (re-review of a0c9da9).                               }
+    Marked := MarkDocDirty(SchDocMarkPath(SheetPath, SchDoc));
+    MarkJson := MarkOutcomeJson(0);
 
     Result := BuildSuccessResponse(RequestId,
         '{"updated":' + IntToStr(Updated) +
         ',"failed":' + IntToStr(Failed) +
-        ',"total":' + IntToStr(OpCount) + '}');
+        ',"total":' + IntToStr(OpCount) + ',"marked_modified":' + BoolToJsonStr(Marked) + ',"mark":' + MarkJson + '}');
 End;
 
 {..............................................................................}
@@ -12419,7 +12508,8 @@ Var
     DesigList : TStringList;
     ClearSrc, SyncId, WantAll : Boolean;
     Total, ClearedSrc, Synced : Integer;
-    SrvDoc : IServerDocument;
+    MarkJson : String;
+    Marked : Boolean;
 Begin
     SheetPath := ExtractJsonValue(Params, 'sheet_path');
     DesigCsv := ExtractJsonValue(Params, 'designators');
@@ -12429,6 +12519,17 @@ Begin
     SyncId := Not ((FlagStr = 'false') Or (FlagStr = 'False') Or (FlagStr = '0'));
 
     SchDoc := Nil;
+    { A bare sheet_path several listed documents carry names no one     }
+    { sheet: GetSchDocumentByPath would hand back an arbitrary namesake. }
+    If AmbiguousBareDocName(SheetPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'AMBIGUOUS_NAME',
+            SheetPath + ' is the file name of more than one open document, so '
+            + 'it names no one sheet. Pass sheet_path as an absolute path. '
+            + 'Nothing was changed.');
+        Exit;
+    End;
+
     If SheetPath <> '' Then
         Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
     If SchDoc = Nil Then
@@ -12502,15 +12603,18 @@ Begin
         DesigList.Free;
     End;
 
-    Try
-        SrvDoc := Client.GetDocumentByPath(SchDoc.DocumentName);
-        If SrvDoc <> Nil Then SrvDoc.SetModified(True);
-    Except End;
+    { MARK THE FILE THIS CALL EDITED (MarkDocDirty): the absolute       }
+    { sheet_path when one was given, else the sheet's own name. The raw  }
+    { GetDocumentByPath(DocumentName).SetModified it replaces could flag }
+    { a namesake for a free copy's bare name, recorded nothing, and read }
+    { nothing back (re-review of a0c9da9).                               }
+    Marked := MarkDocDirty(SchDocMarkPath(SheetPath, SchDoc));
+    MarkJson := MarkOutcomeJson(0);
 
     Result := BuildSuccessResponse(RequestId,
         '{"total":' + IntToStr(Total) +
         ',"cleared_source_library":' + IntToStr(ClearedSrc) +
-        ',"synced_design_item_id":' + IntToStr(Synced) + '}');
+        ',"synced_design_item_id":' + IntToStr(Synced) + ',"marked_modified":' + BoolToJsonStr(Marked) + ',"mark":' + MarkJson + '}');
 End;
 
 {..............................................................................}
@@ -12841,10 +12945,14 @@ End;
 {               recompile, while the saved file was clean                     }
 { This makes that cure one call instead of three.                             }
 {                                                                              }
-{ ORDER AND REFUSALS. Save first, judged as WriteDocAndNote judges it: the   }
-{ file's age moved, OR the flag reads clean AND the file's previous write    }
-{ lies inside the current 2 s FileAge tick (AgeIsThisTick - only then can a  }
-{ real write leave the age where it was). The flag alone is not enough: on   }
+{ ORDER AND REFUSALS. Save first, and only a MOVED file age proves it. When  }
+{ the file's previous write lies inside the current 2 s FileAge tick         }
+{ (AgeIsThisTick - a save-all just ran), a real write cannot move the age,   }
+{ so the call waits that tick out (bounded, about 5 s) and saves again: the  }
+{ flag cannot stand in for the age here, as it does in WriteDocAndNote,      }
+{ because there an error costs one extra write and here it costs the edit -  }
+{ the sheet is closed and reopened from disk (re-review of a0c9da9: a        }
+{ declined save in that window read as saved). The flag alone is not enough: on   }
 { the field documents SetModified never registers, so a save the editor      }
 { declined (an active command) also reads clean, and the sheet was closed    }
 { and reopened from disk with its edit thrown away (review of c8ee69e). A    }
@@ -12872,7 +12980,7 @@ Var
     SchDoc : ISch_Document;
     Workspace : IWorkspace;
     OwnerProject : IProject;
-    AgeBefore, AgeAfter : Integer;
+    AgeBefore, AgeAfter, Waited : Integer;
 Begin
     FilePath := ExtractJsonValue(Params, 'file_path');
     SaveStr := LowerCase(ExtractJsonValue(Params, 'save'));
@@ -12941,14 +13049,32 @@ Begin
         Try AgeAfter := FileAge(FilePath); Except AgeAfter := -1; End;
         StillModified := True;
         Try StillModified := ServerDoc.Modified; Except StillModified := True; End;
-        Saved := ((AgeAfter <> -1) And (AgeAfter <> AgeBefore))
-            Or ((Not StillModified) And AgeIsThisTick(AgeBefore));
+        Saved := (AgeAfter <> -1) And (AgeAfter <> AgeBefore);
+        If (Not Saved) And (AgeAfter <> -1) And AgeIsThisTick(AgeBefore) Then
+        Begin
+            { The age could not move inside its tick: wait the tick out, then }
+            { save again, so the age can answer.                              }
+            Waited := 0;
+            While AgeIsThisTick(AgeBefore) And (Waited < 500) Do
+            Begin
+                Try Application.ProcessMessages; Except End;
+                Sleep(10);
+                Inc(Waited);
+            End;
+            Try ServerDoc.SetModified(True); Except End;
+            Try ServerDoc.DoFileSave(''); Except End;
+            Try Application.ProcessMessages; Except End;
+            Try AgeAfter := FileAge(FilePath); Except AgeAfter := -1; End;
+            StillModified := True;
+            Try StillModified := ServerDoc.Modified; Except StillModified := True; End;
+            Saved := (AgeAfter <> -1) And (AgeAfter <> AgeBefore);
+        End;
         If Not Saved Then
         Begin
             Result := BuildErrorResponseDetailed(RequestId, 'SAVE_FAILED',
                 'The save could not be shown to have happened (the file age '
-                + 'did not move, and the file was last written before this '
-                + 'moment or the document still reads modified), so the sheet '
+                + 'did not move, even after waiting out the 2 s FileAge tick '
+                + 'when the file had just been written), so the sheet '
                 + 'was NOT closed and its edits are still in memory. Altium '
                 + 'declines a save while a command is active; '
                 + 'app_exit_active_command, then retry.',

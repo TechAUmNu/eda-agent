@@ -455,7 +455,11 @@ def register_application_tools(mcp):
         was last written inside the current tick and the flag reads clean
         (probably written - FileAge has 2 s resolution - and it stays on
         the record for one more write); ``bridge_record_closed`` (with the
-        warning) when no open document holds the edit any more. The
+        warning) when no open document holds the edit any more;
+        ``bridge_record_unresolved`` (with a ``bridge_record_hint``) when
+        the edit was recorded under a path spelling no listed document
+        carries (a subst drive, 8.3 or UNC) while a document IS open
+        there - kept on the record, not written, never called lost. The
         record holds absolute paths only: a mark whose bare name resolved
         to nothing records nothing (its reply says ``found: false``).
         Documents nobody edited are still left alone.
@@ -487,7 +491,7 @@ def register_application_tools(mcp):
             with a ``warning`` whenever that is non-empty,
             ``written_by_bridge_record`` / ``bridge_record_not_written`` /
             ``bridge_record_same_tick`` / ``bridge_record_closed`` /
-            ``bridge_record_pending`` / ``free_documents_not_reached``
+            ``bridge_record_unresolved`` / ``bridge_record_pending`` / ``free_documents_not_reached``
             (see above), and a ``reason`` /
             ``note`` when documents remain unsaved or nothing was written.
             Free documents (open outside any project) are counted in

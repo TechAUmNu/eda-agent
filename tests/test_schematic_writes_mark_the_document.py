@@ -66,7 +66,7 @@ def test_the_sweep_finds_the_writers_it_is_meant_to_check(functions):
 def test_every_schematic_write_marks_its_document(functions):
     offenders = [
         name for name, body in _writers(functions).items()
-        if "MarkDocDirtyByPath" not in body and "SetModified" not in body
+        if "MarkDocDirty" not in body and "SetModified" not in body
     ]
     assert not offenders, (
         "these write to a schematic and leave the document clean, so a "

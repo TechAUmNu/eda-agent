@@ -818,6 +818,7 @@ Begin
         SaveBridgeRecordUnwritten := '';
         SaveBridgeRecordSameTick := '';
         SaveBridgeRecordClosed := '';
+        SaveBridgeRecordUnresolved := '';
         SaveAttemptedKeys := '';
         SaveUnresolvedPaths := '';
         SaveSkipCleanLibs := Not IncludeLibs;
@@ -887,6 +888,7 @@ Begin
             + ',"bridge_record_not_written":' + PipeListToJsonArray(SaveBridgeRecordUnwritten)
             + ',"bridge_record_same_tick":' + PipeListToJsonArray(SaveBridgeRecordSameTick)
             + ',"bridge_record_closed":' + PipeListToJsonArray(SaveBridgeRecordClosed)
+            + ',"bridge_record_unresolved":' + PipeListToJsonArray(SaveBridgeRecordUnresolved)
             + ',"free_documents_not_reached":' + PipeListToJsonArray(SaveUnresolvedPaths)
             + ',"bridge_record_pending":' + PipeListToJsonArray(BridgeRecordKeys(0));
         { not_written is a failure (the flag still reads modified after the }
@@ -909,6 +911,13 @@ Begin
                 + 'file was written within the 2 s resolution of FileAge of '
                 + 'its previous write, so its age could not move; it stays on '
                 + 'the record and the next save-all writes it once more."';
+        If SaveBridgeRecordUnresolved <> '' Then
+            Policy := Policy + ',"bridge_record_hint":"bridge_record_unresolved '
+                + 'lists edits recorded under a path spelling that names no '
+                + 'listed document, while a document IS open there (a subst '
+                + 'drive, 8.3 or UNC spelling). They stay on the record and '
+                + 'were NOT written: pass the path as the document''s tab '
+                + 'shows it, or save it with proj_save."';
         If LibSkipped > 0 Then
             Policy := Policy + ',"warning":"' + IntToStr(LibSkipped)
                 + ' library file(s) read unmodified and were NOT written '

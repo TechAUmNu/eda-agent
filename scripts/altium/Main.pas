@@ -121,6 +121,11 @@ Var
     { document was no longer open; DocPathKeys the current pass attempted. }
     SaveBridgeRecordSameTick : String;
     SaveBridgeRecordClosed : String;
+    { Record entries whose file is OPEN under another spelling the lookup  }
+    { cannot equate (the caller passed F:\ for a subst drive, 8.3 or UNC,  }
+    { while the listing and FileName both say H:\): kept, never filed as   }
+    { closed, and listed by app_save_all as bridge_record_unresolved.      }
+    SaveBridgeRecordUnresolved : String;
     SaveAttemptedKeys : String;
     { Free documents the save walk could not reach: a bare DM_FullPath that  }
     { resolves to no free document (several listed documents carry the name, }
@@ -685,14 +690,21 @@ End;
 { reported miss, a wrong guess marks and writes somebody else's file.       }
 { The same pass leaves DocNameMemberKeys: the absolute keys of the members  }
 { of REAL projects (I >= 0) that carry the name, which FindOpenServerDoc    }
-{ never returns for a bare request.                                         }
+{ never returns for a bare request. A member is keyed by its listing AND by }
+{ the FileName of the document open for it: IsProjectMemberFile compares   }
+{ FileName keys, and under a subst drive (or 8.3 / UNC) the project lists   }
+{ F:\... while the open document's FileName is H:\... (re-review of       }
+{ a0c9da9: keyed by the listing alone, the focused carrier sheet passed as  }
+{ "not a member", answered a bare request for its free copy, and a hand-    }
+{ edited copy was skipped as unmodified - the c8ee69e defect again).        }
 Function DocNameCount(FilePath : String) : Integer;
 Var
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
+    Member : IServerDocument;
     I, J, ProjCount : Integer;
-    Full, WantName, Keys, Key : String;
+    Full, WantName, Keys, Key, MemberFile : String;
 Begin
     Result := 0;
     DocNameMemberKeys := '';
@@ -724,11 +736,22 @@ Begin
             Try Full := Doc.DM_FullPath; Except Full := ''; End;
             If DocNameKey(Full) <> WantName Then Continue;
             Key := ListedDocKey(Full, I, J);
-            If (I >= 0) And LooksAbsolutePath(Trim(Full))
-                And (Pos('|' + Key + '|', '|' + DocNameMemberKeys + '|') = 0) Then
+            If (I >= 0) And LooksAbsolutePath(Trim(Full)) Then
             Begin
-                If DocNameMemberKeys <> '' Then DocNameMemberKeys := DocNameMemberKeys + '|';
-                DocNameMemberKeys := DocNameMemberKeys + Key;
+                If Pos('|' + Key + '|', '|' + DocNameMemberKeys + '|') = 0 Then
+                Begin
+                    If DocNameMemberKeys <> '' Then DocNameMemberKeys := DocNameMemberKeys + '|';
+                    DocNameMemberKeys := DocNameMemberKeys + Key;
+                End;
+                Member := Nil;
+                Try Member := Client.GetDocumentByPath(Full); Except Member := Nil; End;
+                MemberFile := ServerDocFileName(Member);
+                If LooksAbsolutePath(Trim(MemberFile))
+                    And (Pos('|' + DocPathKey(MemberFile) + '|', '|' + DocNameMemberKeys + '|') = 0) Then
+                Begin
+                    If DocNameMemberKeys <> '' Then DocNameMemberKeys := DocNameMemberKeys + '|';
+                    DocNameMemberKeys := DocNameMemberKeys + DocPathKey(MemberFile);
+                End;
             End;
             If Pos('|' + Key + '|', '|' + Keys + '|') > 0 Then Continue;
             If Keys <> '' Then Keys := Keys + '|';
@@ -881,7 +904,16 @@ Begin
                         Exit;
                     End;
                 End
-                Else If (DocPathKey(Full) = Want) Or (DocPathKey(Got) = Want) Then
+                { ITS OWN FileName IS the request, or the LISTING is and the    }
+                { document's FileName is an absolute spelling of the same name  }
+                { (subst / 8.3 / UNC). An empty or bare FileName proves nothing }
+                { (re-review of a0c9da9: the exact lookup rejected exactly that }
+                { stranger and the walk accepted it on its listing alone).     }
+                { Limit: a same-named file in ANOTHER folder with an absolute  }
+                { FileName still passes the listing rule.                       }
+                Else If (DocPathKey(Got) = Want)
+                    Or ((DocPathKey(Full) = Want) And LooksAbsolutePath(Trim(Got))
+                        And (DocNameKey(Got) = WantName)) Then
                 Begin
                     Result := Cand;
                     FindDocVia := 'walk';
@@ -1731,9 +1763,15 @@ End;
 { this listing's record entry. SaveOneDocByDocRef lists what it could not     }
 { reach (free_documents_not_reached); a bridge-edited one is written by       }
 { SaveBridgeRecordSweep from its absolute key.                                }
+{ An absolute listing accepts the exact lookup's answer only on the walk's   }
+{ terms (FindOpenServerDoc): its FileName is the listing, or an absolute     }
+{ spelling of the same name. A document with an empty or bare FileName is a  }
+{ stranger and answers Nil - app_save_all wrote such a stranger and filed    }
+{ the write under the member's path (re-review of a0c9da9). Inlined rather   }
+{ than calling FindOpenServerDoc, whose walk would make the pass quadratic.  }
 Function ListedServerDoc(Doc : IDocument) : IServerDocument;
 Var
-    Full : String;
+    Full, Got : String;
 Begin
     Result := Nil;
     If Doc = Nil Then Exit;
@@ -1743,6 +1781,14 @@ Begin
     If LooksAbsolutePath(Trim(Full)) Then
     Begin
         Try Result := Client.GetDocumentByPath(Full); Except Result := Nil; End;
+        If Result <> Nil Then
+        Begin
+            Got := ServerDocFileName(Result);
+            If (DocPathKey(Got) <> DocPathKey(Full))
+                And ((Not LooksAbsolutePath(Trim(Got)))
+                    Or (DocNameKey(Got) <> DocNameKey(Full))) Then
+                Result := Nil;
+        End;
         Exit;
     End;
     Result := FindOpenServerDoc(Full);
@@ -2325,13 +2371,18 @@ End;
 {             the edit any more (closed by proj_close, proj_delete_sheet or  }
 {             the user without a save), and a clean reopen must not be       }
 {             rewritten from a stale entry. Its edit is not on disk.         }
+{   open under another spelling  the lookup cannot equate the key with the  }
+{             document's FileName (a subst F:\ key, the listing and FileName }
+{             H:\), yet the file exists and Client.GetDocumentByPath(key)   }
+{             answers: KEPT and listed in bridge_record_unresolved, never    }
+{             called a lost edit (re-review of a0c9da9).                     }
 { Returns how many it wrote whose path AgedPaths (WorkspaceDocPaths) does not }
 { hold, so documents_written can count writes the timestamp list never saw.  }
 Function SaveBridgeRecordSweep(AgedPaths : String) : Integer;
 Var
     Remaining, Entry, Key, DiskPath : String;
     P : Integer;
-    ServerDoc : IServerDocument;
+    ServerDoc, Alive : IServerDocument;
 Begin
     Result := 0;
     Remaining := BridgeEditedPaths;
@@ -2355,6 +2406,14 @@ Begin
         ServerDoc := FindOpenServerDoc(Key);
         If ServerDoc = Nil Then
         Begin
+            Alive := Nil;
+            If FileExists(Key) Then
+                Try Alive := Client.GetDocumentByPath(Key); Except Alive := Nil; End;
+            If Alive <> Nil Then
+            Begin
+                SaveBridgeRecordUnresolved := PathListWith(SaveBridgeRecordUnresolved, Key);
+                Continue;
+            End;
             ForgetBridgeEdit(Key);
             SaveBridgeRecordClosed := PathListWith(SaveBridgeRecordClosed, Key);
             Continue;

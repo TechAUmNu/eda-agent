@@ -1567,6 +1567,7 @@ Begin
     SaveBridgeRecordUnwritten := '';
     SaveBridgeRecordSameTick := '';
     SaveBridgeRecordClosed := '';
+    SaveBridgeRecordUnresolved := '';
     SaveAttemptedKeys := '';
     SaveUnresolvedPaths := '';
     MarkLastRecorded := False;

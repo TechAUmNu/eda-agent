@@ -252,7 +252,7 @@ _GLOBALS = {
     "BridgeEditedPaths": "", "SaveBridgeRecordPaths": "",
     "SaveBridgeRecordUnwritten": "", "SaveBridgeRecordSameTick": "",
     "SaveBridgeRecordClosed": "", "SaveAttemptedKeys": "",
-    "SaveUnresolvedPaths": "",
+    "SaveUnresolvedPaths": "", "SaveBridgeRecordUnresolved": "",
     "SaveAttempts": 0, "SaveSkipped": 0, "SaveSkippedPaths": "",
     "SaveSkipCleanLibs": False, "SaveSkipCleanSheets": False,
     "FindDocVia": "none", "DocNameMemberKeys": "", "MarkLastPath": "", "MarkLastFile": "",
@@ -312,6 +312,7 @@ class World:
         ns = self.ns
         for k in ("SaveBridgeRecordPaths", "SaveBridgeRecordUnwritten",
                   "SaveBridgeRecordSameTick", "SaveBridgeRecordClosed",
+                  "SaveBridgeRecordUnresolved",
                   "SaveAttemptedKeys", "SaveSkippedPaths",
                   "SaveUnresolvedPaths"):
             ns[k] = ""
@@ -1015,7 +1016,13 @@ def test_reload_with_a_declined_save_whose_flag_never_registers_does_not_close()
     assert w.BridgeEditRecorded(SCRATCH) is True, "the record lost its only witness"
 
 
-def test_reload_save_rule_is_write_doc_and_notes_rule():
+def test_reload_save_rule_needs_a_moved_age():
+    """Re-review of a0c9da9: the reload no longer shares WriteDocAndNote's
+    flag-clean-in-this-tick rule (an error there costs one extra write,
+    here it costs the edit). Only a moved age proves the save; inside the
+    tick the call waits it out and saves again (executed in
+    tests/test_bridge_record_rereview.py)."""
     body = _generic_body("Gen_ReloadSchDocument")
-    assert ("Saved := ((AgeAfter <> -1) And (AgeAfter <> AgeBefore))\n"
-            "            Or ((Not StillModified) And AgeIsThisTick(AgeBefore));") in body
+    assert "Or ((Not StillModified) And AgeIsThisTick(AgeBefore))" not in body
+    assert body.count(
+        "Saved := (AgeAfter <> -1) And (AgeAfter <> AgeBefore);") == 2

@@ -4045,7 +4045,8 @@ Var
     ServerDoc : IServerDocument;
     Iterator : ISch_Iterator;
     Parameter : ISch_Parameter;
-    Found : Boolean;
+    Found, Marked : Boolean;
+    MarkJson : String;
 Begin
     FilePath := ExtractJsonValue(Params, 'file_path');
     ParamName := ExtractJsonValue(Params, 'name');
@@ -4065,6 +4066,17 @@ Begin
       path instead of the filename). Require the caller to load every
       target sheet beforehand via load_project_sheets, which uses the
       project-aware open path that preserves membership. }
+
+    { A bare file_path several listed documents carry names no one sheet:   }
+    { both lookups below would hand back an arbitrary namesake.             }
+    If AmbiguousBareDocName(FilePath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'AMBIGUOUS_NAME',
+            FilePath + ' is the file name of more than one open document, so '
+            + 'it names no one sheet. Pass file_path as an absolute path. '
+            + 'Nothing was changed.');
+        Exit;
+    End;
 
     ServerDoc := Client.GetDocumentByPath(FilePath);
     If ServerDoc = Nil Then
@@ -4132,7 +4144,13 @@ Begin
     { Persist directly to disk via the IServerDocument API. MarkDocDirtyByPath
       does SetModified + DoFileSave. WorkspaceManager:SaveAll doesn't
       reach non-active sheets in our tests, so we don't rely on it. }
-    MarkDocDirtyByPath(FilePath);
+    { MARK THE FILE EDITED, not the caller's spelling of it: a bare         }
+    { file_path naming a project member resolves above but never through     }
+    { MarkDocDirty, which answers a bare name only for a FREE document - the }
+    { mark was lost silently (re-review of a0c9da9). SchDocMarkPath gives    }
+    { the absolute request, else the sheet's own (absolute) DocumentName.    }
+    Marked := MarkDocDirty(SchDocMarkPath(FilePath, SchDoc));
+    MarkJson := MarkOutcomeJson(0);
     Try SchDoc.GraphicallyInvalidate; Except End;
 
     If Found Then Action := 'updated' Else Action := 'added';
@@ -4141,7 +4159,9 @@ Begin
         ',"saved":true' +
         ',"file_path":"' + EscapeJsonString(FilePath) +
         '","name":"' + EscapeJsonString(ParamName) +
-        '","value":"' + EscapeJsonString(ParamValue) + '"}');
+        '","value":"' + EscapeJsonString(ParamValue) + '"'
+        + ',"marked_modified":' + BoolToJsonStr(Marked)
+        + ',"mark":' + MarkJson + '}');
 End;
 
 {..............................................................................}
