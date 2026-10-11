@@ -834,6 +834,7 @@ Begin
         SaveBridgeRecordUnresolved := '';
         SaveAttemptedKeys := '';
         SaveUnresolvedPaths := '';
+        SaveUnnamedCount := 0;
         SaveSkipCleanLibs := Not IncludeLibs;
         SaveSkipCleanSheets := OnlyModified;
         SaveAllDirty(0);

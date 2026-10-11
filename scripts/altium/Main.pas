@@ -141,6 +141,9 @@ Var
     { a document silently; a bridge-edited one is written by the record      }
     { sweep from its absolute key all the same.                              }
     SaveUnresolvedPaths : String;
+    { Running number of the documents with no file name at all listed in    }
+    { SaveUnresolvedPaths ('(unnamed document N)'), reset with that list.    }
+    SaveUnnamedCount : Integer;
     { What the LAST MarkDocDirty call found, for the reply that claims
       marked_modified (MarkOutcomeJson in Utils.pas renders it: this unit
       builds before EscapeJsonString exists). MarkLastFocused is -1 when the
@@ -158,8 +161,8 @@ Var
     MarkLastModified : Boolean;
     MarkLastFocused : Integer;
     MarkLastError : String;
-    { THE ONE-SHOT D1 DIAGNOSTIC (2026.10.11.02). The raw Modified value the }
-    { mark read right after SetModified(True), told apart by comparisons     }
+    { THE D1 DIAGNOSTIC (2026.10.11.02). The raw Modified value the mark     }
+    { read right after SetModified(True), named by the two proven tests      }
     { alone (ModifiedFlagRaw / ModifiedFlagTests): '' when nothing was found. }
     MarkLastFlagRaw : String;
     MarkLastFlagTests : String;
@@ -508,58 +511,42 @@ Begin
     Result := ModifiedFlagState(Doc) <> 0;
 End;
 
-{ THE D1 DIAGNOSTIC (one-shot, for the live run). Both readers run the two   }
-{ proven tests FIRST, and the numeric / literal compares - forms that have   }
-{ never run in this codebase - ONLY when neither proven test held, i.e. only }
-{ on the odd value itself, each stage inside its own Try with a counted      }
-{ Except. A normal document therefore never executes an unproven form, and a }
-{ compare that raises leaves the proven part of the answer in place.         }
+{ THE D1 DIAGNOSTIC: the raw flag the mark read, named by the TWO PROVEN     }
+{ TESTS ONLY. No compare of any kind, at any value: a SchDoc reads the odd    }
+{ value after EVERY SetModified(True), so a stage fenced to 'the odd value'   }
+{ ran on every schematic mark (review of d198b65), and a Try is no guard -    }
+{ the engine shows a raise as a modal BEFORE the Except runs. The numeric     }
+{ detail (1? -1?) is not needed: no decision reads it, and 'neither test      }
+{ held' already tells the field value apart from True and False.             }
 {                                                                              }
-{ ModifiedFlagRaw: 'true' / 'false' when 'If X' / 'If Not X' held; for the   }
-{ odd value '1', '-1', '0' or 'other' by numeric compare, 'odd' when that    }
-{ compare raised; 'unreadable' when the read or a proven test raised; ''     }
-{ with no document.                                                           }
+{ ModifiedFlagRaw: 'true' / 'false' when 'If X' / 'If Not X' held, 'odd'     }
+{ when neither did, 'unreadable' when the read or a test raised, '' with no  }
+{ document.                                                                   }
 Function ModifiedFlagRaw(Doc : IServerDocument) : String;
 Var
     Raw : Boolean;
-    Neither : Boolean;
 Begin
     Result := '';
     If Doc = Nil Then Exit;
     Result := 'unreadable';
-    Neither := False;
     Try
         Raw := Doc.Modified;
         If Raw Then Result := 'true'
         Else If Not Raw Then Result := 'false'
-        Else Neither := True;
+        Else Result := 'odd';
     Except
+        Result := 'unreadable';
         RecordCaughtException('ModifiedFlagRaw:Modified');
-        Exit;
-    End;
-    If Not Neither Then Exit;
-    Result := 'odd';
-    Try
-        If Raw = 1 Then Result := '1'
-        Else If Raw = -1 Then Result := '-1'
-        Else If Raw = 0 Then Result := '0'
-        Else Result := 'other';
-    Except
-        RecordCaughtException('ModifiedFlagRaw:compare');
     End;
 End;
 
-{ ModifiedFlagTests: 'if=1|0,not=1|0' from the two proven tests, always;     }
-{ only when both are 0 (the odd value) it goes on with ',ne_zero=..',        }
-{ ',eq_true=..' and ',eq_false=..', each appended as soon as it is known -   }
-{ these three are NEW forms, never run here before - and ',raised' if one of }
-{ them raised. A normal True reads 'if=1,not=0', a normal False              }
-{ 'if=0,not=1'; the 1-hypothesis reads                                       }
-{ 'if=0,not=0,ne_zero=1,eq_true=0,eq_false=0'.                               }
+{ ModifiedFlagTests: 'if=1|0,not=1|0' from the two proven tests. A normal    }
+{ True reads 'if=1,not=0', a normal False 'if=0,not=1', the field's odd      }
+{ value 'if=0,not=0'; 'unreadable' when the read or a test raised.           }
 Function ModifiedFlagTests(Doc : IServerDocument) : String;
 Var
     Raw : Boolean;
-    TIf, TNot, T : String;
+    TIf, TNot : String;
 Begin
     Result := '';
     If Doc = Nil Then Exit;
@@ -575,21 +562,6 @@ Begin
         Exit;
     End;
     Result := 'if=' + TIf + ',not=' + TNot;
-    If (TIf <> '0') Or (TNot <> '0') Then Exit;
-    Try
-        T := '0';
-        If Raw <> 0 Then T := '1';
-        Result := Result + ',ne_zero=' + T;
-        T := '0';
-        If Raw = True Then T := '1';
-        Result := Result + ',eq_true=' + T;
-        T := '0';
-        If Raw = False Then T := '1';
-        Result := Result + ',eq_false=' + T;
-    Except
-        RecordCaughtException('ModifiedFlagTests:compare');
-        Result := Result + ',raised';
-    End;
 End;
 
 { Probe whether any logical document in the project has been modified by    }
@@ -1382,9 +1354,10 @@ Begin
         Except
             MarkLastError := 'SetModified raised on the document found';
         End;
-        { The D1 diagnostic, read before anything else touches the flag.   }
-        { Both readers never raise; the Try is belt and braces so a fault  }
-        { in a diagnostic can never abort a mark whose edit is already made. }
+        { The D1 diagnostic, read before anything else touches the flag:   }
+        { the two proven tests only, no compare (review of d198b65). The   }
+        { Try is a fault-only backstop so a diagnostic can never abort a   }
+        { mark whose edit is already made.                                 }
         Try
             MarkLastFlagRaw := ModifiedFlagRaw(ServerDoc);
             MarkLastFlagTests := ModifiedFlagTests(ServerDoc);
@@ -1410,6 +1383,13 @@ Begin
             FocusedMod := (FlagState = 1) Or (FlagState = 2);
             If FocusedMod Then MarkLastFocused := 1 Else MarkLastFocused := 0;
             If FocusedMod Then MarkLastModified := True;
+            { The found object's flag was unreadable but the tab's reads      }
+            { modified: say WHICH flag could not be read, or the reply       }
+            { carries marked_modified true beside a bare "could not be read" }
+            { (review of d198b65).                                           }
+            If FocusedMod And (MarkLastError = 'the modified flag could not be read') Then
+                MarkLastError := 'the found document''s modified flag could not '
+                    + 'be read; the focused tab''s flag reads modified';
         End;
     End;
     { Nothing resolved from a bare name: NOTHING goes on the record (a bare }
@@ -2173,7 +2153,14 @@ Begin
                 Else If Trim(DiskPath) <> '' Then
                     SaveUnresolvedPaths := PathListWith(SaveUnresolvedPaths, DiskPath)
                 Else
-                    SaveUnresolvedPaths := PathListWith(SaveUnresolvedPaths, '(unnamed document)');
+                Begin
+                    { One entry PER DOCUMENT: PathListWith dedupes by key, so  }
+                    { one shared placeholder collapsed every unnamed document  }
+                    { into a single entry (review of d198b65).                 }
+                    SaveUnnamedCount := SaveUnnamedCount + 1;
+                    SaveUnresolvedPaths := PathListWith(SaveUnresolvedPaths,
+                        '(unnamed document ' + IntToStr(SaveUnnamedCount) + ')');
+                End;
                 Exit;
             End;
             { ONE VISIT PER FILE PER PASS (live 2026-10-11). The walk reaches  }

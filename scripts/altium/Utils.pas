@@ -597,10 +597,10 @@ Begin
 End;
 
 {..............................................................................}
-{ flag_raw / flag_tests (2026.10.11.02) are the one-shot D1 diagnostic: the  }
-{ raw Modified value right after SetModified(True), named by comparisons     }
-{ only (ModifiedFlagRaw / ModifiedFlagTests in Main.pas); '' when nothing    }
-{ was found.                                                                 }
+{ flag_raw / flag_tests (2026.10.11.02) are the D1 diagnostic: the raw      }
+{ Modified value right after SetModified(True), named by the two proven     }
+{ tests 'If X' / 'If Not X' only, no compare (ModifiedFlagRaw /             }
+{ ModifiedFlagTests in Main.pas); '' when nothing was found.                }
 { What the last MarkDocDirty found, for every reply that claims               }
 { marked_modified. MEASURED 2026-10-10: marked_modified was a constant True   }
 { on obj_modify while the document read modified:false, because the mark     }

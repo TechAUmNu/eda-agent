@@ -2913,29 +2913,34 @@ finding, sharing `tests/live_2026_10_11.py`):
   close and count gates treat odd and unreadable alike as modified; the
   MARK, a read-back, claims `marked_modified: true` only for modified or
   odd, and for an unreadable flag says `false` with problem "the modified
-  flag could not be read". No compare of a Boolean with an integer or with
-  the `True` / `False` literals runs on a normal document (no such compare
-  exists anywhere else in these units, and a raise there would be a modal
-  on every edit and every save walk), and no Variant routine (`VarType`,
+  flag could not be read" (when the found object's flag is unreadable but
+  the focused tab of the same file reads modified, `true` with problem "the
+  found document's modified flag could not be read; the focused tab's flag
+  reads modified"). No compare of a Boolean with an integer or with the
+  `True` / `False` literals runs ANYWHERE, at any value (no such compare
+  exists elsewhere in these units, a SchDoc reads the odd value after every
+  mark, and a raise would be a modal on every edit - the engine shows it
+  BEFORE the `Except`, so a `Try` does not contain it), and no Variant
+  routine (`VarType`,
   `VarIsNull`, ...) is used: none has ever run in this codebase, and an
   undeclared one would fault inside the polling loop. So on this build a
   bridge mark is expected to read `marked_modified: true`. The live run's
   PcbDoc and PcbLib flags already read true (`modified_read: true` at close
   in the 39 run), so D1 looks SCHEMATIC-side: the diagnostic below is most
   informative on a SchDoc mark (step 2's free sheet).
-* **The diagnostic that settles it.** Every `mark` now carries `flag_raw`
-  and `flag_tests`, read right after `SetModified(True)`. Both run the two
-  proven tests first; the numeric and literal compares - forms NEVER run in
-  this codebase - run only when neither proven test held, i.e. only on the
-  odd value, each inside its own counted `Try`. `flag_raw`: `true` / `false`
-  when `If X` / `If Not X` held; for the odd value `1`, `-1`, `0` or `other`
-  by numeric compare, `odd` when that compare raised; `unreadable` when the
-  read raised; empty when nothing was found. `flag_tests`: `if=..,not=..`
-  always; for the odd value also `,ne_zero=..,eq_true=..,eq_false=..`
-  (each appended as soon as known), `,raised` if one of those raised. A
-  normal True reads `true` / `if=1,not=0`; the 1-hypothesis reads `1` /
-  `if=0,not=0,ne_zero=1,eq_true=0,eq_false=0`. Record both on the first
-  SchDoc mark of the run, and a PcbLib mark's for comparison.
+* **The diagnostic.** Every `mark` now carries `flag_raw` and
+  `flag_tests`, read right after `SetModified(True)`, from the two proven
+  tests ONLY. `flag_raw`: `true` / `false` when `If X` / `If Not X` held,
+  `odd` when neither did, `unreadable` when the read raised, empty when
+  nothing was found. `flag_tests`: `if=1|0,not=1|0`, or `unreadable`. A
+  normal True reads `true` / `if=1,not=0`, a normal False `false` /
+  `if=0,not=1`, the field's value `odd` / `if=0,not=0`. The numeric value
+  behind the odd one (1? -1?) is deliberately NOT probed: the first cut of
+  this build compared it with 1, -1, 0, `True` and `False` "only on the odd
+  value", but a SchDoc reads odd after EVERY mark, so those never-run
+  compares ran on every schematic edit (review of d198b65), and no decision
+  reads the number. Record both on the first SchDoc mark of the run, and a
+  PcbLib mark's for comparison.
 * **One visit per file per save pass (D2).** The walk reached a file once
   per listing (a project member and the Free Documents listing of the same
   file, or two slash spellings) and, after writing it on the first visit,
@@ -2947,7 +2952,8 @@ finding, sharing `tests/live_2026_10_11.py`):
   skipped every file the last save-all had written, review of 0c4f20e). A
   listed document with no absolute file name (unnamed, or a bare name) is
   never written - `DoFileSave('')` could only ask where - and is listed in
-  `free_documents_not_reached`. A document whose flag reads modified is
+  `free_documents_not_reached` (a bare one by its name, one with no name at
+  all as `(unnamed document N)`, numbered so two are two entries). A document whose flag reads modified is
   written by the walk itself, so it is NOT listed in
   `written_by_bridge_record` (that list is for recorded documents whose
   flag reads clean) - with D1 fixed that is the normal case.
@@ -2994,9 +3000,10 @@ of a .PcbLib opened on its own.
    `SetModified(True)`, or an unassigned value, which converts to False) or
    `unreadable` (the problem then says "the modified flag could not be
    read" and `caught_exceptions` rose by one under
-   `ModifiedFlagState:Modified`) - record `flag_tests` exactly. A modal on
-   the FIRST mark, or a `dispatcher` catch, would mean a compare in the
-   readers raised outside its `Try` - not expected: none runs outside one.
+   `ModifiedFlagState:Modified`) - record `flag_tests` exactly. The readers
+   hold no compare at all (only `If X` / `If Not X`, both proven live on
+   this value), so a modal on the FIRST mark is not expected; if one
+   appears, record its text and `last_caught`.
 3. **Read-back on a PROJECT document.** In the scratch project copy, the same
    `obj_modify` with `scope` `doc:<sheet path>` while ANOTHER document is
    focused: `marked_modified: true`, `mark.found: true`, `mark.via: path`,
@@ -3349,7 +3356,7 @@ row itself names the pair that popped.
 | P31 | `Proj_ImportDocument:CopyFile` | With a project focused, `proj_import_document` with a `source_path` outside the project folder | A count + dialog = `CopyFile` is not in the binding: copy in Python (`shutil.copy2`). The copy is now checked by its OUTCOME (`FileExists(DestPath)` after the call, `COPY_FAILED` if absent), so a `CopyFile` that returns False quietly answers `COPY_FAILED` like one that raises, and the missing-folder refusal before it is that same reply whichever it is. Success with no file at `dest_path` would be a bug in the outcome check |
 | P32 | (none: `PcbLibMayBeCurrent`, `PcbLibMayBeCurrentAt`) | (a) Right after `app_create_document kind=PCBLIB`, with no other step between: `lib_create_footprint`, `lib_add_footprint_pad`, then `pcb_renumber_pads`. (b) Focus a SchLib in the UI, then `lib_reload_library` on a SAVED `.PcbLib` (its programmatic close and reopen can leave the DM focus on the SchLib, stale rather than Nil) | (a) All act on the new library. (b) `reloaded: true` (`PcbLibMayBeCurrentAt` accepts a PcbLib open at `library_path` whatever the focus says). `NO_PCBLIB` in either = the DM focus AND the open-document walk (and, in b, `GetDocumentByPath` at the path) all missed a library that is current, and the gate needs widening |
 | P33 | (none: syntax check) | `audit_find_via_antennas` on a board with an internal plane | No dialog. A dialog per via and plane layer = `Via.IsConnectedToPlane[LayerId]` needs parentheses, not brackets (the docs show `( )`) |
-| P34 | `ModifiedFlagState:Modified`, `ModifiedFlagRaw:Modified`, `ModifiedFlagTests:Modified`, `ModifiedFlagRaw:compare`, `ModifiedFlagTests:compare` | Every bridge edit (section 38 step 2 on the free SchDoc is the one that matters): the mark reads the flag through these readers | 0 expected for the `:Modified` sites: the read and the two proven tests (`If X`, `If Not X`) never raised live. A `:Modified` count = the read raised; the mark then reads `marked_modified: false` with problem "the modified flag could not be read" and `flag_raw` `unreadable` (saves still write it: doubt writes). The `:compare` sites run ONLY on the odd value (neither proven test held) and are the first time a Boolean is compared with an integer or a literal here: a count there = the engine refuses that compare - record it; `flag_raw` then reads `odd` and `flag_tests` ends `,raised`, and nothing else is affected. A modal or a `dispatcher` catch on the first mark or save would mean a compare ran OUTSIDE these `Try`s - none does |
+| P34 | `ModifiedFlagState:Modified`, `ModifiedFlagRaw:Modified`, `ModifiedFlagTests:Modified` | Every bridge edit (section 38 step 2 on the free SchDoc is the one that matters): the mark reads the flag through these readers | 0 expected for the `:Modified` sites: the read and the two proven tests (`If X`, `If Not X`) never raised live. A `:Modified` count = the read raised; the mark then reads `marked_modified: false` with problem "the modified flag could not be read" and `flag_raw` `unreadable` (saves still write it: doubt writes). The readers run no compare of the value at all (the `:compare` sites of the first cut are gone, review of d198b65: they ran on every SchDoc mark, and a `Try` does not stop the engine's modal), so nothing here can raise on the odd value itself. A count, a modal or a `dispatcher` catch on the first mark = the READ raised - record the modal text and `last_caught` |
 
 ### 39.5 If a dialog does appear
 

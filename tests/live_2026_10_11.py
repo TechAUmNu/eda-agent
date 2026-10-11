@@ -87,8 +87,11 @@ class StrictFlag:
 
 
 class OddRaising(FieldFlag):
-    """The field's odd value, if the engine also refuses the numeric and
-    literal compares: both proven tests false, every compare raises."""
+    """The field's odd value with every compare refused: both proven tests
+    false, any compare raises. It models NO containment - on the engine a
+    raise is a modal BEFORE the Except runs - so the readers must answer it
+    without ever comparing it (review of d198b65): a test passes only when
+    nothing is caught."""
 
     def __eq__(self, _other):
         raise PascalError("compare")

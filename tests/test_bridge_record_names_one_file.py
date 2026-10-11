@@ -256,7 +256,7 @@ _GLOBALS = {
     "SaveUnresolvedPaths": "", "SaveBridgeRecordUnresolved": "",
     "SaveAttempts": 0, "SaveSkipped": 0, "SaveSkippedPaths": "",
     "SaveSkipCleanLibs": False, "SaveSkipCleanSheets": False,
-    "SaveWalkPass": False,
+    "SaveWalkPass": False, "SaveUnnamedCount": 0,
     "FindDocVia": "none", "DocNameMemberKeys": "", "MarkLastPath": "", "MarkLastFile": "",
     "MarkLastVia": "none", "MarkLastFound": False,
     "MarkLastModified": False, "MarkLastFocused": -1, "MarkLastError": "",
@@ -323,6 +323,7 @@ class World:
             ns[k] = ""
         ns["SaveAttempts"] = 0
         ns["SaveSkipped"] = 0
+        ns["SaveUnnamedCount"] = 0
         ns["SaveSkipCleanLibs"] = not include_libraries
         ns["SaveSkipCleanSheets"] = only_modified
         ns["SaveAllDirty"](0)
@@ -472,6 +473,7 @@ def test_the_walk_never_writes_a_namesake_for_a_free_listing():
 def test_save_all_reports_the_free_documents_it_could_not_reach():
     body = load(_ALTIUM / "Application.pas", minimum=12)["App_SaveAll"]
     assert "SaveUnresolvedPaths := '';" in body
+    assert "SaveUnnamedCount := 0;" in body
     assert ("',\"free_documents_not_reached\":' + "
             "PipeListToJsonArray(SaveUnresolvedPaths)") in body
 

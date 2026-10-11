@@ -1571,6 +1571,7 @@ Begin
     SaveAttemptedKeys := '';
     SaveWalkPass := False;
     SaveUnresolvedPaths := '';
+    SaveUnnamedCount := 0;
     MarkLastRecorded := False;
     MarkLastPath := '';
     MarkLastFile := '';

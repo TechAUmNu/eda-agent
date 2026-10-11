@@ -14,8 +14,9 @@ from __future__ import annotations
 import pytest
 
 from tests.live_2026_10_11 import _caught, _field, _keys
+from tests.pascal_source import load
 from tests.test_bridge_record_names_one_file import (
-    LIB, SHEET, Listed, ServerDoc, World, _key)
+    LIB, SHEET, Listed, ServerDoc, World, _ALTIUM, _key)
 
 
 # ---------------------------------------------------------------------------
@@ -100,10 +101,12 @@ def test_the_next_save_all_still_dedupes_within_its_own_pass():
     assert w.SaveWalkPass is False
 
 
-def _walk_one(w, listed, server_doc):
+def _walk_one(w, listed, server_doc, reset=True):
     w.ns["ListedServerDoc"] = lambda _doc: server_doc
-    w.ns["SaveAttemptedKeys"] = ""
-    w.ns["SaveUnresolvedPaths"] = ""
+    if reset:
+        w.ns["SaveAttemptedKeys"] = ""
+        w.ns["SaveUnresolvedPaths"] = ""
+        w.ns["SaveUnnamedCount"] = 0
     w.ns["SaveWalkPass"] = True
     w.ns["SaveOneDocByDocRef"](listed)
     w.ns["SaveWalkPass"] = False
@@ -120,4 +123,21 @@ def test_a_document_with_no_absolute_path_is_listed_not_matched_by_accident(name
     doc.Modified = True
     _walk_one(w, Listed(name), doc)
     assert doc.saves == 0
-    assert w.SaveUnresolvedPaths == (name or "(unnamed document)")
+    assert w.SaveUnresolvedPaths == (name or "(unnamed document 1)")
+
+
+def test_two_unnamed_documents_are_two_entries():
+    """Review of d198b65: every unnamed document went in as the literal
+    '(unnamed document)', and PathListWith dedupes by key, so two collapsed
+    into one and free_documents_not_reached under-reported."""
+    w = World(bare="nil", focus=None)
+    _caught(w.ns)
+    w.ns["SaveUnnamedCount"] = 0
+    for _ in range(2):
+        doc = ServerDoc(w.disk, "")
+        doc.Modified = True
+        _walk_one(w, Listed(""), doc, reset=False)
+    assert w.SaveUnresolvedPaths.split("|") == [
+        "(unnamed document 1)", "(unnamed document 2)"]
+    status = load(_ALTIUM / "StatusForm.pas", minimum=10)
+    assert any("SaveUnnamedCount := 0;" in b for b in status.values())

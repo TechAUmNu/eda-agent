@@ -28,7 +28,8 @@ from tests.live_2026_10_11 import (
     _field, _with)
 from tests.pascal_eval import PascalError, build
 from tests.pascal_source import load
-from tests.test_bridge_record_names_one_file import World, _ALTIUM
+from tests.test_bridge_record_names_one_file import (
+    ServerDoc, World, _ALTIUM)
 
 
 # ---------------------------------------------------------------------------
@@ -93,28 +94,37 @@ def test_a_normal_flag_never_meets_an_unproven_form(value):
     assert ns["_caught"] == []
 
 
-def test_an_odd_value_whose_compares_raise_is_caught_and_counted():
-    """If the engine refuses the numeric compares on the odd value too, the
-    raise stays inside the diagnostics' own Try, keeps the proven half of
-    the answer, and is counted under its own site."""
+def test_the_odd_value_never_meets_a_compare():
+    """Review of d198b65: the diagnostics compared the odd value with 1, -1,
+    0, True and False - forms with no live precedent here - and a SchDoc
+    reads odd after EVERY SetModified(True), so every schematic mark ran
+    them. A Try is no guard: the engine shows a raise as a modal BEFORE the
+    Except. OddRaising refuses every compare; the readers must answer from
+    'If X' / 'If Not X' alone and catch nothing."""
     ns = _flag_ns()
     doc = _Doc(OddRaising(1))
     assert ns["ModifiedFlagState"](doc) == 2
     assert ns["ModifiedFlagRaw"](doc) == "odd"
-    assert ns["ModifiedFlagTests"](doc) == "if=0,not=0,raised"
-    assert ns["_caught"] == ["ModifiedFlagRaw:compare",
-                             "ModifiedFlagTests:compare"]
+    assert ns["ModifiedFlagTests"](doc) == "if=0,not=0"
+    assert ns["_caught"] == []
 
 
-def test_the_diagnostic_names_the_value_by_comparisons():
+def test_the_readers_hold_no_compare_of_the_value():
+    """Source pin for the same rule: inside the four readers the value is
+    only ever tested as 'If Raw' / 'If Not Raw', never compared."""
+    compare = re.compile(r"\bRaw\s*(=|<>|<|>)")
+    for name in _READERS:
+        assert not compare.search(_MAIN[name]), name
+
+
+def test_the_diagnostic_names_the_value_by_the_proven_tests():
     ns = _flag_ns()
-    assert ns["ModifiedFlagRaw"](_Doc(FieldFlag(1))) == "1"
+    assert ns["ModifiedFlagRaw"](_Doc(FieldFlag(1))) == "odd"
     assert ns["ModifiedFlagRaw"](_Doc(FieldFlag(-1))) == "true"   # a normal True
     assert ns["ModifiedFlagRaw"](_Doc(False)) == "false"
     assert ns["ModifiedFlagRaw"](_Doc(raises=True)) == "unreadable"
     assert ns["ModifiedFlagRaw"](None) == ""
-    assert ns["ModifiedFlagTests"](_Doc(FieldFlag(1))) == (
-        "if=0,not=0,ne_zero=1,eq_true=0,eq_false=0")
+    assert ns["ModifiedFlagTests"](_Doc(FieldFlag(1))) == "if=0,not=0"
     assert ns["ModifiedFlagTests"](_Doc(FieldFlag(-1))) == "if=1,not=0"
     assert ns["ModifiedFlagTests"](_Doc(raises=True)) == "unreadable"
 
@@ -144,8 +154,43 @@ def test_the_mark_reads_true_on_the_field_value_and_reports_the_probe():
     assert w.MarkDocDirty(w.scratch.FileName) is True
     assert w.MarkLastModified is True
     assert w.MarkLastError == ""
-    assert w.MarkLastFlagRaw == "1"
-    assert w.MarkLastFlagTests == "if=0,not=0,ne_zero=1,eq_true=0,eq_false=0"
+    assert w.MarkLastFlagRaw == "odd"
+    assert w.MarkLastFlagTests == "if=0,not=0"
+
+
+def test_every_mark_on_the_odd_value_runs_no_compare():
+    """Review of d198b65: 'only on the odd value' fenced nothing - a SchDoc
+    after a mark IS the odd value, every time, so each schematic edit ran
+    the unproven compares (a modal per reader per edit, had one raised).
+    Two marks in a row on a value that refuses every compare: no catch."""
+    w = World(bare="nil", focus="scratch")
+    _caught(w.ns)
+    w.ns.setdefault("MarkLastFlagRaw", "")
+    w.ns.setdefault("MarkLastFlagTests", "")
+    _field(w.scratch)
+    w.scratch.SetModified = lambda v: setattr(
+        w.scratch, "Modified", OddRaising(1) if v else False)
+    for _ in range(2):
+        assert w.MarkDocDirty(w.scratch.FileName) is True
+        assert w.MarkLastFlagRaw == "odd"
+        assert w.MarkLastFlagTests == "if=0,not=0"
+    assert w.ns["_caught"] == []
+
+
+def test_an_unreadable_found_flag_with_a_modified_focused_tab_says_which():
+    """Review of d198b65: the found document's flag unreadable, the focused
+    tab (same file, another object) reads modified - the reply said
+    marked_modified true AND 'the modified flag could not be read'."""
+    w = World(bare="nil", focus=None)
+    _caught(w.ns)
+    w.scratch.Modified = NullFlag()
+    w.scratch.SetModified = lambda _v: None
+    tab = ServerDoc(w.disk, w.scratch.FileName)
+    w.client.focused = tab
+    assert w.MarkDocDirty(w.scratch.FileName) is True
+    assert w.MarkLastFocused == 1
+    assert w.MarkLastError == ("the found document's modified flag could not "
+                               "be read; the focused tab's flag reads modified")
 
 
 def test_a_mark_whose_flag_cannot_be_read_does_not_claim_it():
