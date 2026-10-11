@@ -376,7 +376,7 @@ behaviour, not a failure of this step. Passing `component_name=<symbol>`
 on the call itself does the same.
 
 ```
-lib_set_current_component(name="<a symbol in that library>")
+lib_set_current_component(component_name="<a symbol in that library>")
 lib_add_pins(pins=[
   {"designator": "1", "name": "RESET", "x": -300, "y": 0,
    "symbol_outer_edge": "dot"},
@@ -602,7 +602,7 @@ nothing held the call answers `NO_COMPONENT` by design, since the editor's
 own selection is never used.
 
 ```
-lib_set_current_component(name="<a symbol in that library>")
+lib_set_current_component(component_name="<a symbol in that library>")
 lib_add_pins(pins=[
   {"designator": "1", "name": "VIN",  "x": -300, "y":    0,
    "electrical_type": "power"},
@@ -682,12 +682,17 @@ Needs a SchLib open.
 lib_get_pin_list(component_name="<a symbol in that library>")
 ```
 
-Expect a pin list. Then call it again with no `component_name` and
-nothing held: it must answer `NO_COMPONENT` (a by-name `lib_get_pin_list`
-does not hold the symbol, and the symbol selected in the editor is never
-used: its members cannot be read safely, which is this step's own crash).
-Then `lib_set_current_component(name="<the same symbol>")` and call it with
-no `component_name`: the same pin list.
+Expect a pin list. Then `lib_set_current_component(component_name="<the
+same symbol>")` and call it with no `component_name`: the same pin list
+(a by-name `lib_get_pin_list` does not hold the symbol; the set does). The
+symbol selected in the editor is never used: its members cannot be read
+safely, which is this step's own crash. A nameless call answers the HELD
+symbol's pins, and `NO_COMPONENT` only when nothing has been held this
+session. Run in order, sections 2, 3 and 7 have already held a symbol
+(`lib_set_current_component`, and symbol creation holds the new one), so a
+nameless call before the set answers THAT symbol's pins, not
+`NO_COMPONENT` - record which symbol it names. The nothing-held case is
+P8's, in a fresh session.
 
 **This one is a fix for an observed crash, not a new feature.** The
 deployed script answered
@@ -3241,17 +3246,22 @@ save-alls listed in `skipped_unmodified` (N2 below).
 Fixed after this run (each with an executed test that fails on the
 second build, `tests/test_live_02b_findings.py`):
 
-* **N2: save-all touches design documents only.** The walks skip any
+* **N2: save-all never touches a script unit.** The walks skip any
   project whose file is a `.PrjScr` (`IsScriptProject`: `SaveAllDirty`,
   `SaveProjectMembers` - so a `proj_save` with the script project focused
   writes nothing either - `CountDirtyDocuments`, `WorkspaceDocPaths`), and
-  a document is written or listed only when its kind is on an ALLOW-list
-  (`IsSaveableDesignDoc`: SCH, SCHLIB, PCB, PCBLIB, OUTPUTJOB; a kind that
-  cannot be read falls back to the same five extensions). A script unit is
-  never in `skipped_unmodified`, `free_documents_not_reached`,
+  a SCRIPT UNIT is never written or listed (`IsScriptUnitDoc`: the kind
+  EditScriptDS, or a .pas / .bas / .vbs / .js / .tcl / .dfm file). A script
+  unit is never in `skipped_unmodified`, `free_documents_not_reached`,
   `documents_seen` or `still_dirty`, and never reaches `WriteDocAndNote`.
-  Other document kinds (a harness, a BOM document) are no longer written
-  by `app_save_all` either.
+  REVISED by the review of 498e5ca: the first fix was an ALLOW-list of five
+  kinds, which also stopped writing, listing and counting every other kind
+  (a BOM document, a Draftsman drawing, a harness): `app_save_all` then
+  answered `still_dirty: 0` with one dirty, and `proj_close save=true`
+  closed with it dirty - Altium's own save prompt, which blocks the loop.
+  Every non-script kind is written and counted as before 498e5ca, and
+  `proj_close save=true` now refuses the close (`still_modified`) when
+  anything still reads modified after its save.
 * **N4: `proj_save` and `proj_close save=true` say what reached disk.**
   Both replies carry `only_modified`, `documents_attempted`,
   `documents_written` (file ages before and after, as `app_save_all`
@@ -3268,7 +3278,8 @@ Re-check on 2026.10.11.03 (after the steps above):
     `app_save_all` with NO arguments. No path under the scripts folder in
     `skipped_unmodified`, `free_documents_not_reached` or anywhere else in
     the reply; the scripts folder byte-identical (sizes and mtimes) before
-    and after; `documents_seen` counts design documents only.
+    and after; `documents_seen` counts no script unit (every other
+    document kind is still counted and written).
 15. **proj_save reports (N4).** In the scratch project, a bridge edit on a
     sheet, wait 3 s, `proj_save`: `documents_attempted` >= 1,
     `documents_written` >= 1 (the sheet's mtime moved),
@@ -3277,6 +3288,13 @@ Re-check on 2026.10.11.03 (after the steps above):
     `documents_written` 0, every loaded member in `skipped_unmodified`, no
     mtime moved. Then a sheet edit and `proj_close save=true`: the close
     reply carries the same fields, with `documents_written` >= 1.
+    `bridge_record_pending` names THIS project's members only (and, for
+    `proj_close`, what is still pending AFTER the close): edits left
+    pending on free documents or another project by earlier steps are not
+    listed, so `[]` is expected here whatever those steps left. Then, with
+    a member whose save is declined (an interactive command left running
+    on it, as step 13), `proj_close save=true`: `success` false, `closed`
+    false, `still_modified` names it, no prompt, the project still open.
 
 ---
 
@@ -3417,10 +3435,39 @@ Each must answer with no dialog and leave `caught_exceptions` unchanged.
    part INTO THE LIBRARY. A modal followed by a silent write into a library
    is why this is a refusal, not an open and not a fallback. Count the
    components on the scratch board before and after: unchanged. A `.PcbDoc`
-   that is NOT open, IS on disk and cannot be a board (0 bytes, unreadable,
-   or a head that is neither an OLE compound file nor the ASCII `|` record
-   form) is refused `BOARD_FILE_UNREADABLE` the same way, nothing opened -
-   probe P6b, now a check.
+   that is NOT open, IS on disk and cannot be loaded (empty, unreadable, or
+   not a compound/ASCII file: a head that is neither an OLE compound file
+   nor the ASCII `|` record form) is refused `BOARD_FILE_UNREADABLE` the
+   same way, nothing opened - probe P6b, now a check. KNOWN LIMIT: the OLE
+   test proves only that the file is SOME compound document. A `.PcbLib`,
+   `.SchDoc` or `.SchLib` renamed `.PcbDoc` passes it and reaches the open
+   (Altium's own box, as for the `.PcbLib` above); `.Pcb` and `.OutJob` are
+   judged by extension plus "readable and not empty". Not a regression -
+   these opened the same way before - and not tested here.
+
+   **POSITIVE CONTROLS FIRST, before any P6b negative probe.** The pre-open
+   read (`FileLooksLoadable`: `TStringList.LoadFromFile` + `.Text`) runs on
+   every CLOSED `.PcbDoc` / `.SchDoc` before it is opened, and it has never
+   run live on a healthy BINARY file (its precedent, `ReadFileContent`,
+   read small text request files). If Altium's decode raised on all 12
+   attempts (a UTF-8 system code page with a strict conversion would), every
+   healthy closed board would be refused and every closed binary sheet
+   would fail to load. So, on scratch copies:
+   (a) `pcb_focus_board` and then `pcb_place_components` with `board_path`
+       naming a CLOSED healthy binary `.PcbDoc` (a carrier copy): it opens,
+       no refusal, no dialog, 0 catches;
+   (b) `proj_load_sheets` on a project whose binary `.SchDoc`s are ALL
+       closed: none fails;
+   (c) the same with an ASCII-saved `.PcbDoc` and `.SchDoc`;
+   (d) time the first `app_get_preferences` with the carrier board listed
+       and closed (the read decodes the whole file to look at 8 characters;
+       record the seconds).
+   A `BOARD_FILE_UNREADABLE` or a failed sheet on a healthy file means the
+   read or the head test misjudged it: record the system ANSI code page
+   (GetACP: the `ACP` value under the registry key
+   `HKLM\SYSTEM\CurrentControlSet\Control\Nls\CodePage`), the file's
+   size and its first 16 bytes, and stop - P6b's
+   negative half means nothing until the positive half passes.
 3. **A project that lists a board missing on disk.** Copy a scratch
    project without its `.PcbDoc`, open it, focus a sheet, run
    `app_get_preferences`: `"pcb": null` (or another open board).
@@ -3483,8 +3530,8 @@ StartMCPServer (39.5).
 | P4 | `MechLayerFromNumber:LayerUtils.MechanicalLayer` | Any tool given the layer `Mechanical21` on a board or library (e.g. `pcb_get_mech_layer_names` on one using mechanical 17+), and `pcb_set_layer_visibility layer=Mechanical21` | 0 expected on AD26; on a pre-AD19 build, record the result (an undeclared `LayerUtils` would show as `dispatcher` or a stopped loop). 2026.10.11.03: the visibility reply echoes `"layer":"Mechanical21"` (the first 2026-10-11 build echoed `Unknown`; `GetLayerString` now names Mechanical17-64 by a verified `MechLayerFromNumber` lookup, only on AD19 and later) |
 | P5 | `ReadMechKind:Kind` | Only on a build below AD19: `pcb_get_mech_layer_names` | kinds read -1 and nothing is counted (the read is gated off below 19) |
 | P6 | `App_CreateDocument:DoFileSave`, `App_CreateDocument:SaveObject` | 39.3 item 5, and the same with a folder that exists but is read-only | 0 confirms the folder test is the whole story; a count means a save raises in an existing folder |
-| P6b | `ResolvePCBBoard:OpenDocument`, `GetPCBBoardAnywhere:OpenDocument` | A 0-byte file renamed `scratch.PcbDoc`: pass it as `pcb_place_components` `board_path`, then list it in a scratch project and run `app_get_preferences` with a sheet focused | THREE possible outcomes for a broken file, not two: 0 = Altium answers Nil; 1 = it raises (counted); and the THIRD, the one measured on the .02b run: an UNCOUNTED Altium modal ("Warning", "File type not recognised.", class (c)) blocking ~13 s, then a NON-Nil BLANK document - `pcb_place_components` placed its part into it and `app_get_preferences` reported its settings. On 2026.10.11.03 neither call reaches the open: `pcb_place_components` (and `pcb_focus_board`) are refused `BOARD_FILE_UNREADABLE` (the message names the path and says "Nothing was opened or changed"), and `app_get_preferences` answers `"pcb": null` (or another open board), with no dialog, 0 catches, and `scratch.PcbDoc` still closed and still 0 bytes. A box = the pre-open file test (`FileLooksLoadable`) let it through: record the file's size and first bytes |
-| P7 | `Lib_Link3DModel:ModelFactory_FromFilename`, `PCB_Place3DBody:ModelFactory_FromFilename`, `PCB_Place3DBody:RemovePCBObject` | `pcb_place_3d_body` and `lib_link_3d_model` with a `.wrl`, an `.igs` and an `.stl` model, then with a renamed `.dat` file; count the bodies on the board (and on the footprint) before and after each call | `Model3DExtMayLoad` is a DENY-list (only no extension, `.txt`, `.pdf`, `.csv`, `.json`, `.png`, `.jpg` are refused before the call), so each of these reaches the loader exactly as before. MEASURED on the .02b run with placeholder stubs (NOT real files of those formats): the loader answered NON-Nil with an EMPTY model, 0 catches; `pcb_place_3d_body` said success with `bbox` null and `overall_height_mils` 0 and left one empty body per call; `lib_link_3d_model` said `ok` false but left the body too; a renamed STEP `.dat` LOADED (Altium reads the content). On 2026.10.11.03 an empty model (no readable box AND an overall height of 0) is `MODEL_LOAD_FAILED` "loaded as an empty model", and the body is taken off again inside the same transaction (board: `PCB_DeleteObject`'s broadcast + `RemovePCBObject`, its catch counted at `PCB_Place3DBody:RemovePCBObject`; footprint: `RemoveLibBodyByAddress`, the footprint half only), so the body counts are unchanged; the renamed STEP and a real `.step` still place. Do NOT add an extension to the deny-list: the content decides |
+| P6b | `ResolvePCBBoard:OpenDocument`, `GetPCBBoardAnywhere:OpenDocument` | FIRST the positive controls in 39.3 item 2 (a closed HEALTHY board must still open). Then a 0-byte file renamed `scratch.PcbDoc`: pass it as `pcb_place_components` `board_path`, then list it in a scratch project and run `app_get_preferences` with a sheet focused | THREE possible outcomes for a broken file, not two: 0 = Altium answers Nil; 1 = it raises (counted); and the THIRD, the one measured on the .02b run: an UNCOUNTED Altium modal ("Warning", "File type not recognised.", class (c)) blocking ~13 s, then a NON-Nil BLANK document - `pcb_place_components` placed its part into it and `app_get_preferences` reported its settings. On 2026.10.11.03 neither call reaches the open: `pcb_place_components` (and `pcb_focus_board`) are refused `BOARD_FILE_UNREADABLE` (the message names the path and says "Nothing was opened or changed"), and `app_get_preferences` answers `"pcb": null` (or another open board), with no dialog, 0 catches, and `scratch.PcbDoc` still closed and still 0 bytes. A box = the pre-open file test (`FileLooksLoadable`) let it through: record the file's size and first bytes |
+| P7 | `Lib_Link3DModel:ModelFactory_FromFilename`, `PCB_Place3DBody:ModelFactory_FromFilename`, `PCB_Place3DBody:RemovePCBObject` | `pcb_place_3d_body` and `lib_link_3d_model` with a `.wrl`, an `.igs` and an `.stl` model, then with a renamed `.dat` file; count the bodies on the board (and on the footprint) before and after each call | `Model3DExtMayLoad` is a DENY-list (only no extension, `.txt`, `.pdf`, `.csv`, `.json`, `.png`, `.jpg` are refused before the call), so each of these reaches the loader exactly as before. MEASURED on the .02b run with placeholder stubs (NOT real files of those formats): the loader answered NON-Nil with an EMPTY model, 0 catches; `pcb_place_3d_body` said success with `bbox` null and `overall_height_mils` 0 and left one empty body per call; `lib_link_3d_model` said `ok` false but left the body too; a renamed STEP `.dat` LOADED (Altium reads the content). On 2026.10.11.03 an empty model (no readable box AND an overall height of 0) is `MODEL_LOAD_FAILED` "loaded as an empty model", and the body is taken off again inside the same transaction (board: `PCB_DeleteObject`'s broadcast + `RemovePCBObject`, its catch counted at `PCB_Place3DBody:RemovePCBObject`; footprint: `RemoveLibBodyByAddress`, the footprint half only), so the board's body count is unchanged and the footprint's is unchanged IN MEMORY; the renamed STEP and a real `.step` still place. THE LIBRARY HALF IS IN MEMORY ONLY: the body was also registered with the library board, which the footprint removal leaves alone, and a body created in the session and removed from its current footprint only was measured to come back on save (2026-10-04). The `lib_link_3d_model` message says so: "taken off the footprint IN MEMORY only", `board_still_lists=<n>` (or `null` when the footprint was not current), and "Do NOT save this library: run lib_reload_library". RECORD `board_still_lists`. Then MEASURE THE FILE, never memory: `lib_save_library` on a scratch copy, `lib_read_pcblib_file` on that footprint and count its bodies IN THE FILE; then `lib_reload_library` and count again. A body in the file after the save = the board copy persisted (with `board_still_lists` >= 1 that names the cause): the empty model must then be judged before `PcbLib.Board.AddPCBObject`, which needs a proven read of `OverallHeight` on an unowned body. Do NOT add an extension to the deny-list: the content decides |
 
 The rows below are the per-file stages' sites (Library, Generic, PCB,
 Project), filled in at integration. A `<prop>` / `<id>` in a `where` is
@@ -3494,7 +3541,7 @@ row itself names the pair that popped.
 | Probe | Site (`where`) | Setup and call | What settles it |
 |---|---|---|---|
 | P8 | (none: nothing is read off the editor's selection any more) | **FATAL-IF-WRONG; first in a session of its own, after every other section.** Restart Altium; open a SchLib by hand (a symbol is selected in the editor; nothing created through the bridge). WITHOUT component_name: `lib_add_symbol_lines lines=[{x1:0,y1:0,x2:100,y2:0}]`, `lib_add_pins` (two pins), `lib_add_symbol_rectangle`, `lib_get_pin_list`, `lib_split_pin_functions`, `obj_create object_type=eLine container=component`, `lib_link_footprint footprint_name=X` | Every one answers `NO_COMPONENT` (the edits' message names component_name and lib_set_current_component), no dialog, no count, the library file unchanged and not marked modified. On the second 2026-10-11 build the first call halted the loop ("Undeclared identifier: CurrentPartID", 39 results). A box now is class (b): stop the run and record the unit and line the Script IDE shows |
-| P9 | (none) | Same session, after P8. `lib_add_pins component_name=<the selected symbol>` with two pins, one carrying `owner_part_id=0`; then `lib_add_symbol_lines` and `lib_get_pin_list` WITHOUT a name; then `obj_batch_create component_name=<another symbol> operations=[two eLine items with container=component]` | The pins land on that symbol (visible in the editor without reselecting it: `MarkLibDirtyComp` redraws the component the edit wrote into), the symbol is now current, the explicit pin reads `owner_part_id` 0 and the other the symbol's displayed part (1 on a single-part symbol, never 0: a symbol that reported part 0 is moved to part 1, display mode 0, as `lib_set_current_component` does); the nameless calls act on the same symbol (it is now held). The batch answers `created: 2` on the other symbol (it resolves through an `ISch_Lib` local: the first .03 draft passed its `ISch_Document`). No dialog, no count. `NO_COMPONENT` for a name that exists = the index and the walk both missed it (record whether `lib_set_current_component` finds it) |
+| P9 | (none) | Same session, after P8. `lib_add_pins component_name=<the selected symbol>` with two pins, one carrying `owner_part_id=0`; then `lib_add_symbol_lines` and `lib_get_pin_list` WITHOUT a name; then `obj_batch_create component_name=<another symbol> operations=[two eLine items with container=component]` | The pins land on that symbol (visible in the editor without reselecting it: `MarkLibDirtyComp` redraws the component the edit wrote into), the symbol is now current, the explicit pin reads `owner_part_id` 0 and the other the symbol's CURRENT part, its `CurrentPartID` (1 on a single-part symbol, never 0: a symbol that reported part 0 is moved to part 1, display mode 0, as `lib_set_current_component` does; on a multi-part symbol `CurrentPartID` can differ from the part the editor's spinner shows, so check the owner part, not the picture); the nameless calls act on the same symbol (it is now held). The batch answers `created: 2` on the other symbol (it resolves through an `ISch_Lib` local: the first .03 draft passed its `ISch_Document`), the library reads modified afterwards and the two lines are drawn without reselecting the symbol (`MarkLibDirtyComp`, as every `Lib_Add*` handler; before the review the component-container create paths flagged nothing). `obj_create object_type=eLine container=component component_name=<another symbol>` the same. No dialog, no count. `NO_COMPONENT` for a name that exists = the index and the walk both missed it (record whether `lib_set_current_component` finds it) |
 | P10 | (none: the held component's liveness) | `lib_create_symbol X`, then close and reopen that SchLib in the UI, then `lib_add_pins` without a name; then a by-name edit of ANOTHER symbol in that library: `lib_set_component_description component_name=<another symbol> description=p10`, and `lib_batch_set_params` on it | `NO_COMPONENT` for the nameless add, no dialog, no count: the held component was dropped when its library closed (`LastCreatedLibIsLive`), and the editor's selection is no longer a fallback. The by-name edits succeed with no dialog whatever the liveness answer: `MarkLibDirty` touches no component (the first .03 draft invalidated the held one on every edit). **FATAL-IF-WRONG**: a dialog on the nameless add = `Client.GetDocumentByPath` hands back the same interface after a reopen, so the freed held component was used (record which 39.5 class, and whether two lookups return the same object) |
 | P11 | `ApplyLabelFormat:write` | Scratch SchLib: `lib_set_label_formats ops=[{target: designator, orientation: 90}]`, then `[{target: designator, justification: 12}]` | 1 = an out-of-range ordinal raises, and both fields need a range refusal (0..3, 0..8); 0 = check with `lib_audit_styles` whether the value was stored as given |
 | P12 | `Lib_InstallLibrary:InstallLibrary`, `Lib_UninstallLibrary:UnInstallLibrary` | Install and uninstall a real scratch `.SchLib`; then install a RELATIVE name that does not exist; then uninstall a name that is installed under another spelling of its path | 0 for the real file; the relative and respelled cases are still asked and show whether either call raises (the absolute-missing and never-installed cases are refused before the call) |
@@ -3508,7 +3555,7 @@ row itself names the pair that popped.
 | P20 | `Gen_PlaceHarnessConnector:HarnessType` | `sch_place_harness_connector` with `harness_type` set | 1 = the member does not exist; drop the write |
 | P21 | `Gen_PlaceCrossSheetConnector:Side` | `sch_place_cross_sheet_connector` with `side=left`, then `side=right` | 1 = the member does not exist; drop the write |
 | P22 | `ProcessSchDocObjects:owner-remove` | `obj_delete object_type=eSheetEntry` with a filter matching one entry on a hierarchical sheet | 0 and the entry gone = removal through the owning symbol works; 1 = the owner refused and the document-level fallback ran |
-| P23 | (none: the read is no longer counted) | **FATAL-IF-WRONG (one unproven identifier left: `Board.FindDominantRuleForObject`, unchanged since before 2026-10-11 and never yet run).** First, zero-risk: `pcb_get_rule_properties name=RoutingVias` and record `rule_kind` and `descriptor`. Then `pcb_normalize_vias` on a scratch board with one free via and only the default RoutingVias rule; then on a board whose only vias are inside a component | Record the reply. Every rule is now asked only `Name` and `Descriptor` (both proven), the values are parsed from the descriptor (`PreferedWidth=` / `PreferedHoleWidth=`, mil or mm), and the kind is the LITERAL 11 (the second 2026-10-11 build read `PreferedWidth` off the dominant `IPCB_Rule`; the first .03 draft read it through an `IPCB_RoutingViaStyleRule` iterator local, with `eRule_RoutingViaStyle` - all never run, for every rule on every board). Numeric descriptor and `rule_kind` 11: `free: 1`, `changed: 1`, `via_rule_values` >= 1, `no_rule_values: 0`, the via at the rule's preferred size and hole. Template descriptor ("Templates Used To Check Via: ..."): `via_rule_values: 0`, `no_rule_values: 1`, `changed: 0` - not a defect, it records that the values must come from elsewhere. `rule_kind` not 11 with `via_rule_values` >= 1 and `no_rule_values: 1` = the literal is wrong (record the number). The component-only board: `free: 0`, nothing read, nothing changed. A box = class (b) on `FindDominantRuleForObject` |
+| P23 | (none: the read is no longer counted) | **FATAL-IF-WRONG (one unproven identifier left: `Board.FindDominantRuleForObject`, unchanged since before 2026-10-11 and never yet run).** First, zero-risk: `pcb_get_rule_properties name=RoutingVias` and record `rule_kind` and `descriptor`. Then `pcb_normalize_vias` on a scratch board with one free via and only the default RoutingVias rule; then on a board whose only vias are inside a component | Record the reply. Every rule is now asked only `Name` and `Descriptor` (both proven), the values are parsed from the descriptor (`PreferedWidth=` / `PreferedHoleWidth=`, mil or mm), and the kind is the LITERAL 11 (the second 2026-10-11 build read `PreferedWidth` off the dominant `IPCB_Rule`; the first .03 draft read it through an `IPCB_RoutingViaStyleRule` iterator local, with `eRule_RoutingViaStyle` - all never run, for every rule on every board). Numeric descriptor and `rule_kind` 11: `free: 1`, `changed: 1`, `via_rule_values` >= 1, `no_rule_values: 0`, the via at the rule's preferred size and hole. Template descriptor ("Templates Used To Check Via: ..."): `via_rule_values: 0`, `no_rule_values: 1`, `changed: 0` - not a defect, it records that the values must come from elsewhere. `rule_kind` not 11 with `via_rule_values` >= 1 and `no_rule_values: 1` = the literal is wrong (record the number). The component-only board: `free: 0`, nothing read, nothing changed, the board NOT marked modified (it is marked only when `changed` > 0). ORDER MATTERS: the zero-risk `pcb_get_rule_properties` step first, so the ordinal is known before the unproven call runs; the dominant-rule lookup is made only when some rule gave values (a template-form board never makes it), and it runs in a read-only pass BEFORE `PCBServer.PreProcess`, so a halt there leaves no PreProcess open. A box = class (b) on `FindDominantRuleForObject`; it CANNOT tell an unknown identifier from a refused Integer kind argument (the 11 is passed in an Integer variable; Integer-for-enum precedent exists only for other parameters), and either one means the call must change - record the line the Script IDE shows |
 | P24 | `PCB_PlaceEmbeddedBoard:XLocation`, `PCB_PlaceEmbeddedBoard:YLocation`, `PCB_PlaceEmbeddedBoard:DocumentPath`, `PCB_PlaceEmbeddedBoard:RowCount`, `PCB_PlaceEmbeddedBoard:ColCount`, `PCB_PlaceEmbeddedBoard:RowSpacing`, `PCB_PlaceEmbeddedBoard:ColSpacing`, `PCB_PlaceEmbeddedBoard:MirrorFlag` | One `pcb_place_embedded_board` call on a scratch board | Each row names a member `IPCB_EmbeddedBoard` lacks; for the locations, position the board with `MoveByXY` from its bounding rectangle instead |
 | P25 | `PCB_SetMechLayerKind:AddPair` | `pcb_set_mech_layer_kind` with a paired kind and `partner_layer` on two layers that are ALREADY paired | 0 = `AddPair` is idempotent; 1 = it raises on an existing pair, and the add needs a `PairDefined` check too |
 | P26 | `PCB_ModifyLayer:CopperThickness`, `PCB_ModifyLayer:DielectricType`, `PCB_ModifyLayer:DielectricHeight`, `PCB_ModifyLayer:DielectricConstant`, `PCB_ModifyLayer:DielectricMaterial`, `DielectricTypeToken:Dielectric` | `pcb_modify_layer` on Mechanical1 with `copper_thickness_mils`, and on TopSolder with `dielectric_constant` | A row names a member that layer kind lacks: refuse it for that kind up front |
