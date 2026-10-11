@@ -448,12 +448,19 @@ def register_application_tools(mcp):
         was last written inside the current tick and the flag reads clean
         (probably written - FileAge has 2 s resolution - and it stays on
         the record for one more write); ``bridge_record_closed`` (with the
-        warning) when no open document holds the edit any more.
+        warning) when no open document holds the edit any more. The
+        record holds absolute paths only: a mark whose bare name resolved
+        to nothing records nothing (its reply says ``found: false``).
         Documents nobody edited are still left alone.
         ``bridge_record_pending`` is what the record still holds.
         ``free_documents_not_reached`` lists free documents whose bare
-        name the walk could not resolve to exactly one open document; it
-        refuses to guess rather than write a namesake.
+        listing the walk could not resolve to the free document itself:
+        a bare name never resolves to a member of a real project (focused
+        or not), and a name several listed documents carry is not
+        resolved at one, so the walk lists the free copy here rather than
+        write or skip its namesake. A listed copy was NOT examined: its
+        edits, unless the bridge made them, are not written by this pass
+        (save it from its own tab, or open it by its absolute path).
 
         Args:
             include_libraries: also write .SchLib / .PcbLib documents that

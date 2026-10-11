@@ -274,7 +274,11 @@ def test_obj_modify_reports_the_read_back_not_a_constant(name):
     assert "Marked := True;" not in body, (
         "marked_modified is a constant again; it said true on 2026-10-10 "
         "for a sheet that read modified:false")
-    assert "Marked := MarkDocDirty(DocPath);" in body
+    # ProcessDocByPath marks the caller's absolute path when it has one
+    # (review of c8ee69e): a free sheet's DocumentName is bare.
+    assert {"ProcessActiveDoc": "Marked := MarkDocDirty(DocPath);",
+            "ProcessDocByPath": "Marked := MarkDocDirty(SchDocMarkPath(DocPath, SchDoc));",
+            }[name] in body
     assert "MarkJson := MarkOutcomeJson(0);" in body
     assert "',\"mark\":' + MarkJson + HintJson" in body
     assert "If Not Marked Then" in body

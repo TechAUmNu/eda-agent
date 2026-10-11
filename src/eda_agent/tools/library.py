@@ -3813,8 +3813,11 @@ def register_library_tools(mcp):
             written_to_disk, saved, save_note, note}``.
             ``marked_modified`` is the library's modified flag READ BACK
             after the mark, and ``mark`` says which open document the mark
-            found (``found``, ``via``, ``modified_read``,
-            ``focused_modified_read``, ``problem``); on 2026-10-10 the
+            found (``path``, ``file_name``, ``found``, ``via``,
+            ``modified_read``, ``focused_modified_read``,
+            ``recorded_for_save_all`` - true when the library went on the
+            bridge's record under its ABSOLUTE path, the only kind
+            ``app_save_all`` writes from -, ``problem``); on 2026-10-10 the
             flag read false on every write while the tab showed '*'. When
             it does not register, ``save_note`` names lib_save_library,
             and ``app_save_all`` writes the library anyway from the

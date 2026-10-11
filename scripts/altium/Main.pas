@@ -105,9 +105,9 @@ Var
       tab showed '*', so app_save_all's default (libraries) and
       only_modified (sheets) would have left real edits unwritten.
       MarkDocDirty puts the RESOLVED ABSOLUTE path of what it marks on it
-      as KEY*AGE (DocPathKey and the file's age then; a bare name only when
-      nothing resolved - see RecordBridgeEdit for the review that made both
-      rules); SaveOneDocByDocRef and SaveBridgeRecordSweep write a recorded
+      as KEY*AGE (DocPathKey and the file's age then; NEVER a bare name -
+      see RecordBridgeEdit for the reviews that made both rules);
+      SaveOneDocByDocRef and SaveBridgeRecordSweep write a recorded
       document even when its flag reads clean, and any write of the file,
       by any route, retires the entry.
       SaveBridgeRecordPaths / SaveBridgeRecordUnwritten report, per pass,
@@ -123,7 +123,8 @@ Var
     SaveBridgeRecordClosed : String;
     SaveAttemptedKeys : String;
     { Free documents the save walk could not reach: a bare DM_FullPath that  }
-    { names no one open document (ListedServerDoc refuses to guess). Listed  }
+    { resolves to no free document (several listed documents carry the name, }
+    { or only a project member or nothing answers it). Listed                }
     { by app_save_all as free_documents_not_reached, so a pass never skips   }
     { a document silently; a bridge-edited one is written by the record      }
     { sweep from its absolute key all the same.                              }
@@ -135,6 +136,11 @@ Var
     MarkLastPath : String;
     MarkLastFile : String;
     FindDocVia : String;
+    { The DocPathKeys of the project members (real projects only) that      }
+    { carry the name DocNameCount was last asked about, '|'-separated. A    }
+    { bare request comes only from a FREE document, so FindOpenServerDoc    }
+    { never answers one with these files (review of c8ee69e).               }
+    DocNameMemberKeys : String;
     MarkLastVia : String;
     MarkLastFound : Boolean;
     MarkLastModified : Boolean;
@@ -529,6 +535,9 @@ End;
 { resolved left the project's sheet as the "one" match for its scratch      }
 { copy). A closed project member counts too: refusing a guess costs a       }
 { reported miss, a wrong guess marks and writes somebody else's file.       }
+{ The same pass leaves DocNameMemberKeys: the absolute keys of the members  }
+{ of REAL projects (I >= 0) that carry the name, which FindOpenServerDoc    }
+{ never returns for a bare request.                                         }
 Function DocNameCount(FilePath : String) : Integer;
 Var
     Workspace : IWorkspace;
@@ -538,6 +547,7 @@ Var
     Full, WantName, Keys, Key : String;
 Begin
     Result := 0;
+    DocNameMemberKeys := '';
     WantName := DocNameKey(FilePath);
     If WantName = '' Then Exit;
     Keys := '';
@@ -566,12 +576,31 @@ Begin
             Try Full := Doc.DM_FullPath; Except Full := ''; End;
             If DocNameKey(Full) <> WantName Then Continue;
             Key := ListedDocKey(Full, I, J);
+            If (I >= 0) And LooksAbsolutePath(Trim(Full))
+                And (Pos('|' + Key + '|', '|' + DocNameMemberKeys + '|') = 0) Then
+            Begin
+                If DocNameMemberKeys <> '' Then DocNameMemberKeys := DocNameMemberKeys + '|';
+                DocNameMemberKeys := DocNameMemberKeys + Key;
+            End;
             If Pos('|' + Key + '|', '|' + Keys + '|') > 0 Then Continue;
             If Keys <> '' Then Keys := Keys + '|';
             Keys := Keys + Key;
             Result := Result + 1;
         End;
     End;
+End;
+
+{ Is this open document one of the project members DocNameCount just listed }
+{ (DocNameMemberKeys)? A document with no absolute FileName never is.        }
+Function IsProjectMemberFile(Doc : IServerDocument) : Boolean;
+Var
+    Key : String;
+Begin
+    Result := False;
+    If Doc = Nil Then Exit;
+    Key := ServerDocFileName(Doc);
+    If Not LooksAbsolutePath(Trim(Key)) Then Exit;
+    Result := Pos('|' + DocPathKey(Key) + '|', '|' + DocNameMemberKeys + '|') > 0;
 End;
 
 { Find the open IServerDocument for a path however the caller spelled it,    }
@@ -586,17 +615,26 @@ End;
 { DocIsModified on a closed project member read that copy's flag.            }
 {                                                                              }
 { So the two kinds of request are answered by different rules:               }
-{   ABSOLUTE  the exact lookup (rejected when the document it returns names  }
-{             another absolute file), then a walk that accepts a listed      }
-{             document only when its DM_FullPath or its own FileName IS the  }
-{             requested path (key equality, never a name match), then the    }
-{             focused document on the same key equality.                     }
-{   BARE      what a handler acting on the CURRENT document passes           }
-{             (ProcessActiveDoc's DocumentName), so the FOCUSED document     }
-{             answers first when its file name matches; otherwise the name   }
-{             must be carried by exactly ONE listed document (DocNameCount,  }
-{             counted before any lookup) and that document must resolve.     }
-{             Several, and the request is refused as ambiguous_name.         }
+{   ABSOLUTE  the exact lookup, accepted only when the document it returns   }
+{             has THIS file's key as its FileName (an empty or bare FileName }
+{             proves nothing), then a walk that accepts a listed document    }
+{             only when its DM_FullPath or its own FileName IS the requested }
+{             path (key equality, never a name match), then the focused      }
+{             document on the same key equality.                             }
+{   BARE      only a FREE document has a bare name (a project member's       }
+{             DM_FullPath and DocumentName are absolute), so NO candidate    }
+{             that is a member of a real project is ever accepted - not the  }
+{             focused document, not the walk's, not the plain lookup's       }
+{             (review of c8ee69e: with the carrier sheet focused, the free   }
+{             copy's bare listing resolved to the sheet, so the save walk    }
+{             skipped a hand-edited copy as "unmodified", and a bare mark    }
+{             for an edit to the non-focused copy marked and recorded the    }
+{             sheet). Then the FOCUSED document answers when its file name   }
+{             matches (ProcessActiveDoc passes the current sheet's           }
+{             DocumentName); otherwise the name must be carried by exactly   }
+{             ONE listed document (DocNameCount, counted before any lookup)  }
+{             and that document must resolve. Several, and the request is    }
+{             refused as ambiguous_name.                                     }
 { FindDocVia says which route answered: path, walk, walk_name, focused,      }
 { ambiguous_name or none.                                                    }
 Function FindOpenServerDoc(FilePath : String) : IServerDocument;
@@ -618,14 +656,17 @@ Begin
 
     If Bare Then
     Begin
+        { Counted FIRST: the same pass lists the project members a bare     }
+        { request must never resolve to (DocNameMemberKeys).                 }
+        NameHits := DocNameCount(FilePath);
         Focused := FocusedServerDoc(0);
-        If (Focused <> Nil) And (DocNameKey(ServerDocFileName(Focused)) = WantName) Then
+        If (Focused <> Nil) And (DocNameKey(ServerDocFileName(Focused)) = WantName)
+            And (Not IsProjectMemberFile(Focused)) Then
         Begin
             Result := Focused;
             FindDocVia := 'focused';
             Exit;
         End;
-        NameHits := DocNameCount(FilePath);
         If NameHits > 1 Then
         Begin
             FindDocVia := 'ambiguous_name';
@@ -638,7 +679,7 @@ Begin
         If Result <> Nil Then
         Begin
             Got := ServerDocFileName(Result);
-            If LooksAbsolutePath(Trim(Got)) And (DocPathKey(Got) <> Want) Then
+            If DocPathKey(Got) <> Want Then
                 Result := Nil;
         End;
         If Result <> Nil Then
@@ -683,8 +724,9 @@ Begin
                 Begin
                     { The one listed document of this name (NameHits <= 1).   }
                     { A bare lookup may still have resolved some other open   }
-                    { file, so its own name must match too.                   }
-                    If DocNameKey(Got) = WantName Then
+                    { file, so its own name must match too, and it must not   }
+                    { be a project member.                                    }
+                    If (DocNameKey(Got) = WantName) And (Not IsProjectMemberFile(Cand)) Then
                     Begin
                         Result := Cand;
                         FindDocVia := 'walk_name';
@@ -705,7 +747,8 @@ Begin
     Begin
         { No listed document resolved: the plain lookup, on the same terms. }
         Try Result := Client.GetDocumentByPath(FilePath); Except Result := Nil; End;
-        If (Result <> Nil) And (DocNameKey(ServerDocFileName(Result)) <> WantName) Then
+        If (Result <> Nil) And ((DocNameKey(ServerDocFileName(Result)) <> WantName)
+            Or IsProjectMemberFile(Result)) Then
             Result := Nil;
         If Result <> Nil Then FindDocVia := 'path';
         Exit;
@@ -729,9 +772,12 @@ End;
 { * ABSOLUTE KEYS ONLY. It kept the caller's spelling, which for a free sheet  }
 {   is a bare name, and a bare entry matched every file of that name: editing  }
 {   a scratch copy put the clean carrier sheet on the record and              }
-{   app_save_all only_modified rewrote it. A bare entry is kept only when     }
-{   nothing resolved, and it answers for a file only while exactly one listed }
-{   document carries the name (DocNameCount).                                  }
+{   app_save_all only_modified rewrote it. NO BARE ENTRY AT ALL (review of    }
+{   c8ee69e): one kept "when nothing resolved" carried no age worth checking, }
+{   answered for the carrier sheet as soon as its scratch copy closed (the    }
+{   2026-10-06 UniqueID churn again), survived a Ctrl+S on it, and could      }
+{   never cause the intended file to be written. A mark that resolves nothing }
+{   reports found:false with a save_hint instead.                             }
 { * THE ENTRY DIES WITH ANY WRITE. It was cleared only by app_save_all,        }
 {   lib_save_library and a close, so the user's Ctrl+S, RefreshSchLibFromDisk, }
 {   sch_reload_document and proj_close all left it behind and the next save-all}
@@ -832,51 +878,35 @@ Begin
         End;
         Key := BridgeEntryKey(Entry);
         If Key = '' Then Continue;
-        If LooksAbsolutePath(Key) Then
-        Begin
-            If Key <> Want Then Continue;
-            If FileAgeOrNone(Key) = BridgeEntryStamp(Entry) Then
-                Result := True
-            Else
-                BridgeEditedPaths := BridgeRecordWithout(BridgeEditedPaths, Key);
-            Exit;
-        End;
-        If (Key = DocNameKey(FilePath)) And (DocNameCount(FilePath) = 1) Then
-        Begin
-            Result := True;
-            Exit;
-        End;
+        If Key <> Want Then Continue;
+        If FileAgeOrNone(Key) = BridgeEntryStamp(Entry) Then
+            Result := True
+        Else
+            BridgeEditedPaths := BridgeRecordWithout(BridgeEditedPaths, Key);
+        Exit;
     End;
 End;
 
 { Put a file on the record, stamped with its age NOW: a second edit after an }
-{ outside save restamps it, so that edit is written too.                    }
+{ outside save restamps it, so that edit is written too. An ABSOLUTE path   }
+{ only; a bare name is refused here, whoever asks.                          }
 Procedure RecordBridgeEdit(FilePath : String);
 Var
     Key : String;
 Begin
     Key := DocPathKey(FilePath);
-    If Key = '' Then Exit;
+    If Not LooksAbsolutePath(Key) Then Exit;
     BridgeEditedPaths := BridgeRecordWithout(BridgeEditedPaths, Key);
     If BridgeEditedPaths <> '' Then BridgeEditedPaths := BridgeEditedPaths + '|';
     BridgeEditedPaths := BridgeEditedPaths + Key + '*' + IntToStr(FileAgeOrNone(FilePath));
 End;
 
-{ Drop a file once it is on disk or gone. A bare entry for its name goes     }
-{ with it only when the absolute entry went too, or when this is the one     }
-{ listed file of that name - the same terms a bare entry answers on - so     }
-{ writing one file never strips the entry protecting its namesake.           }
+{ Drop a file once it is on disk or gone: its own key only, so writing one   }
+{ file never strips the entry of its namesake.                               }
 Procedure ForgetBridgeEdit(FilePath : String);
-Var
-    Key, Before : String;
 Begin
     If Trim(FilePath) = '' Then Exit;
-    Key := DocPathKey(FilePath);
-    Before := BridgeEditedPaths;
-    BridgeEditedPaths := BridgeRecordWithout(BridgeEditedPaths, Key);
-    If LooksAbsolutePath(Key) And ((BridgeEditedPaths <> Before)
-        Or (DocNameCount(FilePath) <= 1)) Then
-        BridgeEditedPaths := BridgeRecordWithout(BridgeEditedPaths, DocNameKey(FilePath));
+    BridgeEditedPaths := BridgeRecordWithout(BridgeEditedPaths, DocPathKey(FilePath));
 End;
 
 { The record's file keys, without their stamps, for a reply. }
@@ -1001,6 +1031,14 @@ Begin
         Begin
             RecordBridgeEdit(DiskName);
             MarkLastRecorded := True;
+            { ONE KEY PER FILE. The caller's spelling went on before the     }
+            { lookup; when it names this file another way (a subst drive, an }
+            { 8.3 or UNC path) it is dropped, or the sweep would file it as  }
+            { bridge_record_closed ("edit is lost") after the DiskName entry }
+            { was written.                                                   }
+            If LooksAbsolutePath(Trim(FilePath))
+                And (DocPathKey(FilePath) <> DocPathKey(DiskName)) Then
+                BridgeEditedPaths := BridgeRecordWithout(BridgeEditedPaths, DocPathKey(FilePath));
         End;
         Try
             ServerDoc.SetModified(True);
@@ -1027,10 +1065,10 @@ Begin
             If FocusedMod Then MarkLastFocused := 1 Else MarkLastFocused := 0;
             If FocusedMod Then MarkLastModified := True;
         End;
-    End
-    Else If Not LooksAbsolutePath(Trim(FilePath)) Then
-        { Nothing resolved: the bare name is all there is to keep. }
-        RecordBridgeEdit(FilePath);
+    End;
+    { Nothing resolved from a bare name: NOTHING goes on the record (a bare }
+    { entry names no file - see RecordBridgeEdit); the reply says found:    }
+    { false and carries a save_hint.                                        }
 
     If Not MarkLastFound Then
         MarkLastError := 'no open document matches this path ('
@@ -1046,6 +1084,33 @@ Var
     Ignored : Boolean;
 Begin
     Ignored := MarkDocDirty(FilePath);
+End;
+
+{ THE PATH TO MARK FOR A SHEET A HANDLER RESOLVED ITSELF. When the caller    }
+{ named it by an ABSOLUTE path, that path: it names the file edited. Only    }
+{ otherwise the sheet's DocumentName (absolute for a project member, a bare  }
+{ name for a free document). Review of c8ee69e: sch_mirror_component        }
+{ resolved its sheet from doc_path and marked SchDoc.DocumentName, a bare   }
+{ name for the free copy, which with the carrier sheet focused marked and   }
+{ recorded the carrier sheet.                                               }
+Function SchDocMarkPath(DocPath : String; SchDoc : ISch_Document) : String;
+Begin
+    Result := DocPath;
+    If LooksAbsolutePath(Trim(DocPath)) Then Exit;
+    Result := '';
+    If SchDoc = Nil Then Exit;
+    Try Result := SchDoc.DocumentName; Except Result := ''; End;
+End;
+
+{ A BARE document path that several listed documents carry. A handler that  }
+{ resolves its sheet with SchServer.GetSchDocumentByPath(bare) would edit an }
+{ arbitrary namesake, so it refuses AMBIGUOUS_NAME before touching anything. }
+Function AmbiguousBareDocName(DocPath : String) : Boolean;
+Begin
+    Result := False;
+    If Trim(DocPath) = '' Then Exit;
+    If LooksAbsolutePath(Trim(DocPath)) Then Exit;
+    Result := DocNameCount(DocPath) > 1;
 End;
 
 {..............................................................................}
@@ -1301,7 +1366,10 @@ End;
 { 2026-10-11 found that the pass then never attempted the free scratch copy   }
 { or library the field run edited, silently. So a bare name goes through      }
 { FindOpenServerDoc (the focused document by name, else the one listed        }
-{ document of that name), and when that refuses (ambiguous) or misses, the    }
+{ document of that name - and NEVER a member of a real project, or a focused  }
+{ carrier sheet would answer for its free copy: review of c8ee69e found the   }
+{ copy then skipped as unmodified on the sheet's flag, its real edit dropped  }
+{ silently), and when that refuses (ambiguous) or misses, the                 }
 { answer is Nil: NO GUESS. A plain GetDocumentByPath on a bare name can       }
 { return a namesake, and the walk would then file the namesake's write under  }
 { this listing's record entry. SaveOneDocByDocRef lists what it could not     }

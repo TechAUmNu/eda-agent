@@ -36,6 +36,25 @@ left the modified flag reading false while the tabs showed '*'):
    GetDocumentByPath, which can return a NAMESAKE; it now refuses to
    guess and lists what it could not reach.
 
+REVIEW OF c8ee69e (the repair above), sections 7-10 below:
+
+9. A bare name still reached a project member: FindOpenServerDoc's bare
+   branch answered with the FOCUSED document by name, so with the carrier
+   sheet focused the free copy's bare listing resolved to the sheet - a
+   hand-edited copy was skipped as "unmodified" on the sheet's flag (or the
+   sheet written twice), and a bare mark for an edit to the NON-focused
+   copy (sch_mirror_component doc_path, doc: scope) marked and recorded the
+   sheet. A bare request now never resolves to a member of a real project.
+10. A bare record entry kept "when nothing resolved" answered for the clean
+    carrier sheet once its scratch copy closed, and survived a Ctrl+S on
+    it. No bare entry is ever recorded.
+11. A bare doc: scope edited whatever GetSchDocumentByPath(bare) returned
+    before the mark refused as ambiguous; it is now refused first.
+12. An absolute request accepted an exact-lookup answer whose FileName was
+    not absolute, and a subst spelling left two record keys for one file
+    (a false 'edit is lost'). sch_reload_document still judged its save by
+    the flag alone.
+
 These tests EXECUTE the real Pascal (tests/pascal_eval.py translates it)
 on a fixture workspace modelled on the field: a free scratch copy whose
 DM_FullPath is a bare name, plus the carrier project's sheet of the same
@@ -217,13 +236,13 @@ class Client:
 
 
 _MAIN_NAMES = [
-    "LooksAbsolutePath", "DocPathKey", "DocNameKey", "DocPathsMatch",
+    "LooksAbsolutePath", "DocPathKey", "DocNameKey",
     "ServerDocFileName", "FocusedServerDoc", "ListedDocKey", "DocNameCount",
-    "FindOpenServerDoc", "FileAgeOrNone", "BridgeEntryKey",
+    "IsProjectMemberFile", "FindOpenServerDoc", "FileAgeOrNone", "BridgeEntryKey",
     "BridgeEntryStamp", "BridgeRecordWithout", "PathListWith",
     "BridgeEditRecorded", "RecordBridgeEdit", "ForgetBridgeEdit",
     "BridgeRecordKeys", "ForgetBridgeEditsIfClosed", "ProjectMemberPaths",
-    "MarkDocDirty", "MarkDocDirtyByPath",
+    "MarkDocDirty", "MarkDocDirtyByPath", "AmbiguousBareDocName",
     "DocIsModified", "ListedServerDoc", "AgeIsThisTick", "WriteDocAndNote",
     "SaveOneDocByDocRef", "SaveProjectMembers", "SaveAllDirty",
     "SaveBridgeRecordSweep",
@@ -236,7 +255,7 @@ _GLOBALS = {
     "SaveUnresolvedPaths": "",
     "SaveAttempts": 0, "SaveSkipped": 0, "SaveSkippedPaths": "",
     "SaveSkipCleanLibs": False, "SaveSkipCleanSheets": False,
-    "FindDocVia": "none", "MarkLastPath": "", "MarkLastFile": "",
+    "FindDocVia": "none", "DocNameMemberKeys": "", "MarkLastPath": "", "MarkLastFile": "",
     "MarkLastVia": "none", "MarkLastFound": False,
     "MarkLastModified": False, "MarkLastFocused": -1, "MarkLastError": "",
 }
@@ -699,3 +718,304 @@ def test_the_evaluator_does_not_swallow_python_errors():
         def Missing(self):
             raise PascalError("altium raised")
     assert ns["F"](Raises()) == 7
+
+
+# ---------------------------------------------------------------------------
+# 7. Review of c8ee69e: a bare name never reaches a project member
+# ---------------------------------------------------------------------------
+
+def _pipe_list(value):
+    return [p.strip().upper() for p in value.split("|") if p.strip()]
+
+
+@pytest.mark.parametrize("bare", ["nil", "first"])
+def test_a_hand_edit_to_the_free_copy_is_never_called_unmodified(bare):
+    """The carrier sheet is focused and the user hand-edits the free scratch
+    copy (its flag registers). On c8ee69e the walk looked the copy's bare
+    listing up through FindOpenServerDoc, whose bare branch answered with
+    the FOCUSED document by name: the carrier sheet. only_modified then
+    skipped 'the copy' as unmodified (it read the clean sheet's flag) and
+    free_documents_not_reached did not list it - a real edit dropped while
+    the reply called the copy clean."""
+    w = World(bare=bare, focus="sheet")
+    w.scratch.Modified = True
+    w.save_all(only_modified=True)
+    assert w.sheet.saves == 0
+    assert BARE.upper() not in _pipe_list(w.SaveSkippedPaths), (
+        "the edited copy was reported as skipped_unmodified")
+    assert w.scratch.saves == 1 or BARE.upper() in _pipe_list(w.SaveUnresolvedPaths), (
+        "the edited copy was neither written nor listed as not reached")
+
+
+@pytest.mark.parametrize("bare", ["nil", "first"])
+def test_a_full_save_writes_the_focused_sheet_once_not_for_its_namesake(bare):
+    """only_modified=false: on c8ee69e the copy's listing resolved to the
+    focused carrier sheet, which was then written twice."""
+    w = World(bare=bare, focus="sheet")
+    w.save_all()
+    assert w.sheet.saves == 1, "the carrier sheet was written for its namesake"
+
+
+@pytest.mark.parametrize("flag_sticks", [True, False])
+def test_marking_the_bare_name_never_marks_the_focused_project_sheet(flag_sticks):
+    """Gen_MirrorSchComponent (doc_path set to the free copy) and
+    ProcessDocByPath (scope doc:X.SchDoc) edit a NON-focused document and
+    mark its bare name. With the carrier sheet focused, c8ee69e's
+    focused-first rule marked the sheet (marks=2) and put its absolute key
+    on the record, so only_modified wrote the clean sheet and never the
+    edited copy."""
+    w = World(focus="sheet", flag_sticks=flag_sticks)
+    w.MarkDocDirty(BARE)
+    assert w.sheet.marks == 0 and w.sheet.Modified is False, (
+        "a project member was marked for a bare-name request")
+    assert _key(SHEET) not in w.record_keys()
+    w.save_all(only_modified=True)
+    assert w.sheet.saves == 0
+
+
+def test_a_bare_name_with_one_listed_document_still_finds_the_free_copy():
+    """The rule rejects project members only: a free copy that is the one
+    listed document of its name still answers its bare name."""
+    w = World(bare="first", focus=None, sheet_open=False)
+    w.project.docs = []
+    assert w.FindOpenServerDoc(BARE) is w.scratch
+    assert w.FindDocVia == "walk_name"
+
+
+def test_a_bare_name_carried_only_by_a_project_member_is_refused():
+    w = World(bare="first", focus="sheet")
+    w.free.docs = [d for d in w.free.docs if d.DM_FullPath != BARE]
+    w.client.open.remove(w.scratch)
+    assert w.FindOpenServerDoc(BARE) is None
+
+
+def test_an_ambiguous_mark_leaves_no_entry_that_writes_the_namesake_later():
+    """Probe on c8ee69e: the bare mark refused as ambiguous_name but kept
+    'MULTIVIEWER__MCU_UI.SCHDOC*-1' on the record. Once the scratch copy
+    closed, DocNameCount dropped to 1 and that entry answered for the clean
+    carrier sheet: only_modified wrote it from written_by_bridge_record -
+    the 2026-10-06 UniqueID churn."""
+    w = World(focus="lib", flag_sticks=False)
+    w.MarkDocDirty(BARE)
+    assert w.MarkLastVia == "ambiguous_name"
+    assert w.BridgeEditedPaths == "", "a bare entry went on the record"
+    w.client.CloseDocument(w.scratch)
+    w.save_all(only_modified=True)
+    assert w.sheet.saves == 0, "the clean carrier sheet was written from a bare entry"
+    assert w.BridgeEditedPaths == ""
+
+
+def test_a_ctrl_s_on_the_sheet_leaves_no_bare_entry_answering_for_it():
+    """The second probe: after the ambiguous mark and the copy's close, a
+    Ctrl+S on the carrier sheet left BridgeEditRecorded(SHEET) True,
+    because a bare entry carries no stamp worth checking."""
+    w = World(focus="lib", flag_sticks=False)
+    w.MarkDocDirty(BARE)
+    w.client.CloseDocument(w.scratch)
+    w.disk.touch(SHEET)
+    assert w.BridgeEditRecorded(SHEET) is False
+
+
+def test_record_bridge_edit_refuses_a_bare_key():
+    w = World()
+    w.RecordBridgeEdit(BARE)
+    assert w.BridgeEditedPaths == ""
+
+
+def test_ambiguous_bare_doc_name_is_what_the_doc_path_handlers_refuse_on():
+    w = World(focus="scratch")
+    assert w.AmbiguousBareDocName(BARE) is True          # copy + project sheet
+    assert w.AmbiguousBareDocName(SCRATCH) is False      # absolute names one file
+    assert w.AmbiguousBareDocName("height_copy.PcbLib") is False
+    assert w.AmbiguousBareDocName("") is False
+
+
+# ---------------------------------------------------------------------------
+# 8. The doc_path handlers mark the document they edited
+# ---------------------------------------------------------------------------
+
+def _generic_body(name):
+    from tests.pascal_source import strip_comments
+    return strip_comments(load(_ALTIUM / "Generic.pas", minimum=100)[name])
+
+
+def test_mirror_marks_the_absolute_doc_path_it_edited():
+    """sch_mirror_component resolved SchDoc from doc_path and marked
+    SchDoc.DocumentName - a bare name for a free document, which with the
+    carrier sheet focused marked (and recorded) the carrier sheet."""
+    body = _generic_body("Gen_MirrorSchComponent")
+    assert "MarkDocDirtyByPath(SchDoc.DocumentName)" not in body
+    assert "Marked := MarkDocDirty(SchDocMarkPath(DocPath, SchDoc));" in body
+    assert "',\"mark\":' + MarkJson" in body
+    refuse = body.index("If AmbiguousBareDocName(DocPath) Then")
+    assert refuse < body.index("SchDoc := SchServer.GetSchDocumentByPath(DocPath)")
+
+
+def test_sch_doc_mark_path_prefers_the_absolute_request():
+    ns = build(load(_ALTIUM / "Main.pas", minimum=20),
+               ["LooksAbsolutePath", "SchDocMarkPath"], {})
+
+    class Doc:
+        DocumentName = BARE
+    assert ns["SchDocMarkPath"](SCRATCH, Doc()) == SCRATCH
+    assert ns["SchDocMarkPath"]("", Doc()) == BARE
+    assert ns["SchDocMarkPath"](BARE, Doc()) == BARE
+
+
+def _process_doc_by_path(w, doc_path, mode="modify"):
+    """Run ProcessDocByPath on the fixture. GetSchDocumentByPath on a bare
+    name returns the FIRST open document of that name - an arbitrary
+    namesake - and ProcessSchDocObjects records which document it edited."""
+    edited = []
+
+    class SchServer:
+        @staticmethod
+        def GetSchDocumentByPath(path):
+            return w.client.GetDocumentByPath(path) if _absolute(path) else next(
+                (d for d in w.client.open
+                 if ntpath.basename(d.FileName).upper() == path.upper()), None)
+
+    def process(doc, *_args):
+        edited.append(doc)
+        return ""
+    ns = w.ns
+    ns.update(SchServer=SchServer, ProcessSchDocObjects=process,
+              BuildErrorResponse=lambda rid, code, msg: {"error": code, "msg": msg},
+              BuildSuccessResponse=lambda rid, body: {"ok": body},
+              MarkOutcomeJson=lambda d: "{}", MarkSaveHint=lambda a, b: "",
+              EscapeJsonString=lambda s: s, BoolToJsonStr=lambda b: "true" if b else "false",
+              RenderPropertyDiagJson=lambda d: "{}", ModifyOutcomeJson=lambda d: "")
+    main = load(_ALTIUM / "Main.pas", minimum=20)
+    build(main, [n for n in ["SchDocMarkPath"] if n in main], ns)
+    build(load(_ALTIUM / "Generic.pas", minimum=100), ["ProcessDocByPath"], ns)
+    return ns["ProcessDocByPath"](doc_path, 1, "", "", "", mode, "1", 0), edited
+
+
+@pytest.mark.parametrize("focus", ["lib", "sheet", "scratch"])
+def test_a_bare_doc_scope_with_a_namesake_is_refused_before_any_edit(focus):
+    """scope doc:X.SchDoc while the project sheet and its free copy are both
+    listed: c8ee69e edited whatever GetSchDocumentByPath(bare) returned (an
+    arbitrary namesake) and only then refused the MARK as ambiguous - the
+    edit landed in memory, unmarked and unrecorded."""
+    w = World(bare="first", focus=focus)
+    reply, edited = _process_doc_by_path(w, BARE)
+    assert edited == [], "an object pass ran on an arbitrary namesake"
+    assert reply.get("error") == "AMBIGUOUS_NAME"
+
+
+def test_an_absolute_doc_scope_is_processed_and_marks_that_file():
+    w = World(bare="first", focus="sheet")
+    reply, edited = _process_doc_by_path(w, SCRATCH)
+    assert edited == [w.scratch]
+    assert "ok" in reply
+
+
+# ---------------------------------------------------------------------------
+# 9. An absolute request accepts only its own key; one record key per file
+# ---------------------------------------------------------------------------
+
+def test_an_absolute_request_rejects_a_document_whose_file_name_is_not_its_own():
+    """The exact lookup's answer was accepted whenever its FileName was NOT
+    absolute (empty, bare), so an absolute request could be answered by a
+    document that never showed it was that file."""
+    w = World(focus=None)
+    stranger = ServerDoc(w.disk, "")
+    plain = w.client.GetDocumentByPath
+    w.client.GetDocumentByPath = (
+        lambda p: stranger if _key(str(p)) == _key(VENDOR) else plain(p))
+    assert w.FindOpenServerDoc(VENDOR) is None
+
+
+F_SHEET = r"F:\hardware\multiviewer\multiviewer__MCU_UI.SchDoc"
+
+
+def _subst_world():
+    """The carrier project listed under a subst drive (F: = H:\\git\\multiviewer)
+    while the open document's FileName is the H: spelling."""
+    w = World(focus="lib", flag_sticks=False)
+    w.project.docs = [Listed(F_SHEET)]
+    plain_client = w.client.GetDocumentByPath
+    plain_age = w.disk.age
+
+    def via_subst(p):
+        p = str(p)
+        if _key(p) == _key(F_SHEET):
+            return plain_client(SHEET)
+        return plain_client(p)
+
+    def age(p):
+        return plain_age(SHEET) if _key(str(p)) == _key(F_SHEET) else plain_age(p)
+    w.client.GetDocumentByPath = via_subst
+    w.ns["FileAge"] = age
+    return w
+
+
+def test_a_subst_spelling_leaves_one_record_entry_and_no_false_alarm():
+    """MarkDocDirty recorded the caller's F: spelling before the lookup and
+    the resolved H: FileName after it: two entries for one file. The save
+    wrote the H: one and the sweep then filed the F: one under
+    bridge_record_closed ('edit is lost') - a false alarm."""
+    w = _subst_world()
+    w.MarkDocDirty(F_SHEET)
+    assert _key(w.MarkLastFile) == _key(SHEET)
+    assert w.record_keys() == {_key(SHEET)}, "two record entries for one file"
+    w.save_all(only_modified=True)
+    assert w.sheet.saves == 1
+    assert w.SaveBridgeRecordClosed == "", "a written edit was reported lost"
+
+
+# ---------------------------------------------------------------------------
+# 10. sch_reload_document judges its save by the file, not the flag
+# ---------------------------------------------------------------------------
+
+def test_reload_with_a_declined_save_whose_flag_never_registers_does_not_close():
+    """Gen_ReloadSchDocument save=true judged Saved := age moved OR flag
+    clean. On the field documents the flag never registers, so a save the
+    editor declined (an active command) read clean: the sheet was closed and
+    reopened from disk, the bridge edit thrown away, and ForgetBridgeEdit
+    after the close removed the only witness."""
+    w = World(focus="lib", flag_sticks=False)
+    w.MarkDocDirty(SCRATCH)
+
+    def declined(_kind):                   # nothing written, flag stays False
+        w.scratch.saves += 1
+    w.scratch.DoFileSave = declined
+
+    class Sch:
+        @staticmethod
+        def GetSchDocumentByPath(_path):
+            return None
+
+    class App:
+        ProcessMessages = None
+
+    calls = []
+    ns = w.ns
+    ns.update(
+        ExtractJsonValue=lambda params, key: json.loads(params).get(key, ""),
+        CurrentFocusedDocPath=lambda d: LIB,
+        ResolveLoadedDocPath=lambda p: p,
+        SchServer=Sch, Application=App,
+        SchDocObjectCountsJson=lambda d: "{}",
+        ProjectHoldingDoc=lambda p: None,
+        BuildErrorResponse=lambda rid, code, msg: {"error": code, "msg": msg},
+        BuildErrorResponseDetailed=lambda rid, code, msg, det: {"error": code, "msg": msg},
+        BuildSuccessResponse=lambda rid, body: {"ok": body},
+        EscapeJsonString=lambda s: s, BoolToJsonStr=lambda b: "true" if b else "false",
+        ResetParameters=lambda: calls.append("reset"),
+        AddStringParameter=lambda k, v: None,
+        RunProcess=lambda p: calls.append(p),
+        MatchDocPathInProject=lambda proj, name: "",
+        InvalidateCompileCache=lambda d: None, SmartCompile=lambda p: None,
+        RestoreFocusedDoc=lambda p: None, NoteNextStep=lambda s: None)
+    build(load(_ALTIUM / "Generic.pas", minimum=100), ["Gen_ReloadSchDocument"], ns)
+    reply = ns["Gen_ReloadSchDocument"](json.dumps({"file_path": SCRATCH}), "1")
+    assert reply.get("error") == "SAVE_FAILED", "a declined save was called saved"
+    assert w.scratch in w.client.open, "the sheet was closed with its edit unwritten"
+    assert w.BridgeEditRecorded(SCRATCH) is True, "the record lost its only witness"
+
+
+def test_reload_save_rule_is_write_doc_and_notes_rule():
+    body = _generic_body("Gen_ReloadSchDocument")
+    assert ("Saved := ((AgeAfter <> -1) And (AgeAfter <> AgeBefore))\n"
+            "            Or ((Not StillModified) And AgeIsThisTick(AgeBefore));") in body

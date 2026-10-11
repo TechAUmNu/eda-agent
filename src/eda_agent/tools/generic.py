@@ -478,7 +478,11 @@ def register_generic_tools(mcp):
             scope: Document scope:
                 "active_doc", current sheet only (default)
                 "project", all SCH sheets in focused project
-                "doc:C:\\path\\to\\Sheet.SchDoc", specific sheet by path (no focus change)
+                "doc:C:\\path\\to\\Sheet.SchDoc", specific sheet by path (no focus change).
+                    Use the ABSOLUTE path: a bare file name that more
+                    than one open document carries is refused
+                    AMBIGUOUS_NAME rather than read from an arbitrary
+                    namesake.
                 "project:C:\\path\\to\\Project.PrjPcb", specific project by path
                 "lib_component:NAME", a named symbol in the active SchLib
                 "lib_component:NAME@3", part 3 of a MULTI-PART symbol.
@@ -643,7 +647,10 @@ def register_generic_tools(mcp):
             (it also writes the document from the bridge's own record), or
             ``lib_save_library`` for a library. Project scope reports
             ``sheets_marked`` (flags that read back) and
-            ``marks_not_read_back``.
+            ``marks_not_read_back``. A ``doc:`` scope given as a BARE file
+            name that more than one open document carries (a project
+            sheet and a free copy of it) is refused ``AMBIGUOUS_NAME``
+            before any object is read or changed; pass the absolute path.
 
         Example - rename a net across all sheets (one value fits all matches):
             obj_modify(
@@ -915,10 +922,19 @@ def register_generic_tools(mcp):
                 toggle. Asking for the state it already has is a no-op,
                 not a second reflection.
             doc_path: sheet to act on. Defaults to the focused schematic.
+                Pass an ABSOLUTE path: a bare file name that more than one
+                open document carries (a project sheet and a free copy of
+                it) is refused ``AMBIGUOUS_NAME`` before anything moves.
 
         Returns:
             Dictionary with designator, mirrored (the resulting state),
-            primitives_moved, and changed.
+            primitives_moved, primitives_skipped, skipped_kinds and
+            changed. A mirror that changed the part also carries
+            ``marked_modified`` (the flag READ BACK) and ``mark`` (which
+            open document was marked: ``file_name`` is the doc_path sheet
+            when doc_path is absolute, never a same-named sheet that
+            happens to be focused). The edit is NOT written: save with
+            ``app_save_all``.
         """
         bridge = get_bridge()
         params: dict[str, Any] = {"designator": designator}

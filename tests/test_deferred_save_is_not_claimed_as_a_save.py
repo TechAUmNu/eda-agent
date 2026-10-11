@@ -142,4 +142,5 @@ def test_the_object_helpers_do_not_claim_a_save():
         assert "Saved := True" not in body, f"{name} still calls a marked document saved"
         assert '"saved":false' in body, f"{name} must answer saved:false for a deferred write"
         assert '"pending_save":' in body and '"written_to_disk":false' in body
-        assert "MarkDocDirty(DocPath)" in body
+        assert ("MarkDocDirty(DocPath)" in body
+                or "MarkDocDirty(SchDocMarkPath(DocPath, SchDoc))" in body)

@@ -2757,12 +2757,20 @@ Application.pas):
   F1: the first version let a free scratch copy's bare name resolve to the
   project's same-named sheet). An ABSOLUTE path is answered only by THAT
   file (the exact lookup, then a listed document whose `DM_FullPath` or own
-  `FileName` has the same key, then the focused document on the same key). A
-  BARE name (what `obj_modify` passes for the current sheet) is answered by
-  the focused document when its file name matches, otherwise only when
-  exactly ONE listed document carries that name (`DocNameCount`, counted
-  from the listing before any lookup, closed project members included);
-  several, and it is refused as `ambiguous_name`. It also marks and reads
+  `FileName` has the same key, then the focused document on the same key;
+  the exact lookup's answer counts only when its own `FileName` has the
+  requested key - an empty or bare one proves nothing). A BARE name (what
+  `obj_modify` passes for the current sheet) only ever comes from a FREE
+  document - a project member's `DM_FullPath` and `DocumentName` are
+  absolute - so it is NEVER answered by a member of a real project,
+  focused or not (review of the first repair: with the carrier sheet
+  focused, the free copy's bare name resolved to the sheet, so the save
+  walk skipped a hand-edited copy as unmodified and a bare mark for an edit
+  to the non-focused copy marked and recorded the sheet). Otherwise it is
+  answered by the focused document when its file name matches, else only
+  when exactly ONE listed document carries that name (`DocNameCount`,
+  counted from the listing before any lookup, closed project members
+  included); several, and it is refused as `ambiguous_name`. It also marks and reads
   the focused document when that is the same file by key. `DocIsModified`
   uses the same lookup, so a closed project member no longer reads the flag
   of an open free copy that shares its name.
@@ -2784,8 +2792,13 @@ Application.pas):
   the two footprint delete handlers carry `mark`.
 * THE BRIDGE'S OWN RECORD (`BridgeEditedPaths`). One entry per FILE, keyed
   by its resolved ABSOLUTE path and stamped with the file's age at the mark
-  (F2, F4); a bare name is kept only when nothing resolved, and answers
-  only while exactly one listed document has that name. `app_save_all`
+  (F2, F4). NEVER a bare name: a mark that resolves nothing records nothing
+  and says `found: false` with a `save_hint` (the first repair kept a bare
+  entry "when nothing resolved"; it answered for the clean carrier sheet
+  once the scratch copy closed and survived a Ctrl+S on it). When the
+  caller's absolute spelling differs from the document's own `FileName` (a
+  subst drive, an 8.3 or UNC path), only the `FileName` key is kept, so a
+  written edit is never reported lost from a second key. `app_save_all`
   writes a recorded document even when its flag reads clean (default
   libraries and `only_modified` sheets included); one the project walk
   cannot reach (a free document whose bare `DM_FullPath` resolves to
@@ -2799,8 +2812,11 @@ Application.pas):
   flag reads clean (F7 - FileAge has 2 s resolution; the entry stays for
   one more write). A recorded document no longer open is dropped and
   listed in `bridge_record_closed` with the warning.
-  `free_documents_not_reached` lists free documents whose bare name the walk could not resolve
-  to exactly one open document (it refuses to guess). Any write of the
+  `free_documents_not_reached` lists free documents whose bare listing the
+  walk could not resolve to the free document itself (the name is carried
+  by several listed documents, or resolves only to a project member or to
+  nothing); such a copy is neither written nor called unmodified, and its
+  non-bridge edits are left in memory. Any write of the
   file by any route (the user's Ctrl+S, `sch_reload_document`, a library
   refresh) moves its age and retires the entry; a close
   (`app_close_document`, `proj_close`, `proj_delete_sheet`, the reload and the refresh)
@@ -2813,6 +2829,21 @@ Application.pas):
   record is let go only on a discard or a clean close. `proj_delete_sheet`
   (without `discard`) and `sch_reload_document` (with `save=false`) refuse
   the same way.
+* A handler that resolves a sheet from a path marks THAT sheet: `obj_modify`
+  with a `doc:` scope and `sch_mirror_component` with `doc_path` mark the
+  caller's path when it is absolute (`SchDocMarkPath`), never the sheet's
+  bare `DocumentName` (which, for a free copy with its project namesake
+  focused, marked the namesake). A BARE `doc:` scope or `doc_path` that more
+  than one listed document carries is refused `AMBIGUOUS_NAME` BEFORE any
+  object is read or changed (it used to edit whatever
+  `GetSchDocumentByPath(bare)` returned and only then refuse the mark).
+  `sch_mirror_component` now carries `marked_modified` and `mark`.
+* `sch_reload_document` (save=true) judges its save as `app_save_all`
+  does: the file's age moved, or the flag reads clean AND the file's
+  previous write is inside the current 2 s tick. A save the editor
+  declined whose flag never registered is `SAVE_FAILED`, the sheet stays
+  open and its record entry stays (it used to read clean, close the sheet
+  and drop the edit with the record's only witness).
 * `documents_seen` / `documents_written` now include free documents (the
   timestamp check walked project members only).
 * `lib_read_pcblib_file` reports each footprint's `height_raw`,
@@ -2904,10 +2935,38 @@ of a .PcbLib opened on its own.
    path, `mark.via` `focused`; the project sheet reads `modified: false`.
    `app_save_all only_modified=true`: the project sheet's mtime does not
    move and it is not in `written_by_bridge_record`; `bridge_record_pending`
-   names no project path. Then focus a third document and repeat the
-   `obj_modify` passing `scope` `doc:X.SchDoc` (bare): refused or
-   `mark.found: false` with `mark.via: ambiguous_name`, and NEITHER file
-   reads modified.
+   names no project path.
+   a. **Bare scope is refused before any edit.** Record `obj_count` (or
+      `obj_query` count) for one object type on BOTH files by their
+      ABSOLUTE `doc:` paths. Focus a third document and run `obj_modify`
+      with `scope` `doc:X.SchDoc` (bare) on that type: refused
+      `AMBIGUOUS_NAME`, no `mark`. The same with the project sheet focused
+      and with the free copy focused. The counts on both files are
+      unchanged and NEITHER file reads modified.
+   b. **The mirror marks its doc_path sheet.** Focus the PROJECT sheet.
+      `sch_mirror_component` on a part of the FREE COPY with `doc_path` set
+      to the copy's ABSOLUTE path: `changed: true`, `mark.file_name` is the
+      copy's path, `mark.found: true`. `app_save_all` reply (or
+      `bridge_record_pending` before it): no project path on
+      `bridge_record_pending`, the project sheet not in
+      `written_by_bridge_record`, its mtime unchanged. Mirror it back the
+      same way. With `doc_path` bare (`X.SchDoc`): refused
+      `AMBIGUOUS_NAME`, the part unmoved in both files.
+   c. **A hand edit to the free copy is never called unmodified.** Project
+      sheet still focused, edit the FREE COPY by hand (move a part on its
+      tab), then focus the project sheet again and run `app_save_all
+      only_modified=true`. The bare `X.SchDoc` is NOT in
+      `skipped_unmodified`; the copy is either written (its mtime moved) or
+      listed in `free_documents_not_reached`. The project sheet's mtime does
+      not move. Record which. Then `app_save_all` with no arguments: the
+      project sheet is written ONCE (its mtime moves once; record
+      `documents_attempted`).
+   d. **An ambiguous mark leaves nothing behind.** Focus the library copy.
+      `obj_modify` with `scope` `doc:X.SchDoc` (bare) is refused (as a).
+      Close the free copy without saving, then `app_save_all
+      only_modified=true`: the project sheet is NOT in
+      `written_by_bridge_record` and its mtime does not move;
+      `bridge_record_pending` is `[]`.
 10. **A close does not throw a bridge edit away (F5).** After an edit whose
     `marked_modified` reads FALSE on the library copy (as step 4),
     `app_close_document` on it WITHOUT `discard_changes`: refused
@@ -2925,6 +2984,16 @@ of a .PcbLib opened on its own.
     a bridge edit on a sheet, then `proj_close` with `save=false`, then
     `proj_open` it again and `app_save_all only_modified=true`: the sheet's
     mtime does not move and `bridge_record_pending` is `[]`.
+13. **A reload whose save is declined does not close the sheet.** After a
+    bridge edit on the free scratch sheet whose `marked_modified` reads
+    FALSE (as step 4), start an interactive command on it (Place > Wire,
+    leave it running) and call `sch_reload_document` on its absolute path:
+    `SAVE_FAILED` with `still_modified` recorded, and the sheet still open
+    with the edit visible. End the command (`app_exit_active_command`),
+    wait 3 s and run `app_save_all only_modified=true`: the sheet is in
+    `written_by_bridge_record` (the record kept the edit) and its mtime
+    moved. If the save is not declined while the command runs on this
+    build, record that and skip.
 
 ---
 

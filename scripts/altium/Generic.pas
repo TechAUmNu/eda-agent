@@ -1793,6 +1793,21 @@ Var
     IsMutating, Marked : Boolean;
 Begin
 
+    { A BARE path several listed documents carry names no one file:       }
+    { GetSchDocumentByPath would return an arbitrary namesake and the     }
+    { pass would edit it, with the mark then refused as ambiguous - an    }
+    { edit in memory nobody marked or recorded (review of c8ee69e). So it }
+    { is refused BEFORE any object is touched, in every mode.             }
+    If AmbiguousBareDocName(DocPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'AMBIGUOUS_NAME',
+            DocPath + ' is the file name of more than one open document (a '
+            + 'project sheet and a free copy, say), so it names no one sheet. '
+            + 'Pass the absolute path in the doc: scope. Nothing was read or '
+            + 'changed.');
+        Exit;
+    End;
+
     // Do NOT RunProcess Client:OpenDocument, that loads the file but
     // strips any project association, producing a "free document" in the
     // UI with the full path as its tab title. Require the document to
@@ -1827,7 +1842,9 @@ Begin
         { bar. The mark had exited silently on a lookup miss (a free sheet's }
         { DocumentName is a bare name). mark says what was found; save_hint  }
         { names the route that still writes it when the flag did not take.  }
-        Marked := MarkDocDirty(DocPath);
+        { The path marked is the caller's when absolute, else the sheet's   }
+        { own DocumentName (SchDocMarkPath).                                }
+        Marked := MarkDocDirty(SchDocMarkPath(DocPath, SchDoc));
         MarkJson := MarkOutcomeJson(0);
         If Not Marked Then
             HintJson := ',"save_hint":"' + EscapeJsonString(MarkSaveHint(False, False)) + '"';
@@ -4079,8 +4096,8 @@ Var
     Vtx : TLocation;
     CompX : Integer;
     Ori, Moved, Swap, Skipped, Kind, Cnt, I : Integer;
-    SkippedIds : String;
-    WantMirror, Explicit : Boolean;
+    SkippedIds, MarkJson : String;
+    WantMirror, Explicit, Marked : Boolean;
 Begin
     Designator := ExtractJsonValue(Params, 'designator');
     DocPath    := ExtractJsonValue(Params, 'doc_path');
@@ -4090,6 +4107,17 @@ Begin
     Begin
         Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS',
             'designator is required');
+        Exit;
+    End;
+
+    { A bare doc_path several open documents carry would mirror an       }
+    { arbitrary namesake (review of c8ee69e): refused before any edit.     }
+    If AmbiguousBareDocName(DocPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'AMBIGUOUS_NAME',
+            DocPath + ' is the file name of more than one open document, so '
+            + 'it names no one sheet. Pass doc_path as an absolute path. '
+            + 'Nothing was changed.');
         Exit;
     End;
 
@@ -4299,7 +4327,14 @@ Begin
     Try Found.GraphicallyInvalidate; Except End;
     Try SchDoc.GraphicallyInvalidate; Except End;
 
-    MarkDocDirtyByPath(SchDoc.DocumentName);
+    { MARK THE SHEET THAT WAS EDITED. It was SchDoc.DocumentName, a bare   }
+    { name for a free document: with doc_path naming the free copy and the }
+    { same-named project sheet focused, that marked and recorded the       }
+    { project sheet and app_save_all only_modified wrote the clean sheet   }
+    { instead of the copy (review of c8ee69e). An absolute doc_path names  }
+    { the file; SchDocMarkPath uses it.                                    }
+    Marked := MarkDocDirty(SchDocMarkPath(DocPath, SchDoc));
+    MarkJson := MarkOutcomeJson(0);
 
     Result := BuildSuccessResponse(RequestId,
         '{"designator":"' + EscapeJsonString(Designator) + '",'
@@ -4310,7 +4345,9 @@ Begin
         { the symbol is now part-mirrored. Reported rather than hidden.   }
         + '"primitives_skipped":' + IntToStr(Skipped) + ','
         + '"skipped_kinds":"' + Trim(SkippedIds) + '",'
-        + '"changed":true}');
+        + '"changed":true'
+        + ',"marked_modified":' + BoolToJsonStr(Marked)
+        + ',"mark":' + MarkJson + '}');
 End;
 
 Function Gen_RefreshDocument(RequestId : String) : String;
@@ -12475,12 +12512,17 @@ End;
 {               recompile, while the saved file was clean                     }
 { This makes that cure one call instead of three.                             }
 {                                                                              }
-{ ORDER AND REFUSALS. Save first, verified by file age OR by the modified    }
-{ flag clearing (FileAge has two-second resolution, so a second save inside  }
-{ two seconds would otherwise read as failed). A save that cannot be shown   }
-{ to have happened stops here with the document still open: closing it would }
-{ lose the edits or raise a prompt nothing here can answer. With save=false  }
-{ a document reading modified is refused the same way.                        }
+{ ORDER AND REFUSALS. Save first, judged as WriteDocAndNote judges it: the   }
+{ file's age moved, OR the flag reads clean AND the file's previous write    }
+{ lies inside the current 2 s FileAge tick (AgeIsThisTick - only then can a  }
+{ real write leave the age where it was). The flag alone is not enough: on   }
+{ the field documents SetModified never registers, so a save the editor      }
+{ declined (an active command) also reads clean, and the sheet was closed    }
+{ and reopened from disk with its edit thrown away (review of c8ee69e). A    }
+{ save that cannot be shown to have happened stops here with the document    }
+{ still open and its record entry kept: closing it would lose the edits or   }
+{ raise a prompt nothing here can answer. With save=false a document reading }
+{ modified, or holding an unwritten bridge edit, is refused the same way.    }
 {                                                                              }
 { The close is by OBJECT (Client.CloseDocument, as App_CloseDocument does),   }
 { never WorkspaceManager:CloseObject, which acts on whatever has the focus.   }
@@ -12570,17 +12612,21 @@ Begin
         Try AgeAfter := FileAge(FilePath); Except AgeAfter := -1; End;
         StillModified := True;
         Try StillModified := ServerDoc.Modified; Except StillModified := True; End;
-        Saved := (AgeAfter <> AgeBefore) Or (Not StillModified);
+        Saved := ((AgeAfter <> -1) And (AgeAfter <> AgeBefore))
+            Or ((Not StillModified) And AgeIsThisTick(AgeBefore));
         If Not Saved Then
         Begin
             Result := BuildErrorResponseDetailed(RequestId, 'SAVE_FAILED',
-                'The save could not be shown to have happened (file age '
-                + 'unchanged and the document still reads modified), so the '
-                + 'sheet was NOT closed. Altium declines a save while a command '
-                + 'is active; app_exit_active_command, then retry.',
+                'The save could not be shown to have happened (the file age '
+                + 'did not move, and the file was last written before this '
+                + 'moment or the document still reads modified), so the sheet '
+                + 'was NOT closed and its edits are still in memory. Altium '
+                + 'declines a save while a command is active; '
+                + 'app_exit_active_command, then retry.',
                 '{"file_path":"' + EscapeJsonString(FilePath) + '"'
                 + ',"age_before":' + IntToStr(AgeBefore)
-                + ',"age_after":' + IntToStr(AgeAfter) + '}');
+                + ',"age_after":' + IntToStr(AgeAfter)
+                + ',"still_modified":' + BoolToJsonStr(StillModified) + '}');
             Exit;
         End;
     End
