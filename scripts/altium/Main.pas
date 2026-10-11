@@ -1430,6 +1430,35 @@ Begin
     End;
 End;
 
+{ Can PCBServer.GetCurrentPCBLibrary answer a library right now? Asked       }
+{ WITHOUT naming PCBServer, whose mere reference raises (a modal) when the    }
+{ PCB editor server has not loaded this session. CONSERVATIVE: False only on  }
+{ evidence that the answer is Nil anyway -                                   }
+{ * the focused document is known and is not a PcbLib (the call answers for  }
+{   the FOCUSED library only), or                                           }
+{ * no PcbLib or PcbDoc is open anywhere (nothing for it to answer).         }
+{ A Nil DM focus alone is NOT evidence: DM_FocusedDocument reads Nil right   }
+{ after a programmatic create or open while the library IS current, so that  }
+{ case falls through to the PcbEditorDocOpen test and keeps today's call.    }
+Function PcbLibMayBeCurrent(Dummy : Integer) : Boolean;
+Var
+    Workspace : IWorkspace;
+    Doc : IDocument;
+    Kind : String;
+Begin
+    Result := False;
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Exit;
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then
+    Begin
+        Kind := '';
+        Try Kind := Doc.DM_DocumentKind; Except Kind := ''; End;
+        If (Kind <> '') And (UpperCase(Kind) <> 'PCBLIB') Then Exit;
+    End;
+    Result := PcbEditorDocOpen(0);
+End;
+
 {..............................................................................}
 { GetPCBBoardAnywhere - Focus-independent PCB board lookup.                    }
 {..............................................................................}

@@ -2396,8 +2396,10 @@ Begin
     { session is the 'Undeclared identifier' the engine shows as a MODAL before }
     { the Except runs. GetCurrentPCBLibrary answers for the FOCUSED library     }
     { only, so a focused document that is not a PcbLib got the NO_PCBLIB below  }
-    { anyway: same reply, without the dialog.                                   }
-    If Not FocusedDocKindIs('PCBLIB') Then
+    { anyway: same reply, without the dialog. PcbLibMayBeCurrent, not           }
+    { FocusedDocKindIs: a Nil DM focus right after a programmatic open is not   }
+    { evidence, and refusing then would lose a call that works today.           }
+    If Not PcbLibMayBeCurrent(0) Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
             'No PCB library is active. Open the .PcbLib and select a footprint.');

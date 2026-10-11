@@ -501,32 +501,69 @@ def test_an_embedded_board_write_that_still_fails_is_counted():
 # PCB_RenumberPads: the DM layer is asked before PCBServer is named
 # ---------------------------------------------------------------------------
 
-def _workspace(kind):
+class _Docs:
+    """A DM project: its logical documents, by kind."""
+
+    def __init__(self, kinds):
+        self.docs = [type("D", (), {"DM_DocumentKind": k,
+                                    "DM_FullPath": k + ".doc"})()
+                     for k in kinds]
+        self.DM_LogicalDocumentCount = len(self.docs)
+
+    def DM_LogicalDocuments(self, i):
+        return self.docs[i]
+
+
+def _workspace(kind, open_kinds=()):
+    """DM focus ``kind`` (None = nothing focused) with ``open_kinds`` as free
+    documents, which are open by definition."""
     doc = None if kind is None else type("D", (), {"DM_DocumentKind": kind})()
-    return type("W", (), {"DM_FocusedDocument": doc})()
+    free = _Docs(open_kinds)
+    return type("W", (), {"DM_FocusedDocument": doc, "DM_ProjectCount": 0,
+                          "DM_FreeDocumentsProject": free})()
 
 
-@pytest.mark.parametrize("kind", [None, "SCH", "PCB", "SCHLIB"])
-def test_renumber_pads_without_a_focused_pcblib_never_names_pcbserver(kind):
+_GATE = ["PcbEditorDocOpen", "PcbLibMayBeCurrent"]
+
+
+def _gate_bodies():
+    return load(_ALTIUM / "Main.pas", minimum=40)
+
+
+def _run_renumber(ns):
+    build(_gate_bodies(), _GATE, ns)
+    _run(["PCB_RenumberPads"], ns)
+
+
+@pytest.mark.parametrize("kind,open_kinds", [
+    (None, ()), ("SCH", ("PCBLIB",)), ("PCB", ("PCB", "PCBLIB")),
+    ("SCHLIB", ("PCBLIB",)), (None, ("SCH",))])
+def test_renumber_pads_without_a_current_pcblib_never_names_pcbserver(
+        kind, open_kinds):
+    """Refused, without naming PCBServer, only on EVIDENCE the library
+    lookup answers Nil: another kind focused, or no PCB document open."""
     popups = Popups()
-    ns = _ns(popups, GetWorkspace=_workspace(kind),
+    ns = _ns(popups, GetWorkspace=_workspace(kind, open_kinds),
              PCBServer=Undeclared(popups, "PCBServer"),
              StrToIntDef=lambda s, d: int(s) if s else d)
-    _run(["FocusedDocKindIs", "PCB_RenumberPads"], ns)
+    _run_renumber(ns)
     reply = ns["PCB_RenumberPads"]({}, "r")
-    assert popups == [], f"PCBServer was named with no PcbLib focused: {popups}"
+    assert popups == [], f"PCBServer was named with no PcbLib current: {popups}"
     assert reply == ("ERR", "NO_PCBLIB",
                      "No PCB library is active. Open the .PcbLib and select a "
                      "footprint.")
 
 
-def test_renumber_pads_still_asks_the_library_when_one_is_focused():
+@pytest.mark.parametrize("kind", ["PCBLIB", None])
+def test_renumber_pads_still_asks_the_library_when_one_may_be_current(kind):
+    """A Nil DM focus right after a programmatic open is not evidence: with a
+    PcbLib open the library is still asked, as before."""
     popups = Popups()
     lib = Fx(popups, CurrentComponent=None)
-    ns = _ns(popups, GetWorkspace=_workspace("PCBLIB"),
+    ns = _ns(popups, GetWorkspace=_workspace(kind, ("PCBLIB",)),
              PCBServer=Fx(popups, GetCurrentPCBLibrary=lib),
              StrToIntDef=lambda s, d: int(s) if s else d)
-    _run(["FocusedDocKindIs", "PCB_RenumberPads"], ns)
+    _run_renumber(ns)
     assert ns["PCB_RenumberPads"]({}, "r") == (
         "ERR", "NO_FOOTPRINT", "No footprint is selected")
     assert popups == []

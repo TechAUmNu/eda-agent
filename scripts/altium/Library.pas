@@ -1608,7 +1608,10 @@ Begin
     Name := ExtractJsonValue(Params, 'name');
     Description := ExtractJsonValue(Params, 'description');
 
-    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrent (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway, so the reply below comes without the modal. }
+    PcbLib := Nil;
+    If PcbLibMayBeCurrent(0) Then PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'No PCB library is active');
@@ -5344,7 +5347,10 @@ Begin
     Try RunProcess('WorkspaceManager:OpenObject'); Except End;
     Try Application.ProcessMessages; Except End;
 
-    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrent (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway, so the reply below comes without the modal. }
+    PcbLib := Nil;
+    If PcbLibMayBeCurrent(0) Then PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
@@ -10603,7 +10609,10 @@ Begin
             + '"match" (also lower a height to the model). Got: ' + Mode);
         Exit;
     End;
-    CurLib := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrent (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway, so the reply below comes without the modal. }
+    CurLib := Nil;
+    If PcbLibMayBeCurrent(0) Then CurLib := PCBServer.GetCurrentPCBLibrary;
     If CurLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
@@ -10814,7 +10823,10 @@ Begin
         Exit;
     End;
 
-    CurLib := PCBServer.GetCurrentPCBLibrary;
+    { PcbLibMayBeCurrent (Main.pas): PCBServer is not named when the    }
+    { answer is Nil anyway, so the reply below comes without the modal. }
+    CurLib := Nil;
+    If PcbLibMayBeCurrent(0) Then CurLib := PCBServer.GetCurrentPCBLibrary;
     If CurLib = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',

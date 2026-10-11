@@ -27,6 +27,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from tests.pascal_eval import build
 from tests.pascal_source import load, strip_comments
 from tests.test_library_popup_free import (
@@ -211,3 +213,99 @@ def test_label_orientation_is_documented_as_the_ordinal():
         encoding="utf-8")
     assert "# optional, 0/90/180/270" not in src
     assert '"orientation": <int>,           # optional, 0..3' in src
+
+
+# ---------------------------------------------------------------------------
+# Bare PCBServer.GetCurrentPCBLibrary: asked only when it can answer
+# ---------------------------------------------------------------------------
+
+class _NoPcbServer:
+    """Naming PCBServer before the PCB editor server loaded: the modal."""
+
+    def __getattr__(self, name):
+        raise AssertionError(f"PCBServer.{name} named with no PcbLib current")
+
+
+class _App:
+    def ProcessMessages(self):
+        return None
+
+
+def _pcblib_ns(focus_kind, open_kinds):
+    from tests.test_popup_free_pcb import _workspace
+    return {
+        "GetWorkspace": _workspace(focus_kind, open_kinds),
+        "PCBServer": _NoPcbServer(),
+        "BuildErrorResponse": lambda r, c, m: ("ERR", c, m),
+        "ExtractJsonValue": lambda p, k: p.get(k, ""),
+        "StrToFloatDef": lambda s, d: float(s) if s else d,
+        "FileExists": lambda p: True,
+        "ResetParameters": lambda: None,
+        "AddStringParameter": lambda k, v: None,
+        "RunProcess": lambda p: None,
+        "Application": _App(),
+        "Client": Client(),
+    }
+
+
+_PCBLIB_LOOKUPS = [
+    ("Lib_CreateFootprint", {}, "No PCB library is active"),
+    ("Lib_ReloadLibrary", {"library_path": r"C:\L\a.PcbLib"},
+     r"Library did not reopen: C:\L\a.PcbLib"),
+    ("Lib_UpdateFootprintHeightsFrom3D", {}, "No PCB Library document focused"),
+    ("Lib_SetFootprintHeight", {"height_mm": "1.5"},
+     "No PCB Library document focused"),
+]
+
+
+
+@pytest.mark.parametrize("routine,params,msg", _PCBLIB_LOOKUPS)
+@pytest.mark.parametrize("focus,open_kinds", [
+    ("SCH", ("PCBLIB",)), ("SCHLIB", ()), (None, ()), (None, ("SCH",))])
+def test_pcblib_lookup_is_not_named_when_it_answers_nil_anyway(
+        routine, params, msg, focus, open_kinds):
+    ns = _pcblib_ns(focus, open_kinds)
+    build(_bodies("Main.pas"), ["PcbEditorDocOpen", "PcbLibMayBeCurrent"], ns)
+    build(_bodies("Library.pas"), [routine], ns)
+    assert ns[routine](params, "r") == ("ERR", "NO_PCBLIB", msg)
+
+
+class _Lib:
+    """A PcbLib that answers; any member read past the lookup ends the run."""
+
+    def __getattr__(self, name):
+        raise _Reached(name)
+
+
+class _Reached(Exception):
+    pass
+
+
+class _PcbServer:
+    def __init__(self):
+        self.asked = 0
+
+    @property
+    def GetCurrentPCBLibrary(self):
+        self.asked += 1
+        return _Lib()
+
+    def __getattr__(self, name):
+        raise _Reached(name)
+
+
+@pytest.mark.parametrize("routine,params,msg", _PCBLIB_LOOKUPS)
+@pytest.mark.parametrize("focus", ["PCBLIB", None])
+def test_pcblib_lookup_still_asked_when_a_library_may_be_current(
+        routine, params, msg, focus):
+    ns = _pcblib_ns(focus, ("PCBLIB",))
+    ns["PCBServer"] = server = _PcbServer()
+    ns["BuildSuccessResponse"] = lambda r, d: ("OK", d)
+    ns["EscapeJsonString"] = lambda s: s
+    build(_bodies("Main.pas"), ["PcbEditorDocOpen", "PcbLibMayBeCurrent"], ns)
+    build(_bodies("Library.pas"), [routine], ns)
+    try:
+        ns[routine](params, "r")
+    except _Reached:
+        pass
+    assert server.asked >= 1
