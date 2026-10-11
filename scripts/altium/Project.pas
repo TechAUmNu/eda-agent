@@ -432,8 +432,9 @@ End;
 { (AgesForPaths / CountChangedAges - FileAge, the ground truth), the pass    }
 { counters reset first, and the record read after. Returns the JSON fields  }
 { (each with a leading comma) for the caller's reply: only_modified,         }
-{ documents_attempted, documents_written, skipped_unmodified,               }
-{ bridge_record_pending.                                                     }
+{ documents_attempted, documents_written, skipped_unmodified. The caller     }
+{ adds bridge_record_pending (ProjectRecordPendingJson) itself, so proj_close }
+{ can read it AFTER the close has let go of the closed members' entries.     }
 { OnlyModified False (the default) is the walk proj_save has always run:    }
 { both skip flags False, every open member written. True skips a member     }
 { whose flag reads clean - sheet or library - unless the bridge's record    }
@@ -472,8 +473,24 @@ Begin
     Result := ',"only_modified":' + BoolToJsonStr(OnlyModified)
         + ',"documents_attempted":' + IntToStr(SaveAttempts)
         + ',"documents_written":' + IntToStr(Written)
-        + ',"skipped_unmodified":' + PipeListToJsonArray(SaveSkippedPaths)
-        + ',"bridge_record_pending":' + PipeListToJsonArray(BridgeRecordKeys(0));
+        + ',"skipped_unmodified":' + PipeListToJsonArray(SaveSkippedPaths);
+End;
+
+{ ',"bridge_record_pending":[...]' for ONE project: the record's entries for  }
+{ this project's members and project file only (BridgeRecordKeysIn), never   }
+{ the whole workspace's record. MemberPaths is ProjectMemberPaths, read while }
+{ the project object is good.                                                }
+Function ProjectRecordPendingJson(MemberPaths : String; ProjectPath : String) : String;
+Var
+    Paths : String;
+Begin
+    Paths := MemberPaths;
+    If Trim(ProjectPath) <> '' Then
+    Begin
+        If Paths <> '' Then Paths := Paths + '|';
+        Paths := Paths + ProjectPath;
+    End;
+    Result := ',"bridge_record_pending":' + PipeListToJsonArray(BridgeRecordKeysIn(Paths));
 End;
 
 Function Proj_Save(Params : String; RequestId : String) : String;
@@ -502,7 +519,9 @@ Begin
             { client projects included. app_save_all is the tool for that,    }
             { and its name says so.                                           }
             { The counters ride on the reply (SaveProjectMembersReport).      }
-            Report := SaveProjectMembersReport(Project, OnlyModified);
+            Report := SaveProjectMembersReport(Project, OnlyModified)
+                + ProjectRecordPendingJson(ProjectMemberPaths(Project),
+                    Project.DM_ProjectFullPath);
             Result := BuildSuccessResponse(RequestId,
                 '{"success":true,"project_path":"'
                 + EscapeJsonString(Project.DM_ProjectFullPath) + '"' + Report + '}');
@@ -571,7 +590,38 @@ Begin
             End;
 
             If SaveFirst Then
-                Report := SaveProjectMembersReport(Project, OnlyModified)
+            Begin
+                Report := SaveProjectMembersReport(Project, OnlyModified);
+                { NOTHING MAY STILL READ MODIFIED BEFORE THE CLOSE (review of  }
+                { 498e5ca). A member the save walk did not write - a save the  }
+                { editor declined, a clean-reading member skipped by           }
+                { only_modified, a script unit, which the walk never writes -  }
+                { would make CloseObject raise Altium's own "Save changes?"   }
+                { prompt, and that prompt blocks this loop uncounted. The      }
+                { save=false branch has always checked; this one never did.    }
+                { What the flag cannot see (an edit made outside MarkDocDirty  }
+                { whose flag never registered, skipped by only_modified) is   }
+                { the residual the docstring states.                           }
+                StillDirty := DirtyProjectMembers(Project);
+                If StillDirty <> '' Then
+                Begin
+                    Result := BuildSuccessResponse(RequestId,
+                        '{"success":false,"closed":false,"project_path":"'
+                        + EscapeJsonString(ProjectPath) + '"'
+                        + ',"saved":true'
+                        + ',"still_modified":' + PipePathsToJsonArray(StillDirty)
+                        + Report
+                        + ProjectRecordPendingJson(ProjectMemberPaths(Project), ProjectPath)
+                        + ',"reason":"the save did not leave every document clean '
+                        + '(listed under still_modified), so closing would raise '
+                        + 'Altium''s own save prompt, and that prompt blocks the '
+                        + 'bridge until someone answers it in Altium. Nothing was '
+                        + 'closed. Save those documents (lib_save_library, or '
+                        + 'proj_save without only_modified) and close again, or '
+                        + 'close the project in Altium."}');
+                    Exit;
+                End;
+            End
             Else
             Begin
                 { DISCARD BEFORE CLOSING, then check the discard took. A close }
@@ -643,6 +693,10 @@ Begin
             { the next save-all rewrite it when it is reopened clean (review  }
             { 2026-10-11, F4). Members still open keep theirs.                }
             ForgetBridgeEditsIfClosed(MemberPaths);
+            { The record's entries for THIS project, read AFTER the close let }
+            { go of the closed members: what is still pending now.            }
+            If SaveFirst Then
+                Report := Report + ProjectRecordPendingJson(MemberPaths, ProjectPath);
 
             If Closed And (ClosedInstead = '') Then
                 Result := BuildSuccessResponse(RequestId,

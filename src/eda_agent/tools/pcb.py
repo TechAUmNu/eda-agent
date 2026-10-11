@@ -364,10 +364,12 @@ def register_pcb_tools(mcp):
                 (Altium answers that open with its own modal box); a
                 library is edited with the library tools
                 (``lib_create_footprint`` and the rest). A .PcbDoc that is
-                not open and cannot be loaded (0 bytes, unreadable, not an
-                Altium board file) is refused ``BOARD_FILE_UNREADABLE``,
+                not open and cannot be loaded (empty, unreadable, or not a
+                compound/ASCII file) is refused ``BOARD_FILE_UNREADABLE``,
                 nothing opened: Altium would show its own box and then
-                hand back a blank document.
+                hand back a blank document. Known limit: another Altium
+                compound file renamed .PcbDoc (a .PcbLib, a .SchDoc) is not
+                caught by this test.
 
         Returns:
             Dict with ``focused`` and the resolved ``board`` file name.
@@ -1160,7 +1162,9 @@ def register_pcb_tools(mcp):
         constraint member can be read safely off a rule from the script. A
         descriptor that carries no numbers (the "Templates Used To Check
         Via" form) yields none: ``via_rule_values`` is then 0, every free via
-        counts in ``no_rule_values``, and nothing changes.
+        counts in ``no_rule_values``, and nothing changes. A value past a
+        physical ceiling (10000 mil / 254 mm) is not a value. The board is
+        marked modified only when ``changed`` is above 0.
 
         Returns:
             {"checked": vias seen, "changed": M, "free": free vias,
@@ -5646,10 +5650,12 @@ def register_pcb_tools(mcp):
                 .PcbLib is refused ``BOARD_PATH_IS_LIBRARY`` before anything
                 is opened; edit a library with the library tools
                 (``lib_create_footprint`` and the rest). A .PcbDoc that is
-                not open and cannot be loaded (0 bytes, unreadable, not an
-                Altium board file) is refused ``BOARD_FILE_UNREADABLE``:
+                not open and cannot be loaded (empty, unreadable, or not a
+                compound/ASCII file) is refused ``BOARD_FILE_UNREADABLE``:
                 the part would otherwise land in the blank document Altium
                 hands back after its own "File type not recognised." box.
+                Known limit: another Altium compound file renamed .PcbDoc
+                (a .PcbLib, a .SchDoc) is not caught by this test.
 
         Returns:
             Dict with ``placed`` (count), ``failed`` (count), ``total``.

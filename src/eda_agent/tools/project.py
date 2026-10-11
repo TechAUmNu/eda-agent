@@ -71,7 +71,9 @@ def register_project_tools(mcp):
         """Save the current or specified project's open documents.
 
         Only THIS project's members are written (never the bridge's own
-        script project). ``only_modified=False`` (default, unchanged) writes
+        script project, and never a script unit, which is left for
+        Altium's own close prompt). ``only_modified=False`` (default,
+        unchanged) writes
         every open member, edited or not, which can churn parameter
         UniqueIDs in clean sheets. ``only_modified=True`` leaves a member
         whose modified flag reads clean alone, sheet or library, unless
@@ -89,7 +91,9 @@ def register_project_tools(mcp):
             ``documents_attempted`` (open members written to),
             ``documents_written`` (members whose file got newer),
             ``skipped_unmodified`` (members left alone by only_modified)
-            and ``bridge_record_pending`` (bridge edits still not on disk).
+            and ``bridge_record_pending`` (this project's members and
+            project file that the bridge edited and that are still not on
+            disk; never another project's or a free document's).
             ``documents_written`` below ``documents_attempted`` means the
             editor declined a save (an active command does that).
         """
@@ -163,7 +167,12 @@ def register_project_tools(mcp):
             only_modified: with ``save=True``, write only members that
                 read modified (or that the bridge edited), as
                 ``proj_save only_modified=True``. Default False: every
-                open member is written, as before.
+                open member is written, as before. RESIDUAL RISK: a member
+                edited outside this bridge whose modified flag never
+                registered (the documented "Modified False with * on the
+                tab" case) reads clean, is skipped, and the close then
+                raises Altium's own save prompt, which blocks the bridge
+                until answered. Leave it False when in doubt.
 
         Returns:
             ``success`` and ``closed``, checked by looking the project up
@@ -176,7 +185,13 @@ def register_project_tools(mcp):
             reply also carries ``proj_save``'s counters:
             ``only_modified``, ``documents_attempted``,
             ``documents_written``, ``skipped_unmodified`` and
-            ``bridge_record_pending``. The modified flag cannot
+            ``bridge_record_pending`` (this project's entries, read AFTER
+            the close). With ``save=True``, if anything still reads
+            modified after the save (a declined save, a member skipped by
+            ``only_modified``, a script unit), nothing is closed: the reply
+            is ``success`` false, ``closed`` false, with
+            ``still_modified`` listing them, because closing would raise
+            Altium's save prompt. The modified flag cannot
             be read reliably, so a path in ``discarded`` is not proof that
             document had edits.
         """

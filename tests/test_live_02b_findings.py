@@ -523,7 +523,8 @@ def _link_snippet():
     start = body.index(";", start) + 1
     end = body.index("If AlignStr = 'none' Then", start)
     return ("Procedure Snip(Body : Integer; Footprint : Integer; ModelPath : String;"
-            " Replace : Boolean; RemovedDistinct : Integer; HaveRect : Boolean);\n"
+            " Replace : Boolean; RemovedDistinct : Integer; HaveRect : Boolean;"
+            " PcbLib : Integer);\n"
             "Begin\n" + body[start:end] + "\nEnd;")
 
 
@@ -534,7 +535,10 @@ def _run_link(overall, prims_before=(), replace=False, removed=0):
     fp = _Footprint(old + [body])
     ns = {"PCBServer": _Server(body), "c_Broadcast": 0, "PCBM_BeginModify": 0,
           "PCBM_EndModify": 0, "c_NoEventData": 0, "eComponentBodyObject": 12,
-          "eTextObject": 5, "MkSet": lambda *a: a, "Failure": "", "FailCode": ""}
+          "eTextObject": 5, "MkSet": lambda *a: a, "Failure": "", "FailCode": "",
+          # Since the review of 498e5ca the empty-model reply reads what the
+          # library board still lists (tests/test_review_03_repairs_and_03b.py).
+          "LibBoardStillListsCount": lambda board, entries: 0}
     _caught(ns)
     build(_LIBRARY, ["LibAddRemovalEntry"], ns)
     if "RemoveLibBodyByAddress" in _LIBRARY:
@@ -547,7 +551,8 @@ def _run_link(overall, prims_before=(), replace=False, removed=0):
     # closes Snip here; the evaluator ignores the tokens after it.
     src = translate(snip)[1]
     exec(compile(src, "<pascal Snip>", "exec"), ns)  # noqa: S102
-    ns["Snip"](body, fp, r"C:\scratch\stub.igs", replace, removed, False)
+    lib = type("L", (), {"CurrentComponent": fp, "Board": object()})()
+    ns["Snip"](body, fp, r"C:\scratch\stub.igs", replace, removed, False, lib)
     return ns, fp, body
 
 
@@ -599,8 +604,9 @@ def _proj_world():
         PipeListToJsonArray=lambda s: json.dumps([e for e in s.split("|") if e]),
         BuildSuccessResponse=lambda rid, data: json.loads(data),
         BuildErrorResponse=lambda rid, code, msg: {"error": code})
-    _with(w, ["AgesForPaths", "CountChangedAges"])
-    build(_PROJECT, [n for n in ("SaveProjectMembersReport", "Proj_Save")
+    _with(w, ["AgesForPaths", "CountChangedAges", "BridgeRecordKeysIn"])
+    build(_PROJECT, [n for n in ("SaveProjectMembersReport",
+                                 "ProjectRecordPendingJson", "Proj_Save")
                      if n in _PROJECT], w.ns)
     return w
 
@@ -642,11 +648,10 @@ def test_proj_save_counts_a_declined_save_as_attempted_not_written():
     assert reply["documents_attempted"] == 1 and reply["documents_written"] == 0
 
 
-def test_proj_close_save_true_carries_the_same_counters():
-    body = strip_comments(_PROJECT["Proj_Close"])
-    assert "Report := SaveProjectMembersReport(Project, OnlyModified)" in body
-    success = body[body.index("'{\"success\":true,\"closed\":true"):]
-    assert "+ Report +" in success.split(";", 1)[0]
+# proj_close save=true's counters are EXECUTED through a closing project in
+# tests/test_review_03_repairs_and_03b.py (closed and refused branches, the
+# pending list read after the close). The source-text check that stood here
+# never ran Proj_Close (review of 498e5ca).
 
 
 @pytest.mark.asyncio

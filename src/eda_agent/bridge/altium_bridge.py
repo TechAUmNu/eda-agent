@@ -939,12 +939,27 @@ class AltiumBridge:
             in_flight = (mine or flying or [None])[0]
             # A script_fatal box on screen means the engine HALTED: record a
             # dead loop, not a busy handler, so last_fault names the right
-            # recovery (Stop + rerun StartMCPServer, not "wait").
+            # recovery (Stop + rerun StartMCPServer, not "wait"). The fault
+            # kind is chosen ONCE and used for the recorded fault, the
+            # message's recovery text and details["recovery"] alike: the
+            # caller's own error reply must not name "stuck in a long
+            # operation" while last_fault says dead_loop.
             if probe and "script_fatal" in (probe.get("kinds") or []):
-                self._note_fault(workspace_dir, recovery_guidance(DEAD_LOOP))
+                fault = DEAD_LOOP
+                fault_flight = None
+                state = ("A script-fatal error box is on screen, so the "
+                         "script engine HALTED and the polling loop is "
+                         "dead. ")
             else:
-                self._note_fault(workspace_dir,
-                                 recovery_guidance(STUCK_HANDLER, in_flight))
+                fault = STUCK_HANDLER
+                fault_flight = in_flight
+                state = ("Altium WAS answering keepalives earlier in the "
+                         "wait, but that is not rechecked here, so the "
+                         "loop may be stuck in a long operation OR may "
+                         "since have died. Confirm with app_ping before "
+                         "choosing a recovery. ")
+            guidance = recovery_guidance(fault, fault_flight)
+            self._note_fault(workspace_dir, guidance)
             # PAST TENSE, because that is all the evidence supports. This
             # message used to say "Altium IS responding to keepalives ...
             # likely stuck in an infinite loop", present tense, as a fixed
@@ -960,14 +975,11 @@ class AltiumBridge:
             raise AltiumTimeoutError(
                 f"Handler exceeded {_MAX_HEARTBEAT_EXTENSIONS} heartbeat "
                 f"extensions ({_MAX_HEARTBEAT_EXTENSIONS * timeout:.0f}s "
-                f"total). Altium WAS answering keepalives earlier in the "
-                f"wait, but that is not rechecked here, so the loop may be "
-                f"stuck in a long operation OR may since have died. Confirm "
-                f"with app_ping before choosing a recovery. "
-                + recovery_message(STUCK_HANDLER, in_flight)
+                f"total). "
+                + state
+                + recovery_message(fault, fault_flight)
                 + self._dialog_suffix(probe),
-                details={"recovery": recovery_guidance(STUCK_HANDLER,
-                                                       in_flight),
+                details={"recovery": guidance,
                          "dialogs": probe},
             )
         self._note_fault(workspace_dir, recovery_guidance(DEAD_LOOP))

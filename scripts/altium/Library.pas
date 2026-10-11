@@ -759,9 +759,12 @@ End;
 { this session that is no longer the last one made can miss here, where        }
 { lib_set_current_component's reopening lookup would find it), then made       }
 { current and HELD (the setter, then RememberLibComponent), so the next        }
-{ call without a name lands on it too. Its part: the displayed one, or 1       }
-{ (display mode 0) when it reads below 1 - lib_set_current_component always    }
-{ selects part 1. Every route answers a NARROWED reference: no member is       }
+{ call without a name lands on it too. Its part: the symbol's CURRENT part    }
+{ (CurrentPartID, which OwnerPartIdOf reads), or 1 (display mode 0) when it    }
+{ reads below 1 - lib_set_current_component always selects part 1. NOT the     }
+{ part the editor displays: SelectLibComponentPart's GH #11 note records that  }
+{ setting CurrentPartID does not move the editor's part spinner, so the two    }
+{ can differ and nothing here promises the displayed one. Every route answers a NARROWED reference: no member is       }
 { ever read off the editor's CurrentSchComponent. Call it BEFORE the           }
 { handler's PreProcess, with everything else that reads the component.         }
 Function ResolveEditLibComponent(SchLib : ISch_Lib; Name : String) : ISch_Component;
@@ -6750,8 +6753,8 @@ Var
     RX1, RY1, RX2, RY2, GapX, GapY, Gap, BX1, BY1, BX2, BY2 : TCoord;
     PadCount, Removed, RemovedDistinct, Remaining, BoardRemoved, BoardStill : Integer;
     EmptyOverall : TCoord;
-    EmptyRemoved : Boolean;
-    EmptyAddr, EmptyEntries : String;
+    EmptyRemoved, EmptyCurrent : Boolean;
+    EmptyAddr, EmptyEntries, EmptyBoardText : String;
 Begin
     ModelPath := ExtractJsonValue(Params, 'model_path');
     ComponentName := ExtractJsonValue(Params, 'component_name');
@@ -7075,9 +7078,10 @@ Begin
             { false - and the empty body stayed on the footprint. Altium reads }
             { a model by its CONTENT, so no extension list catches it; no box  }
             { AND a 0 overall height (read only when the box is missing) is    }
-            { MODEL_LOAD_FAILED, and the body comes off the footprint again    }
-            { inside this transaction (RemoveLibBodyByAddress, the footprint   }
-            { half: rule 1 beside RemoveLibTextByAddress). With replace=true   }
+            { MODEL_LOAD_FAILED, and the body comes off the footprint again,   }
+            { IN MEMORY, inside this transaction (RemoveLibBodyByAddress, the  }
+            { footprint half: rule 1 beside RemoveLibTextByAddress; the reply  }
+            { never claims the FILE is clean - see below). With replace=true   }
             { the old bodies went before the add (they go only after a NON-Nil }
             { load, and an empty model is non-Nil), so the reply says so.      }
             EmptyRemoved := False;
@@ -7091,19 +7095,54 @@ Begin
                     EmptyAddr := '';
                     Try EmptyAddr := IntToStr(Body.I_ObjectAddress); Except EmptyAddr := ''; End;
                     EmptyRemoved := RemoveLibBodyByAddress(Footprint, EmptyAddr, EmptyEntries);
+                    { THE REMOVAL IS IN MEMORY, AND MAY NOT SURVIVE A SAVE. The    }
+                    { body was added to the footprint AND to the library board     }
+                    { (above), and RemoveLibBodyByAddress takes it off the         }
+                    { footprint only. That is the case measured 2026-10-04 on      }
+                    { carrier.PcbLib (LibBoardStillListsCount's header): an object }
+                    { created this session and removed from its CURRENT footprint  }
+                    { only CAME BACK on the next lib_save_library. So the reply    }
+                    { says what the board still lists (read-only, and only while   }
+                    { the footprint is current, as the replace path reads it;      }
+                    { null otherwise) and never claims the file is clean.          }
+                    EmptyBoardText := '';
+                    If EmptyRemoved Then
+                    Begin
+                        EmptyCurrent := False;
+                        Try EmptyCurrent := (PcbLib.CurrentComponent = Footprint); Except EmptyCurrent := False; End;
+                        If EmptyCurrent Then
+                            EmptyBoardText := ' board_still_lists='
+                                + IntToStr(LibBoardStillListsCount(PcbLib.Board, EmptyEntries))
+                                + ' (copies of it the library board still holds).'
+                        Else
+                            EmptyBoardText := ' board_still_lists=null (not read: the '
+                                + 'footprint was not current).';
+                    End;
                     FailCode := 'MODEL_LOAD_FAILED';
                     If EmptyRemoved Then
                         Failure := 'Could not load a 3D model from ' + ModelPath
                             + ': it loaded as an empty model (no readable bounding '
                             + 'box and an overall height of 0), so the file is not a '
                             + 'model Altium can read, whatever its extension. The '
-                            + 'empty body was taken off the footprint again.'
+                            + 'empty body was taken off the footprint IN MEMORY only;'
+                            + EmptyBoardText + ' A body created in this session and '
+                            + 'removed this way has been measured to come back on the '
+                            + 'next save (2026-10-04). Do NOT save this library: run '
+                            + 'lib_reload_library to discard the change (if nothing '
+                            + 'else in it is unsaved). If it was saved with the body, '
+                            + 'remove it with lib_delete_footprint_primitives '
+                            + '(object_type componentbody, reload_first true): a '
+                            + 'disk-loaded body is the case measured to persist. Count '
+                            + 'the bodies IN THE FILE (lib_read_pcblib_file) after any '
+                            + 'save.'
                     Else
                         Failure := 'Could not load a 3D model from ' + ModelPath
                             + ': it loaded as an empty model (no readable bounding '
                             + 'box and an overall height of 0), and the empty body '
-                            + 'could NOT be taken off the footprint again: remove it '
-                            + 'with lib_delete_footprint_primitives (object_type '
+                            + 'could NOT be taken off the footprint again. Do NOT save '
+                            + 'this library: run lib_reload_library to discard the '
+                            + 'change, or remove the body with '
+                            + 'lib_delete_footprint_primitives (object_type '
                             + 'componentbody).';
                     If Replace And (RemovedDistinct > 0) Then
                         Failure := Failure + ' replace=true had ALREADY removed '

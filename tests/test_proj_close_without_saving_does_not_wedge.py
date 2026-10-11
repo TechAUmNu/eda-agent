@@ -50,28 +50,46 @@ def _before_the_close(body: str) -> str:
     return body.split(marker, 1)[0]
 
 
+def _arms(pre: str):
+    """(save=true arm, save=false arm) of the If SaveFirst ahead of the close.
+    Since the review of 498e5ca the save=true arm is a Begin/End block of its
+    own (it refuses the close while anything still reads modified), so the
+    arms are split at the discard, which only the save=false arm runs."""
+    head, sep, tail = pre.partition("Discarded := DiscardProjectMembers(Project);")
+    assert sep, "save=false no longer discards before the close"
+    save_arm = head[head.index("If SaveFirst Then"):]
+    assert re.search(r"\bElse\s+Begin\s*$", save_arm), (
+        "the discard is not the save=false arm of If SaveFirst")
+    return save_arm, tail
+
+
 def test_without_saving_the_edits_are_discarded_before_the_close(close):
-    pre = _before_the_close(close)
-    arm = re.search(
-        r"If SaveFirst Then\s+(?:Report := SaveProjectMembersReport\(Project, "
-        r"OnlyModified\)|SaveProjectMembers\(Project\))\s+Else\s+Begin"
-        r"(.*?)\bEnd;", pre, re.S)
-    assert arm, "save=false has no arm of its own ahead of the close"
-    assert "DiscardProjectMembers(Project)" in arm.group(1), (
-        "save=false reaches CloseObject with the documents still "
-        "modified, which raises a prompt the loop cannot answer")
+    save_arm, _discard = _arms(_before_the_close(close))
+    assert "DiscardProjectMembers" not in save_arm, (
+        "save=true must never discard")
 
 
 def test_a_discard_that_did_not_take_is_refused_before_the_close(close):
     """Checked, not trusted: the modified flag does not always propagate,
     and one document left dirty is enough to raise the prompt."""
-    pre = _before_the_close(close)
-    assert pre.index("DiscardProjectMembers") < pre.index("DirtyProjectMembers")
-    refusal = pre.split("DirtyProjectMembers(Project)", 1)[1]
+    _save_arm, discard = _arms(_before_the_close(close))
+    refusal = discard.split("DirtyProjectMembers(Project)", 1)[1]
     assert '"closed":false' in refusal
     assert '"still_modified":' in refusal
     assert re.search(r"\bExit;", refusal), (
         "a refusal that falls through still issues the close")
+
+
+def test_a_save_that_left_anything_modified_is_refused_before_the_close(close):
+    """Review of 498e5ca: save=true never checked, so a declined save (or a
+    member the save walk does not write) reached CloseObject and Altium's
+    own save prompt. Executed in tests/test_review_03_repairs_and_03b.py."""
+    save_arm, _discard = _arms(_before_the_close(close))
+    assert save_arm.index("SaveProjectMembersReport") < save_arm.index(
+        "DirtyProjectMembers(Project)")
+    refusal = save_arm.split("DirtyProjectMembers(Project)", 1)[1]
+    assert '"closed":false' in refusal and '"still_modified":' in refusal
+    assert re.search(r"\bExit;", refusal)
 
 
 def test_the_retry_is_only_for_a_close_without_saving(close):

@@ -1296,6 +1296,40 @@ Begin
     End;
 End;
 
+{ The record's file keys that are IN PathList (pipe-separated paths, keyed by }
+{ DocPathKey), for a reply about ONE project: proj_save / proj_close used     }
+{ BridgeRecordKeys(0), the whole workspace's record, so a save of project A   }
+{ listed project B's and free documents' pending edits as if this save had   }
+{ left them unwritten (review of 498e5ca).                                   }
+Function BridgeRecordKeysIn(PathList : String) : String;
+Var
+    Remaining, Key, Wanted : String;
+    P : Integer;
+Begin
+    Result := '';
+    If Trim(PathList) = '' Then Exit;
+    Wanted := '|' + DocPathKey(PathList) + '|';
+    Remaining := BridgeRecordKeys(0);
+    While Remaining <> '' Do
+    Begin
+        P := Pos('|', Remaining);
+        If P > 0 Then
+        Begin
+            Key := Copy(Remaining, 1, P - 1);
+            Remaining := Copy(Remaining, P + 1, Length(Remaining) - P);
+        End
+        Else
+        Begin
+            Key := Remaining;
+            Remaining := '';
+        End;
+        If Key = '' Then Continue;
+        If Pos('|' + Key + '|', Wanted) = 0 Then Continue;
+        If Result <> '' Then Result := Result + '|';
+        Result := Result + Key;
+    End;
+End;
+
 Function MarkDocDirty(FilePath : String) : Boolean;
 Var
     ServerDoc, Focused : IServerDocument;
@@ -1541,6 +1575,20 @@ End;
 { read" (Altium could not have read it either, and the box is the cost of   }
 { guessing wrong); Result is assigned from locals only, last (the            }
 { delphiscript_result_clobber note on ReadFileContent).                     }
+{ KNOWN LIMIT: the OLE test proves only that the file is SOME compound      }
+{ document, not that it is a board or a sheet. A .PcbLib, .SchDoc or .SchLib }
+{ renamed .PcbDoc (or the reverse) passes and reaches OpenDocument, which is }
+{ the same kind mismatch Altium answers with its own box (the               }
+{ BoardPathLibraryRefusal case); .Pcb and .OutJob are judged on extension + }
+{ "readable and not empty" only. Telling them apart would need the OLE      }
+{ root directory's storage names - a binary-safe read with live precedent,  }
+{ which TStringList is not. Not a regression: these opened the same way     }
+{ before 498e5ca.                                                            }
+{ NOT YET RUN LIVE ON A HEALTHY CLOSED BINARY FILE: ReadFileContent's live   }
+{ precedent is small text files. RELEASE_VERIFICATION's 2026.10.11.03       }
+{ re-check opens a closed healthy binary and ASCII .PcbDoc / .SchDoc first  }
+{ (positive controls, before P6b): a BOARD_FILE_UNREADABLE or a failed      }
+{ sheet on a healthy file means this read or the head test misjudged it.    }
 Function FileLooksLoadable(Path : String) : Boolean;
 Var
     SL : TStringList;
@@ -1911,8 +1959,9 @@ Begin
 End;
 
 { A board_path that names a board FILE nothing can load: a .PcbDoc (or .Pcb) }
-{ that is not open, is on disk, and is empty, unreadable or not an Altium    }
-{ board file (UnopenedFileUnloadable). Live 2026-10-11 (bridge 2026.10.11.02,}
+{ that is not open, is on disk, and is empty, unreadable, or not a compound/  }
+{ ASCII file (UnopenedFileUnloadable; a compound file of another kind is NOT }
+{ caught - FileLooksLoadable's known limit). Live 2026-10-11 (2026.10.11.02, }
 { probe P6b): a 0-byte scratch.PcbDoc reached OpenDocument('PCB', ...),     }
 { Altium put up its OWN uncounted 'Warning - File type not recognised.' box,}
 { and after OK handed back a NON-Nil blank document that                    }
@@ -1930,8 +1979,8 @@ Begin
     If (Ext <> '.PCBDOC') And (Ext <> '.PCB') Then Exit;
     If Not UnopenedFileUnloadable(Path) Then Exit;
     Result := 'board_path names a file that cannot be loaded as a board: '
-        + Path + ' is empty, could not be read, or does not start like an '
-        + 'Altium board file. Nothing was opened or changed. Altium answers '
+        + Path + ' is empty, could not be read, or is neither a compound '
+        + '(OLE) nor an ASCII Altium file. Nothing was opened or changed. Altium answers '
         + 'such a file with its own "File type not recognised." box and then '
         + 'a blank document, which an edit would have landed in. Check the '
         + 'path, or name a board that is open (pcb_focus_board).';
@@ -2216,7 +2265,7 @@ Begin
     End;
 End;
 
-{ THE SAVE WALKS TOUCH DESIGN DOCUMENTS ONLY (live 2026-10-11, bridge       }
+{ THE SAVE WALKS NEVER TOUCH A SCRIPT UNIT (live 2026-10-11, bridge         }
 { 2026.10.11.02). Workspace.DM_Projects holds the bridge's OWN script       }
 { project, Altium_API.PrjScr, and Altium reopens a script unit (Library.pas }
 { that run) after a script error: every save-all reply listed               }
@@ -2237,16 +2286,22 @@ Begin
     Result := UpperCase(ExtractFileExt(Trim(Path))) = '.PRJSCR';
 End;
 
-{ IsSaveableDesignDoc: an ALLOW-list of the kinds this bridge writes - a    }
-{ sheet, a schematic library, a board, a PCB library, an output job (the     }
-{ DM_DocumentKind spellings every unit here compares: SCH, SCHLIB, PCB,      }
-{ PCBLIB, OUTPUTJOB). A script unit reads EditScriptDS / TEXT and is never  }
-{ one. A kind that cannot be read (or reads empty) falls back to the file   }
-{ extension of the same five types. The walks list nothing else and write   }
-{ nothing else: a script unit (or any other document kind) never reaches    }
-{ WriteDocAndNote, skipped_unmodified, free_documents_not_reached,          }
-{ documents_seen or still_dirty.                                            }
-Function IsSaveableDesignDoc(Doc : IDocument) : Boolean;
+{ IsSaveableDesignDoc: every document EXCEPT A SCRIPT UNIT (review of        }
+{ 498e5ca). The first N2 fix was an allow-list of five kinds (SCH, SCHLIB,   }
+{ PCB, PCBLIB, OUTPUTJOB); it stopped the script-unit write N2 measured, but }
+{ it also dropped every OTHER kind from the walks: an open ActiveBOM .BomDoc }
+{ (often reading modified just from being open), a Draftsman .PcbDwf, a       }
+{ harness or a text file was no longer written, listed or counted. So        }
+{ app_save_all answered still_dirty 0 with one still dirty, and proj_close   }
+{ save=true closed with it dirty - Altium's OWN "Save changes?" prompt,      }
+{ which blocks the polling loop uncounted (fatal class 2). Before 498e5ca    }
+{ the walk wrote those documents, and it does again.                         }
+{ IsScriptUnitDoc is the deny test, narrowed to what N2 measured: the kind   }
+{ EditScriptDS (Library.pas read it live), or a script / form extension     }
+{ (.pas .bas .vbs .js .tcl .dfm) whatever the kind reads. A script PROJECT   }
+{ (.PrjScr) is skipped whole by IsScriptProject before any of its members   }
+{ is looked at.                                                              }
+Function IsScriptUnitDoc(Doc : IDocument) : Boolean;
 Var
     Kind, Path, Ext : String;
 Begin
@@ -2254,18 +2309,26 @@ Begin
     If Doc = Nil Then Exit;
     Kind := '';
     Try Kind := UpperCase(Trim(Doc.DM_DocumentKind)); Except Kind := ''; End;
-    If (Kind = 'SCH') Or (Kind = 'SCHLIB') Or (Kind = 'PCB') Or (Kind = 'PCBLIB')
-        Or (Kind = 'OUTPUTJOB') Then
+    If Kind = 'EDITSCRIPTDS' Then
     Begin
         Result := True;
         Exit;
     End;
-    If Kind <> '' Then Exit;
     Path := '';
     Try Path := Doc.DM_FullPath; Except Path := ''; End;
     Ext := UpperCase(ExtractFileExt(Trim(Path)));
-    Result := (Ext = '.SCHDOC') Or (Ext = '.SCHLIB') Or (Ext = '.PCBDOC')
-        Or (Ext = '.PCBLIB') Or (Ext = '.OUTJOB');
+    Result := (Ext = '.PAS') Or (Ext = '.BAS') Or (Ext = '.VBS') Or (Ext = '.JS')
+        Or (Ext = '.TCL') Or (Ext = '.DFM');
+End;
+
+{ What the save walks write, list and count: anything that is not a script   }
+{ unit. A script unit never reaches WriteDocAndNote, skipped_unmodified,     }
+{ free_documents_not_reached, documents_seen or still_dirty.                 }
+Function IsSaveableDesignDoc(Doc : IDocument) : Boolean;
+Begin
+    Result := False;
+    If Doc = Nil Then Exit;
+    Result := Not IsScriptUnitDoc(Doc);
 End;
 
 { Save every modified IServerDocument the workspace knows about, both     }
@@ -2279,8 +2342,8 @@ Var
     Ext, DiskPath, DocPath : String;
 Begin
     If Doc = Nil Then Exit;
-    { Design documents only, before ANY lookup, write or listing: a script }
-    { unit is never written and never listed (IsSaveableDesignDoc).       }
+    { Before ANY lookup, write or listing: a script unit is never written }
+    { and never listed (IsSaveableDesignDoc = not IsScriptUnitDoc).       }
     If Not IsSaveableDesignDoc(Doc) Then Exit;
     Try
         { Only a document OPEN in the editor has an IServerDocument. A
@@ -2681,7 +2744,7 @@ Begin
             Project := Nil;
         End;
         If Project = Nil Then Continue;
-        { Design documents only, as the save walk (IsScriptProject,     }
+        { No script unit, as the save walk (IsScriptProject,            }
         { IsSaveableDesignDoc): a script unit is not seen or aged.      }
         If IsScriptProject(Project) Then Continue;
         For J := 0 To Project.DM_LogicalDocumentCount - 1 Do

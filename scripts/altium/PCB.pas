@@ -12285,7 +12285,9 @@ End;
 {..............................................................................}
 { ViaRuleValue - the value of "(Key=<number><unit>)" in a rule DESCRIPTOR, as  }
 { a coordinate. 0 when the key is absent, the number does not parse, or the    }
-{ unit is neither mil nor mm (a bare number is NOT guessed at).                }
+{ unit is neither mil nor mm (a bare number is NOT guessed at), or the value  }
+{ is past the physical ceiling (10000 mil / 254 mm, or a number longer than   }
+{ 12 characters): never a size the coordinate conversion could overflow on.   }
 {                                                                              }
 { The key must follow "(" and be followed (spaces allowed) by "=", matched     }
 { case-insensitively, so PreferedWidth never matches inside PreferedHoleWidth. }
@@ -12322,23 +12324,45 @@ Begin
             Break;
     End;
     If NumStr = '' Then Exit;
+    { NO NUMBER BIG ENOUGH TO OVERFLOW THE CONVERSION. MilsToCoordF and      }
+    { MMToCoord Round(V * 10000) / Round(MM * 1e7 / 25.4): a value past ~9e14 }
+    { mil overflows Round, and that EInvalidOp raises outside any Try - the }
+    { IDE's break-on-exception modal, which blocks the loop. A descriptor   }
+    { Altium wrote never holds one, but this is parsed text: more than 12   }
+    { characters, or a size past the physical ceiling (10000 mil = 254 mm,  }
+    { a via ten inches across), is no value at all.                         }
+    If Length(NumStr) > 12 Then Exit;
     While (I <= N) And (Copy(LowDesc, I, 1) = ' ') Do I := I + 1;
     UnitStr := Copy(LowDesc, I, 3);
     V := StrToFloatDef(NumStr, -1);
     If V <= 0 Then Exit;
     If UnitStr = 'mil' Then
-        Result := MilsToCoordF(V)
+    Begin
+        If V > 10000 Then Exit;
+        Result := MilsToCoordF(V);
+    End
     Else If Copy(UnitStr, 1, 2) = 'mm' Then
+    Begin
+        If V > 254 Then Exit;
         Result := MMToCoord(V);
+    End;
 End;
 
 {..............................................................................}
 { PCB_NormalizeVias - snap every free via's diameter + hole to its dominant    }
 { routing via-style rule's preferred values.                                   }
 {                                                                              }
-{ ONLY IDENTIFIERS THAT HAVE ALREADY RUN IN THIS REPO. An identifier the       }
-{ script engine does not know is its "Undeclared identifier" halt: no Try      }
-{ catches it and the polling loop dies (the 2026-10-11 class). So:             }
+{ ONE IDENTIFIER HERE HAS NEVER RUN: Board.FindDominantRuleForObject.          }
+{ Everything else has run in this repo. An identifier the script engine does  }
+{ not know is its "Undeclared identifier" halt: no Try catches it and the     }
+{ polling loop dies (the 2026-10-11 class). RELEASE_VERIFICATION P23 is the   }
+{ gate that proves the one exception live. So:                                }
+{ * FindDominantRuleForObject runs in a READ-ONLY pass BEFORE                 }
+{   PCBServer.PreProcess, one call per free via, and only when some rule      }
+{   gave values. Its rule NAME is cached in RuleNames, parallel to Matches;   }
+{   the modify pass after PreProcess looks the cached name up and writes      }
+{   Size / HoleSize only. A halt on that line therefore leaves no PreProcess  }
+{   open (the halt skips Finally, so a PostProcess could never have run).     }
 { * No constraint member is read off any rule. FindDominantRuleForObject       }
 {   answers a base IPCB_Rule, where PreferedWidth / PreferedHoleWidth do not   }
 {   exist (the measured room-rule failure, PCB_GetRoomRules), and no typed     }
@@ -12351,19 +12375,21 @@ End;
 {   THE VIA DESCRIPTOR FORMAT IS NOT MEASURED: pcb_get_rule_properties' own    }
 {   docstring shows a template form ("Routing Via (Templates Used To Check     }
 {   Via: ...)"), which carries no numbers. Then nothing is cached, every via   }
-{   counts in "no_rule_values", nothing changes, and the reply says so         }
+{   counts in "no_rule_values", the dominant rule is never asked for, nothing  }
+{   changes, the board is not marked, and the reply says so                    }
 {   ("via_rule_values": 0). Honest and harmless, never a halt.                 }
-{ * The rule kind is the LITERAL 11, not eRule_RoutingViaStyle, which has      }
-{   never run here (PCB_SetRuleProperties' house rule: literals for rule       }
-{   kinds). 11 is RoutingViaStyle's place in the published TRuleKind order,    }
-{   the order that gives the 2 / 24 / 42 this file already uses. NOT YET       }
-{   MEASURED (RELEASE_VERIFICATION P23 reads rule_kind off the default         }
-{   RoutingVias rule). A wrong ordinal answers a rule of another kind, whose   }
-{   name is not in the cache: "no_rule_values", never a halt.                  }
+{ * The rule kind is the LITERAL 11 in an Integer, not eRule_RoutingViaStyle,  }
+{   which has never run here (PCB_SetRuleProperties' house rule: literals for  }
+{   rule kinds). 11 is RoutingViaStyle's place in the published TRuleKind      }
+{   order, the order that gives the 2 / 24 / 42 this file already uses. NOT    }
+{   YET MEASURED (RELEASE_VERIFICATION P23 reads rule_kind off the default     }
+{   RoutingVias rule first). A wrong ordinal answers a rule of another kind,   }
+{   whose name is not in the cache: "no_rule_values", never a halt. A box on   }
+{   the call line itself cannot tell an unknown identifier from a refused      }
+{   Integer kind; either means the call must change.                           }
 { * The rule pass runs only when there is at least one FREE via, so a board    }
 {   without one reads no rule at all.                                          }
-{ The dominant rule is asked its Name only; values are cached by name BEFORE   }
-{ the PreProcess.                                                              }
+{ * The board is marked modified only when a via actually changed.            }
 {..............................................................................}
 Function PCB_NormalizeVias(Params : String; RequestId : String) : String;
 Var
@@ -12373,7 +12399,7 @@ Var
     Via : IPCB_Via;
     Rule : IPCB_Rule;
     Matches : TInterfaceList;
-    StyleNames, StyleSizes, StyleHoles : TStringList;
+    StyleNames, StyleSizes, StyleHoles, RuleNames : TStringList;
     RuleName, StyleName, RuleDesc : String;
     I, Idx, ViaStyleKind, Checked, Changed, NoValues, NewSize, NewHole : Integer;
     StyleSize, StyleHole, StyleCount : Integer;
@@ -12455,28 +12481,44 @@ Begin
         End;
     End;
 
+    { READ-ONLY PASS, BEFORE PreProcess: each free via's dominant rule NAME, }
+    { cached in RuleNames at the via's index in Matches. The one call here   }
+    { that has never run live (FindDominantRuleForObject, P23) is outside    }
+    { any open PreProcess, and is made only when some rule gave values - a   }
+    { template-form board never makes it.                                    }
+    RuleNames := TStringList.Create;
+    For I := 0 To Matches.Count - 1 Do
+    Begin
+        RuleName := '';
+        If StyleCount > 0 Then
+        Begin
+            Prim := Matches.Items[I];
+            If Prim <> Nil Then
+            Begin
+                Rule := Nil;
+                Try
+                    Via := Prim;
+                    Rule := Board.FindDominantRuleForObject(Via, ViaStyleKind);
+                Except
+                    Rule := Nil;
+                End;
+                { Name only: a base IPCB_Rule member. }
+                If Rule <> Nil Then
+                Begin
+                    Try RuleName := Rule.Name; Except RuleName := ''; End;
+                End;
+            End;
+        End;
+        RuleNames.Add(RuleName);
+    End;
+
     PCBServer.PreProcess;
     Try
         For I := 0 To Matches.Count - 1 Do
         Begin
             Prim := Matches.Items[I];
             If Prim = Nil Then Continue;
-            Rule := Nil;
-            Try
-                Via := Prim;
-                Rule := Board.FindDominantRuleForObject(Via, ViaStyleKind);
-            Except
-                Rule := Nil;
-            End;
-            If Rule = Nil Then
-            Begin
-                Inc(NoValues);
-                Continue;
-            End;
-
-            { Name only: a base IPCB_Rule member. }
-            RuleName := '';
-            Try RuleName := Rule.Name; Except RuleName := ''; End;
+            RuleName := RuleNames[I];
             Idx := -1;
             If RuleName <> '' Then Idx := StyleNames.IndexOf(RuleName);
             If Idx < 0 Then
@@ -12493,6 +12535,7 @@ Begin
             End;
 
             Try
+                Via := Prim;
                 PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast,
                     PCBM_BeginModify, c_NoEventData);
                 Via.Size := NewSize;
@@ -12505,11 +12548,15 @@ Begin
     Finally
         PCBServer.PostProcess;
     End;
+    RuleNames.Free;
     StyleHoles.Free;
     StyleSizes.Free;
     StyleNames.Free;
 
-    MarkDocDirtyByPath(Board.FileName);
+    { Marked only when something changed: no free via, a template-form   }
+    { descriptor, or no via whose rule gave values is not an edit, and a  }
+    { mark would put an untouched board on the bridge's record.           }
+    If Changed > 0 Then MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId,
         '{"checked":' + IntToStr(Checked) + ',"changed":' + IntToStr(Changed)
         + ',"free":' + IntToStr(Matches.Count)

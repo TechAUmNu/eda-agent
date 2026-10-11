@@ -2477,6 +2477,12 @@ Begin
         Component.AddSchObject(NewObj);
         SchRegisterObject(Component, NewObj);
         SchServer.ProcessControl.PostProcess(SchLib, '');
+        { THE LIBRARY IS FLAGGED AND THE SYMBOL REDRAWN, as every Lib_Add*  }
+        { handler does: SchDoc stays Nil on this route, so the document     }
+        { mark below never ran and the library read clean - a save route    }
+        { that declines clean documents skipped the new primitive. The      }
+        { component is the one resolved and written into just above.       }
+        MarkLibDirtyComp(SchLib, Component);
     End
     Else
     Begin
@@ -9730,9 +9736,11 @@ Var
     ContainerStr, LibCompName : String;
     FailuresJson, ItemReason, UnsupportedProp : String;
     FirstFailure, IsLib : Boolean;
+    CompCreated : Integer;
 Begin
     ResetPropertyDiag(0);
     SchDoc := Nil;
+    CompCreated := 0;
     Operations := ExtractJsonValue(Params, 'operations');
     If Operations = '' Then
     Begin
@@ -9831,6 +9839,7 @@ Begin
                                     Component.AddSchObject(NewObj);
                                     SchRegisterObject(Component, NewObj);
                                     Inc(Created);
+                                    Inc(CompCreated);
                                 End
                                 Else
                                 Begin
@@ -9896,6 +9905,11 @@ Begin
       the file and still listed as violations until the project was
       reopened. }
     If SchDoc <> Nil Then MarkDocDirtyByPath(SchDoc.DocumentName);
+    { container=component items: the library is flagged and the symbol     }
+    { redrawn (Lib_Add*'s MarkLibDirtyComp), once, when one was created.   }
+    { SchDoc stays Nil when every item went into the component, so the     }
+    { mark above cannot cover them.                                         }
+    If IsLib And (CompCreated > 0) Then MarkLibDirtyComp(SchLib, Component);
     Result := BuildSuccessResponse(RequestId,
         '{"created":' + IntToStr(Created) +
         ',"failed":' + IntToStr(Failed) +

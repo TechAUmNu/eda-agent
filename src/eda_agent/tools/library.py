@@ -2254,8 +2254,10 @@ def register_library_tools(mcp):
                 reopening the library (a symbol made this session and
                 no longer the last one made may need
                 ``lib_set_current_component`` first), and the edit
-                lands on the part the editor displays, or on part 1
-                when the symbol reports none. Omit to
+                lands on the symbol's current part (its CurrentPartID,
+                which can differ from the part the editor's spinner
+                shows), or on part 1 / display mode 0 when it reports
+                none. Omit to
                 edit the symbol held from ``lib_create_symbol`` /
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
@@ -2339,8 +2341,10 @@ def register_library_tools(mcp):
                 reopening the library (a symbol made this session and
                 no longer the last one made may need
                 ``lib_set_current_component`` first), and the edit
-                lands on the part the editor displays, or on part 1
-                when the symbol reports none. Omit to
+                lands on the symbol's current part (its CurrentPartID,
+                which can differ from the part the editor's spinner
+                shows), or on part 1 / display mode 0 when it reports
+                none. Omit to
                 edit the symbol held from ``lib_create_symbol`` /
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
@@ -2405,8 +2409,10 @@ def register_library_tools(mcp):
                 reopening the library (a symbol made this session and
                 no longer the last one made may need
                 ``lib_set_current_component`` first), and the edit
-                lands on the part the editor displays, or on part 1
-                when the symbol reports none. Omit to
+                lands on the symbol's current part (its CurrentPartID,
+                which can differ from the part the editor's spinner
+                shows), or on part 1 / display mode 0 when it reports
+                none. Omit to
                 edit the symbol held from ``lib_create_symbol`` /
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
@@ -2515,8 +2521,10 @@ def register_library_tools(mcp):
                 reopening the library (a symbol made this session and
                 no longer the last one made may need
                 ``lib_set_current_component`` first), and the edit
-                lands on the part the editor displays, or on part 1
-                when the symbol reports none. Omit to
+                lands on the symbol's current part (its CurrentPartID,
+                which can differ from the part the editor's spinner
+                shows), or on part 1 / display mode 0 when it reports
+                none. Omit to
                 edit the symbol held from ``lib_create_symbol`` /
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
@@ -5855,8 +5863,10 @@ def register_library_tools(mcp):
                 reopening the library (a symbol made this session and
                 no longer the last one made may need
                 ``lib_set_current_component`` first), and the edit
-                lands on the part the editor displays, or on part 1
-                when the symbol reports none. Omit to
+                lands on the symbol's current part (its CurrentPartID,
+                which can differ from the part the editor's spinner
+                shows), or on part 1 / display mode 0 when it reports
+                none. Omit to
                 edit the symbol held from ``lib_create_symbol`` /
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
@@ -5907,8 +5917,10 @@ def register_library_tools(mcp):
                 reopening the library (a symbol made this session and
                 no longer the last one made may need
                 ``lib_set_current_component`` first), and the edit
-                lands on the part the editor displays, or on part 1
-                when the symbol reports none. Omit to
+                lands on the symbol's current part (its CurrentPartID,
+                which can differ from the part the editor's spinner
+                shows), or on part 1 / display mode 0 when it reports
+                none. Omit to
                 edit the symbol held from ``lib_create_symbol`` /
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
