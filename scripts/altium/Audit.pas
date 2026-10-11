@@ -734,6 +734,7 @@ Var
     Trk : IPCB_Track;
     ArcObj : IPCB_Arc;
     ViaObj : IPCB_Via;
+    PadObj : IPCB_Pad;
     Tolerance : TCoord;
     ToleranceMils : Double;
     EndIdx, X, Y : Integer;
@@ -846,8 +847,15 @@ Begin
                                     End
                                     Else If Prim2.ObjectId = ePadObject Then
                                     Begin
+                                        { Narrowed first, like the via below: }
+                                        { Prim2.x on the declared            }
+                                        { IPCB_Primitive raised a modal, and  }
+                                        { the Except left Found False, so     }
+                                        { every pad-landed endpoint was       }
+                                        { reported as dangling.               }
+                                        PadObj := Prim2;
                                         If ((Prim2.Layer = eMultiLayer) Or (Prim2.Layer = Prim1.Layer))
-                                           And PointsCloseEnough(Prim2.x, Prim2.y, X, Y, Tolerance) Then
+                                           And PointsCloseEnough(PadObj.x, PadObj.y, X, Y, Tolerance) Then
                                             Found := True;
                                     End
                                     Else If Prim2.ObjectId = eViaObject Then
@@ -1218,7 +1226,11 @@ Begin
                 Try CompVar := Variant.DM_FindComponentVariationByUniqueId(
                     Comp.DM_UniqueId); Except End;
                 If CompVar = Nil Then Continue;
-                If CompVar.DM_VariationKind = eVariation_NotFitted Then
+                { 1 = not fitted, the literal every other variation read in }
+                { the bridge uses (Proj_GetVariants, PCB.pas). The enum name }
+                { appears nowhere else and is not proven declared; an       }
+                { undeclared identifier here is a modal outside any Try.    }
+                If CompVar.DM_VariationKind = 1 Then
                 Begin
                     Inc(Violations);
                     If Not First Then ItemsJson := ItemsJson + ',';
@@ -1485,7 +1497,14 @@ Begin
                         LayerId := Layer.LayerID;
                         If Via.IntersectLayer(LayerId) Then
                         Begin
-                            If ILayer.IsSignalLayer(LayerId) Then
+                            { LayerIdIsSignal, never ILayer.IsSignalLayer:   }
+                            { ILayer is undeclared in DelphiScript, so the  }
+                            { first via raised a modal and the Except left  }
+                            { every via with Connected = 0 (no violation    }
+                            { could ever be reported). The stack walk yields }
+                            { signal and plane layers only, so the Else     }
+                            { below still gets exactly the planes.          }
+                            If LayerIdIsSignal(LayerId) Then
                             Begin
                                 HitOnLayer := False;
                                 SIter := Board.SpatialIterator_Create;
@@ -1744,7 +1763,7 @@ Var
     LayerId : Integer;
     Checked, Violations : Integer;
     KindStr, DesStr, NetStr, LayerStr, ItemsJson, EntryJson : String;
-    First, Removed : Boolean;
+    First, Removed, PosFound : Boolean;
     PadX, PadY : TCoord;
 Begin
     Board := Nil;
@@ -1790,8 +1809,13 @@ Begin
                 NetStr := '';
                 If Obj.InNet Then
                     Try NetStr := Obj.Net.Name; Except End;
-                Try PadX := Obj.x; Except PadX := 0; End;
-                Try PadY := Obj.y; Except PadY := 0; End;
+                { Obj is declared IPCB_Primitive, which publishes no x/y:  }
+                { DelphiScript resolves members against the DECLARED type, }
+                { so Obj.x raised a modal before the Except. The resolver  }
+                { narrows pads and vias to their own types, and answers 0  }
+                { for anything else, which is what the Except gave.        }
+                PadX := PCBPrimitivePos(Obj, False, PosFound);
+                PadY := PCBPrimitivePos(Obj, True, PosFound);
 
                 Layer := Stack.FirstLayer;
                 While Layer <> Nil Do
@@ -2094,6 +2118,10 @@ Var
     DistMils : Integer;
     KindStr, DesStr, ItemsJson, EntryJson : String;
     First : Boolean;
+    { The position comes from PCBPrimitivePos, never Obj.x / Obj.y: Obj is }
+    { declared IPCB_Primitive, which publishes neither, and the raise was  }
+    { a modal that also left Violations counted with no item emitted.      }
+    PosFound : Boolean;
 Begin
     Board := Nil;
     Try Board := GetPCBBoardAnywhere(0); Except End;
@@ -2152,8 +2180,9 @@ Begin
                         JsonStr('kind', KindStr) + ',' +
                         JsonStr('designator', DesStr) + ',' +
                         JsonInt('distance_mils', DistMils) + ',' +
-                        JsonStr('at', '(' + IntToStr(CoordToMils(Obj.x)) + ',' +
-                                      IntToStr(CoordToMils(Obj.y)) + ')');
+                        JsonStr('at', '(' +
+                            IntToStr(CoordToMils(PCBPrimitivePos(Obj, False, PosFound))) + ',' +
+                            IntToStr(CoordToMils(PCBPrimitivePos(Obj, True, PosFound))) + ')');
                     ItemsJson := ItemsJson + JsonObj(EntryJson);
                 End;
             Except End;
@@ -3988,7 +4017,10 @@ Begin
                     Begin
                         Try
                             LayerId := Layer.LayerID;
-                            If ILayer.IsSignalLayer(LayerId) Then
+                            { LayerIdIsSignal: ILayer is undeclared, and the }
+                            { raise was a modal per through-hole pad per    }
+                            { layer, after which the pad went unchecked.    }
+                            If LayerIdIsSignal(LayerId) Then
                             Begin
                                 Try Rect := Pad.BoundingRectangleOnLayer(LayerId);
                                 Except Rect.Left := 0; Rect.Right := 0;

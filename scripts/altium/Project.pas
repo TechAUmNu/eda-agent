@@ -48,10 +48,33 @@ Begin
     End;
 End;
 
+{ The file-name part of a path that Rewrite can create: not empty, and free of }
+{ the characters Windows refuses in a name (< > " | ? * and control           }
+{ characters). Rewrite raises on any of them, and the raise is a modal before }
+{ the Except, so Proj_Create asks first. False gives the CREATE_FAILED reply  }
+{ those names already got, minus the popup. The folder part is not judged     }
+{ here: TargetDirExists answers for it.                                      }
+Function ProjStubNameWritable(Path : String) : Boolean;
+Var
+    StubName, C : String;
+    I : Integer;
+Begin
+    Result := False;
+    StubName := ExtractFileName(Path);
+    If StubName = '' Then Exit;
+    For I := 1 To Length(StubName) Do
+    Begin
+        C := Copy(StubName, I, 1);
+        If C < ' ' Then Exit;
+        If Pos(C, '<>"|?*') > 0 Then Exit;
+    End;
+    Result := True;
+End;
+
 Function Proj_Create(Params : String; RequestId : String) : String;
 Var
     ProjectPath, ProjectType, ProjectExt : String;
-    StubContent : String;
+    StubContent, StubDir : String;
     F : TextFile;
     Saved : Boolean;
 Begin
@@ -82,21 +105,40 @@ Begin
     End;
 
     Saved := False;
-    // Ensure the target directory exists; Rewrite throws EInOutError
-    // ("Invalid file name") into an engine modal if the folder is missing,
-    // and that modal escapes the Try/Except below.
-    Try ForceDirectories(ExtractFilePath(ProjectPath)); Except End;
-    Try
-        AssignFile(F, ProjectPath);
-        Rewrite(F);
+    { CHECK FIRST: a raise here is an engine modal BEFORE the Except runs, so
+      the Trys below are backstops for genuine faults, not guards.
+      - ForceDirectories('') raises EInOutError; for any other path it answers
+        False instead. A bare name or '' has no folder to make, so it is
+        skipped for those.
+      - Rewrite raises into a folder that is still missing, on '' and on a
+        name Windows refuses. Those paths got CREATE_FAILED after the modal;
+        now they get the same reply without it (Saved stays False).
+      - AssignFile/Rewrite is kept rather than WriteFileContent on purpose:
+        that helper retries the create 12 times, so the faults still left here
+        (an existing stub that is read-only or held open) would show twelve
+        modals instead of one. }
+    StubDir := ExtractFilePath(ProjectPath);
+    If StubDir <> '' Then
         Try
-            Write(F, StubContent);
-        Finally
-            CloseFile(F);
+            ForceDirectories(StubDir);
+        Except
+            RecordCaughtException('Proj_Create:ForceDirectories');
         End;
-        Saved := FileExists(ProjectPath);
-    Except
-        Saved := False;
+    If TargetDirExists(ProjectPath) And ProjStubNameWritable(ProjectPath) Then
+    Begin
+        Try
+            AssignFile(F, ProjectPath);
+            Rewrite(F);
+            Try
+                Write(F, StubContent);
+            Finally
+                CloseFile(F);
+            End;
+            Saved := FileExists(ProjectPath);
+        Except
+            RecordCaughtException('Proj_Create:Rewrite');
+            Saved := False;
+        End;
     End;
 
     If Not Saved Then
@@ -2856,11 +2898,15 @@ Begin
         Exit;
     End;
 
-    { Open/focus the OutJob document }
+    { Open/focus the OutJob document. outjob_path comes from the caller, and }
+    { a typo or a stale path handed Client.OpenDocument a file that is not   }
+    { there; OpenDocumentIfPresent asks first and answers Nil, which is what }
+    { a failed open already led to (nothing focused, the INI read below      }
+    { finds no container and says so).                                       }
     Try
         If Not Client.IsDocumentOpen(OutJobPath) Then
         Begin
-            OutJobDoc := Client.OpenDocument('OUTPUTJOB', OutJobPath);
+            OutJobDoc := OpenDocumentIfPresent('OUTPUTJOB', OutJobPath);
             If OutJobDoc <> Nil Then OutJobDoc.Focus;
         End
         Else
@@ -3933,9 +3979,24 @@ Begin
     { Copy the file to the project directory (skip if same location) }
     If UpperCase(SourcePath) <> UpperCase(DestPath) Then
     Begin
+        { CONSERVATIVE GUARD (live probe pending). A copy into a folder that }
+        { does not exist cannot succeed, so refusing it first loses nothing  }
+        { that works today: it gives the COPY_FAILED reply the raise led to, }
+        { without the modal. A project with no folder of its own (bare path) }
+        { passes, exactly as before.                                         }
+        If Not TargetDirExists(DestPath) Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'COPY_FAILED', 'Failed to copy file to project directory');
+            Exit;
+        End;
+        { NOT PROVEN: whether this binding declares CopyFile at all (nothing }
+        { else in the bridge uses it), and whether a failed copy raises or   }
+        { returns False. Neither has a check that keeps today's result, so   }
+        { the Try stays and the live run counts any catch.                   }
         Try
             CopyFile(SourcePath, DestPath, False);
         Except
+            RecordCaughtException('Proj_ImportDocument:CopyFile');
             Result := BuildErrorResponse(RequestId, 'COPY_FAILED', 'Failed to copy file to project directory');
             Exit;
         End;
@@ -4726,15 +4787,15 @@ Begin
             Continue;
         End;
 
-        Try
-            ServerDoc := Client.OpenDocument('SCH', FilePath);
-            If ServerDoc <> Nil Then
-                Inc(Loaded)
-            Else
-                Inc(Failed);
-        Except
+        { A member the .PrjPcb lists but that was moved, renamed or deleted   }
+        { handed Client.OpenDocument a missing file. OpenDocumentIfPresent    }
+        { asks first and answers Nil for it (and, as a backstop, for an open  }
+        { that raises), which is the same 'failed' count both used to give.   }
+        ServerDoc := OpenDocumentIfPresent('SCH', FilePath);
+        If ServerDoc <> Nil Then
+            Inc(Loaded)
+        Else
             Inc(Failed);
-        End;
     End;
 
     Data := '{"total_sheets":' + IntToStr(TotalSheets);
