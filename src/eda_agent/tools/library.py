@@ -2261,8 +2261,8 @@ def register_library_tools(mcp):
                 edit the symbol held from ``lib_create_symbol`` /
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
-                editor is never used (its members cannot be read safely
-                from a script: it halted the bridge on 2026-10-11).
+                editor is never used: it is not a fallback, and the
+                bridge never reads it.
 
         Example, one stage of a dual op-amp (sub-part 1) with shared
         power pins (sub-part 0):
@@ -2348,8 +2348,8 @@ def register_library_tools(mcp):
                 edit the symbol held from ``lib_create_symbol`` /
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
-                editor is never used (its members cannot be read safely
-                from a script: it halted the bridge on 2026-10-11).
+                editor is never used: it is not a fallback, and the
+                bridge never reads it.
 
         Returns:
             Dictionary confirming rectangle addition
@@ -2416,8 +2416,8 @@ def register_library_tools(mcp):
                 edit the symbol held from ``lib_create_symbol`` /
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
-                editor is never used (its members cannot be read safely
-                from a script: it halted the bridge on 2026-10-11).
+                editor is never used: it is not a fallback, and the
+                bridge never reads it.
 
         Returns:
             Dict with ``added``, ``failed``, ``total`` counts. A text whose
@@ -2528,8 +2528,8 @@ def register_library_tools(mcp):
                 edit the symbol held from ``lib_create_symbol`` /
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
-                editor is never used (its members cannot be read safely
-                from a script: it halted the bridge on 2026-10-11).
+                editor is never used: it is not a fallback, and the
+                bridge never reads it.
 
         Returns:
             Dict with ``added``, ``failed``, ``total`` counts.
@@ -5888,8 +5888,8 @@ def register_library_tools(mcp):
                 edit the symbol held from ``lib_create_symbol`` /
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
-                editor is never used (its members cannot be read safely
-                from a script: it halted the bridge on 2026-10-11).
+                editor is never used: it is not a fallback, and the
+                bridge never reads it.
 
         Returns:
             Dictionary confirming arc addition
@@ -5942,8 +5942,8 @@ def register_library_tools(mcp):
                 edit the symbol held from ``lib_create_symbol`` /
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
-                editor is never used (its members cannot be read safely
-                from a script: it halted the bridge on 2026-10-11).
+                editor is never used: it is not a fallback, and the
+                bridge never reads it.
 
         Returns:
             Dictionary confirming polygon addition with vertex count

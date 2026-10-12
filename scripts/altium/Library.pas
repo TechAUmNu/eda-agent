@@ -118,12 +118,14 @@ End;
 {                                                                            }
 { WHY THAT MATTERS (live 2026-10-11, AD 26.10.1.5): this procedure used to  }
 { read Component.CurrentPartID inside a Try whose Except "counted" the      }
-{ failure. In a fresh session the component was the editor's                }
-{ CurrentSchComponent, and the read was the script engine's "Undeclared     }
+{ failure. In a fresh session the read was the script engine's "Undeclared  }
 { identifier: CurrentPartID" box. That is NOT an exception: the engine      }
 { parks on the line, no Except runs, nothing is counted, the Finally that   }
 { would PostProcess is skipped, and after OK the polling loop was DEAD.     }
-{ A Try is no guard for a late-bound member that does not resolve.          }
+{ A Try is no guard for a late-bound member that does not resolve. The     }
+{ component was then taken to be the editor's CurrentSchComponent; the     }
+{ .12.02 run (D-F2-1) points at an UNASSIGNED LastCreatedLibComponent      }
+{ instead (Empty is not Nil; see GetTargetLibComponent and StartMCPPump).  }
 Procedure SetOwnerPart(Obj : ISch_GraphicalObject; PartId : Integer; DisplayMode : Integer);
 Begin
     If Obj = Nil Then Exit;
@@ -355,14 +357,18 @@ End;
 { which hands back a NARROWED reference whose members work.                 }
 {                                                                              }
 { THE EDITOR'S CurrentSchComponent IS NEVER ANSWERED. It used to be the     }
-{ fallback when nothing was held, and its members do not resolve on a       }
-{ component the script never obtained itself:                               }
-{   2026-08-08  SchIterator_Create on it (Lib_GetPinList)                   }
-{   2026-10-11  CurrentPartID on it (SetOwnerPart, fresh session, AD        }
-{               26.10.1.5: the polling loop DIED after OK)                  }
+{ fallback when nothing was held, and two halts were blamed on it:          }
+{   2026-08-08  SchIterator_Create (Lib_GetPinList)                         }
+{   2026-10-11  CurrentPartID (SetOwnerPart, fresh session, AD 26.10.1.5:   }
+{               the polling loop DIED after OK)                             }
 { Both were the script engine's "Undeclared identifier" box, which no Try   }
-{ catches, and copying it into an ISch_Component-typed variable does not    }
-{ narrow it (this Result was typed so both times). So with nothing held    }
+{ catches. THAT DIAGNOSIS IS NOW UNPROVEN (finding D-F2-1, 2026-10-12): the }
+{ same box came back on the .12.02 build with every CurrentSchComponent     }
+{ read removed, and the cause found was LastCreatedLibComponent itself -   }
+{ never assigned at pump start, so it held Empty, which is NOT Nil, and the }
+{ old 'If LastCreatedLibComponent <> Nil' branch handed Empty on in both    }
+{ earlier cases too. StartMCPPump now sets it Nil. Not reading the editor's }
+{ selection stays: it is harmless and conservative. So with nothing held    }
 { the answer is Nil, which every caller reports as NO_COMPONENT naming the  }
 { fix: pass component_name, or call lib_set_current_component /             }
 { lib_create_symbol first.                                                  }
@@ -411,8 +417,7 @@ Begin
         Result := 'No library component is held (or the one held is in '
             + 'another library). Pass component_name, or call '
             + 'lib_set_current_component (or lib_create_symbol) first. The '
-            + 'symbol selected in the editor is never used: its members cannot '
-            + 'be read safely from a script.';
+            + 'symbol selected in the editor is never used.';
 End;
 
 { Mark the focused SchLib doc dirty without an immediate full-file save.    }
@@ -1562,7 +1567,7 @@ Begin
 
     { The held component, or the one named by component_name found through  }
     { the library: never the editor's CurrentSchComponent, whose members    }
-    { halt the engine (ResolveEditLibComponent, GetTargetLibComponent).     }
+    { are never read (ResolveEditLibComponent, GetTargetLibComponent).      }
     CompName := ExtractJsonValue(Params, 'component_name');
     Component := ResolveEditLibComponent(SchLib, CompName);
     If Component = Nil Then
@@ -1635,7 +1640,7 @@ Begin
 
     { The held component, or the one named by component_name found through  }
     { the library: never the editor's CurrentSchComponent, whose members    }
-    { halt the engine (ResolveEditLibComponent, GetTargetLibComponent).     }
+    { are never read (ResolveEditLibComponent, GetTargetLibComponent).      }
     CompName := ExtractJsonValue(Params, 'component_name');
     Component := ResolveEditLibComponent(SchLib, CompName);
     If Component = Nil Then
@@ -1728,7 +1733,7 @@ Begin
 
     { The held component, or the one named by component_name found through  }
     { the library: never the editor's CurrentSchComponent, whose members    }
-    { halt the engine (ResolveEditLibComponent, GetTargetLibComponent).     }
+    { are never read (ResolveEditLibComponent, GetTargetLibComponent).      }
     CompName := ExtractJsonValue(Params, 'component_name');
     Component := ResolveEditLibComponent(SchLib, CompName);
     If Component = Nil Then
@@ -1878,9 +1883,10 @@ End;
 { ITERATOR hands it back.                                                     }
 {                                                                             }
 { PcbLib.CurrentComponent is a property accessor, the PCB twin of the SCH     }
-{ CurrentSchComponent whose members halted the engine on a component the     }
-{ script never obtained itself (2026-08-08 SchIterator_Create, 2026-10-11     }
-{ CurrentPartID). No PCB member read through CurrentComponent has failed on   }
+{ CurrentSchComponent, blamed for two engine halts (2026-08-08               }
+{ SchIterator_Create, 2026-10-11 CurrentPartID) that D-F2-1 (2026-10-12) now  }
+{ points at an unassigned held global instead. No PCB member read through     }
+{ CurrentComponent has failed on                                              }
 { record, so this is a CONSERVATIVE swap, not a fix of a measured fault: the  }
 { walk compares each iterator footprint to CurrentComponent by POINTER (the   }
 { measured LibMakeCurrentVerified recipe) and answers the iterator's own,     }
@@ -9127,7 +9133,7 @@ Begin
 
     { The held component, or the one named by component_name found through  }
     { the library: never the editor's CurrentSchComponent, whose members    }
-    { halt the engine (ResolveEditLibComponent, GetTargetLibComponent).     }
+    { are never read (ResolveEditLibComponent, GetTargetLibComponent).      }
     CompName := ExtractJsonValue(Params, 'component_name');
     Component := ResolveEditLibComponent(SchLib, CompName);
     If Component = Nil Then
@@ -9202,7 +9208,7 @@ Begin
 
     { The held component, or the one named by component_name found through  }
     { the library: never the editor's CurrentSchComponent, whose members    }
-    { halt the engine (ResolveEditLibComponent, GetTargetLibComponent).     }
+    { are never read (ResolveEditLibComponent, GetTargetLibComponent).      }
     CompName := ExtractJsonValue(Params, 'component_name');
     Component := ResolveEditLibComponent(SchLib, CompName);
     If Component = Nil Then
@@ -9804,7 +9810,7 @@ Begin
 
     { The held component, or the one named by component_name found through  }
     { the library: never the editor's CurrentSchComponent, whose members    }
-    { halt the engine (ResolveEditLibComponent, GetTargetLibComponent).     }
+    { are never read (ResolveEditLibComponent, GetTargetLibComponent).      }
     CompName := ExtractJsonValue(Params, 'component_name');
     Component := ResolveEditLibComponent(SchLib, CompName);
     If Component = Nil Then
@@ -9968,7 +9974,7 @@ Begin
 
     { The held component, or the one named by component_name found through  }
     { the library: never the editor's CurrentSchComponent, whose members    }
-    { halt the engine (ResolveEditLibComponent, GetTargetLibComponent).     }
+    { are never read (ResolveEditLibComponent, GetTargetLibComponent).      }
     CompName := ExtractJsonValue(Params, 'component_name');
     Component := ResolveEditLibComponent(SchLib, CompName);
     If Component = Nil Then
@@ -10104,7 +10110,7 @@ Begin
 
     { The held component, or the one named by component_name found through  }
     { the library: never the editor's CurrentSchComponent, whose members    }
-    { halt the engine (ResolveEditLibComponent, GetTargetLibComponent).     }
+    { are never read (ResolveEditLibComponent, GetTargetLibComponent).      }
     CompName := ExtractJsonValue(Params, 'component_name');
     Component := ResolveEditLibComponent(SchLib, CompName);
     If Component = Nil Then

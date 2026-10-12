@@ -26,7 +26,12 @@ does, on the 'no' branch, exactly what its Except branch did:
   were counted too until 2026-10-11, when the live run showed their read
   off CurrentSchComponent is the engine's 'Undeclared identifier' HALT,
   which no Except sees: they no longer read that reference at all
-  (tests/test_live_editor_component_is_never_read.py).
+  (tests/test_live_editor_component_is_never_read.py). CORRECTED
+  2026-10-12 (D-F2-1): the halt is now traced to the held global being
+  unassigned (Empty, not Nil) at pump start, not to the editor's
+  selection. These fixtures start the held globals at None/'', i.e. as
+  StartMCPPump now leaves them; tests/test_live_fresh_pump_globals.py
+  models the engine's Empty start.
 
 Every test EXECUTES the real Pascal (whole routines, or the exact source
 text of a handler's statements) through tests/pascal_eval.py, and fails on

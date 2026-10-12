@@ -1584,6 +1584,43 @@ Begin
     MarkLastFlagRaw := '';
     MarkLastFlagTests := '';
 
+    { EVERY OTHER GLOBAL THE REQUEST PATH READS, assigned here and never    }
+    { left to what the variable happens to hold (finding D-F2-1, live       }
+    { 2026-10-12, bridge 2026.10.12.02, AD 26.10.1.5).                      }
+    {                                                                        }
+    { In DelphiScript every variable is a Variant, and a global nobody has  }
+    { assigned holds Empty. Empty does NOT compare equal to Nil: in a fresh }
+    { Altium, with nothing created or selected through the bridge, the held }
+    { symbol below read as non-Nil, so GetTargetLibComponent handed it to   }
+    { OwnerPartIdOf, whose Component.CurrentPartID read was the engine's    }
+    { "Undeclared identifier: CurrentPartID" halt (Library.pas, inside a    }
+    { Try that did nothing) and the loop died. A second StartMCPServer in   }
+    { the same Altium would instead find the LAST session's values here,    }
+    { a held component included. So each is set the proven way (X := Nil,  }
+    { Name := '', a flag False, a counter 0): never VarIsEmpty or VarIsNull,}
+    { which have never run live. tests/test_live_fresh_pump_globals.py      }
+    { fails if a global any unit StartMCPPump can see declares is not       }
+    { assigned here or in a routine called before the timer is armed.       }
+    { The four held-symbol globals are cleared through Library.pas's own    }
+    { ForgetRememberedLibComponent, which makes exactly those assignments   }
+    { (component and document := Nil, name and path := ''): only Library.pas}
+    { touches them (tests/test_popup_free_crossfile.py).                    }
+    ForgetRememberedLibComponent(0);
+    RefreshingLib := False;
+    LastCompiledProject := Nil;
+    LastCompileTick := 0;
+    SaveAttempts := 0;
+    SaveSkipped := 0;
+    SaveSkippedPaths := '';
+    DocNameMemberKeys := '';
+    InFlightCommand := '';
+    InFlightStartMs := 0;
+    InFlightRequestId := '';
+    InFlightSince := '';
+    LastActivityTick := 0;
+    ResetNextStep(0);
+    ResetPropertyDiag(0);
+
     StatusStartTick := GetTickCount;
     StatusRequestCount := 0;
     StatusLastCommand := '';

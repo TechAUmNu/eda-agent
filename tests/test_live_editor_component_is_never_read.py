@@ -15,6 +15,15 @@ not an exception: no Except runs, nothing is counted, the Finally that
 would PostProcess is skipped. The 2026-08-08 Lib_GetPinList measurement
 (SchIterator_Create on the same reference) was the same class.
 
+CORRECTED 2026-10-12 (finding D-F2-1, bridge 2026.10.12.02): the same
+halt came back with every CurrentSchComponent read removed. The cause
+found is the held global itself: never assigned at pump start, so it held
+Empty, which is not Nil, and the old ``If LastCreatedLibComponent <> Nil``
+branch handed Empty on in both earlier cases too. That the editor's
+selection cannot be read is therefore UNPROVEN; not reading it stays
+(harmless and conservative). tests/test_live_fresh_pump_globals.py owns
+the fresh-pump case.
+
 So every test here models the editor's component as ``Dead``: ANY member
 access is an AssertionError, which no translated Except catches, exactly
 as no Pascal Except catches the engine's halt. The routines are EXECUTED
