@@ -123,9 +123,11 @@ End;
 { parks on the line, no Except runs, nothing is counted, the Finally that   }
 { would PostProcess is skipped, and after OK the polling loop was DEAD.     }
 { A Try is no guard for a late-bound member that does not resolve. The     }
-{ component was then taken to be the editor's CurrentSchComponent; the     }
-{ .12.02 run (D-F2-1) points at an UNASSIGNED LastCreatedLibComponent      }
-{ instead (Empty is not Nil; see GetTargetLibComponent and StartMCPPump).  }
+{ component was then taken to be the editor's CurrentSchComponent (now     }
+{ UNPROVEN); D-F2-1, read from the source after the .12.02 run, points at  }
+{ an UNASSIGNED LastCreatedLibComponent instead (Empty is not Nil; see     }
+{ GetTargetLibComponent and ResetSessionGlobals). That is consistent with  }
+{ both earlier halts, to be confirmed by session A (P8 on 2026.10.12.03).  }
 Procedure SetOwnerPart(Obj : ISch_GraphicalObject; PartId : Integer; DisplayMode : Integer);
 Begin
     If Obj = Nil Then Exit;
@@ -364,11 +366,14 @@ End;
 { Both were the script engine's "Undeclared identifier" box, which no Try   }
 { catches. THAT DIAGNOSIS IS NOW UNPROVEN (finding D-F2-1, 2026-10-12): the }
 { same box came back on the .12.02 build with every CurrentSchComponent     }
-{ read removed, and the cause found was LastCreatedLibComponent itself -   }
-{ never assigned at pump start, so it held Empty, which is NOT Nil, and the }
-{ old 'If LastCreatedLibComponent <> Nil' branch handed Empty on in both    }
-{ earlier cases too. StartMCPPump now sets it Nil. Not reading the editor's }
-{ selection stays: it is harmless and conservative. So with nothing held    }
+{ read removed. The cause read from the source is LastCreatedLibComponent  }
+{ itself - never assigned at pump start, so it held Empty, which is NOT    }
+{ Nil, and the old 'If LastCreatedLibComponent <> Nil' branch would hand   }
+{ Empty on. That is CONSISTENT WITH both earlier halts (for 2026-08-08     }
+{ nothing records whether that session had ever set the global), to be    }
+{ confirmed by session A (P8 on 2026.10.12.03). StartMCPPump now sets it  }
+{ Nil (ResetSessionGlobals). Not reading the editor's selection stays: it }
+{ is harmless and conservative. So with nothing held                       }
 { the answer is Nil, which every caller reports as NO_COMPONENT naming the  }
 { fix: pass component_name, or call lib_set_current_component /             }
 { lib_create_symbol first.                                                  }
@@ -1884,8 +1889,9 @@ End;
 {                                                                             }
 { PcbLib.CurrentComponent is a property accessor, the PCB twin of the SCH     }
 { CurrentSchComponent, blamed for two engine halts (2026-08-08               }
-{ SchIterator_Create, 2026-10-11 CurrentPartID) that D-F2-1 (2026-10-12) now  }
-{ points at an unassigned held global instead. No PCB member read through     }
+{ SchIterator_Create, 2026-10-11 CurrentPartID) that D-F2-1 (2026-10-12),     }
+{ read from the source, points at an unassigned held global instead (to be    }
+{ confirmed by session A, P8 on 2026.10.12.03). No PCB member read through    }
 { CurrentComponent has failed on                                              }
 { record, so this is a CONSERVATIVE swap, not a fix of a measured fault: the  }
 { walk compares each iterator footprint to CurrentComponent by POINTER (the   }

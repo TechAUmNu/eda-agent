@@ -27,9 +27,10 @@ does, on the 'no' branch, exactly what its Except branch did:
   off CurrentSchComponent is the engine's 'Undeclared identifier' HALT,
   which no Except sees: they no longer read that reference at all
   (tests/test_live_editor_component_is_never_read.py). CORRECTED
-  2026-10-12 (D-F2-1): the halt is now traced to the held global being
-  unassigned (Empty, not Nil) at pump start, not to the editor's
-  selection. These fixtures start the held globals at None/'', i.e. as
+  2026-10-12 (D-F2-1): read from the source, the halt is consistent with
+  the held global being unassigned (Empty, not Nil) at pump start, to be
+  confirmed by session A (P8 on 2026.10.12.03); the editor's-selection
+  theory is UNPROVEN. These fixtures start the held globals at None/'', i.e. as
   StartMCPPump now leaves them; tests/test_live_fresh_pump_globals.py
   models the engine's Empty start.
 

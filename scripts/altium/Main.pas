@@ -80,8 +80,8 @@ Var
 
     { SmartCompile cache state. Tick of the last DM_Compile and the Project    }
     { pointer it was run against, so we only skip when the SAME project was    }
-    { compiled recently. Reset to 0 / Nil at startup (StartMCPPump; until      }
-    { 2026.10.12.03 this comment said so and nothing did it).                  }
+    { compiled recently. Reset to 0 / Nil at startup (ResetSessionGlobals;     }
+    { until 2026.10.12.03 this comment said so and nothing did it).            }
     LastCompileTick : Cardinal;
     { Documents the last save pass actually reached. See
       SaveOneDocByDocRef. Reset by App_SaveAll before each pass. }
@@ -238,8 +238,10 @@ Var
       start, and an unassigned DelphiScript global is Empty, which does
       NOT compare equal to Nil. A read of LibReference on this global in a
       session that had never set it would be the same box for that reason
-      alone. StartMCPPump now assigns them (Nil / ''), and the rule above
-      stays either way. }
+      alone. That is consistent with both earlier halts and is to be
+      confirmed by session A (P8 on 2026.10.12.03). StartMCPPump now
+      assigns them (Nil / '', through ResetSessionGlobals), and the rule
+      above stays either way. }
     LastCreatedLibComponentName : String;
 
     { The library document LastCreatedLibComponent belongs to, recorded when  }

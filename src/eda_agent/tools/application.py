@@ -565,8 +565,9 @@ def register_application_tools(mcp):
             the count of still-modified documents before and after.
             "sch_server_loaded" says whether the schematic server is
             registered at all; "sch_post_process" true means only that
-            it is and the unwind did not raise (on AD 26.10.1.5 the
-            server is registered at startup, schematic or not).
+            it is and the unwind did not raise (on AD 26.10.1.5 it
+            was already registered in a fresh session with no
+            schematic document; when it loads was not measured).
         """
         bridge = get_bridge()
         result = await bridge.send_command_async(

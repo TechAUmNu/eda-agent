@@ -1122,8 +1122,10 @@ Begin
     { sch_post_process true therefore means only that the server is         }
     { registered and the call did not raise. MEASURED 2026-10-12 (AD         }
     { 26.10.1.5): true in a fresh Altium with no schematic document at all - }
-    { the server is registered at startup. sch_server_loaded reports the     }
-    { Nil test on its own, so "server present, no document" is visible.      }
+    { the server was already registered (WHEN it loads - at startup, through }
+    { the Projects panel or through the Altium_API.PrjScr script project -  }
+    { was not measured). sch_server_loaded reports the Nil test on its own, }
+    { so "server present, no document" is visible.                           }
     SchOk := False;
     SchLoaded := False;
     If SchServer <> Nil Then

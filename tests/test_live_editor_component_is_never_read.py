@@ -17,9 +17,12 @@ would PostProcess is skipped. The 2026-08-08 Lib_GetPinList measurement
 
 CORRECTED 2026-10-12 (finding D-F2-1, bridge 2026.10.12.02): the same
 halt came back with every CurrentSchComponent read removed. The cause
-found is the held global itself: never assigned at pump start, so it held
-Empty, which is not Nil, and the old ``If LastCreatedLibComponent <> Nil``
-branch handed Empty on in both earlier cases too. That the editor's
+read from the source is the held global itself: never assigned at pump
+start, so it held Empty, which is not Nil, and the old ``If
+LastCreatedLibComponent <> Nil`` branch would hand Empty on. That is
+consistent with both earlier halts (nothing records whether the
+2026-08-08 session had ever set the global) and is to be confirmed by
+session A (P8 on 2026.10.12.03). That the editor's
 selection cannot be read is therefore UNPROVEN; not reading it stays
 (harmless and conservative). tests/test_live_fresh_pump_globals.py owns
 the fresh-pump case.
