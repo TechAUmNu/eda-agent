@@ -31,6 +31,28 @@ site that disappears fails too, so the list cannot rot.
 
 On 75e3286 this fails: ``Generic.pas Gen_PlaceCrossSheetConnector Conn
 .Side`` is not, and must never be, a reviewed site.
+
+WHAT THIS GUARD DOES NOT COVER (review of 2026.10.12.01). It scans
+references DECLARED at a base interface, and nothing else:
+
+* a DERIVED-typed local holding the wrong runtime object (26.9.1.9:
+  ``Body.Rotation`` on an ``IPCB_ComponentBody`` local), or an absent
+  member written through any derived-typed local (``ISch_Port``,
+  ``ISch_HarnessConnector``, a typed copy ``Comp := Obj``) passes it;
+* a BASE member on an unusual type passes it too: ``BASE_MEMBERS``
+  whitelists, e.g., ``IPCB_Primitive`` layer / net / incomponent /
+  iskeepout, which the sweep marks UNKNOWN on rule, connection and
+  dimension objects (#10), and ``ISch_GraphicalObject`` location, which
+  was measured to halt on a schematic polygon.
+
+Those are covered only by the FATAL-IF-WRONG release probes (P15, P28,
+P41-P49) and, for the one shape that already killed a session, by the
+targeted ``test_the_cross_sheet_handler_writes_only_location_and_text``.
+A green run here is NOT evidence that no member is absent at runtime.
+
+``REVIEWED_COUNTS`` pins how many accesses each reviewed key makes (1
+unless listed), so a second, ungated ``Obj.Name`` added inside an
+already-reviewed routine fails as a new site would.
 """
 from __future__ import annotations
 
@@ -164,6 +186,21 @@ _rev("PCB.pas", "PCB_AddTestpointsForNetClass", "Prim",
      "UNKNOWN on vias, normal use, inside PreProcess: FATAL-IF-WRONG "
      "probe P45")
 
+#: Accesses per reviewed key when more than one (every other key: 1).
+REVIEWED_COUNTS: dict[tuple[str, str, str, str], int] = {
+    ("Generic.pas", "Gen_ExplainPin", "Hit", "getstate_vertex"): 2,
+    ("Generic.pas", "Gen_ExplainPin", "Hit", "text"): 2,
+    ("Generic.pas", "Gen_GetDirectives", "ParamSet", "location"): 2,
+    ("Generic.pas", "Gen_MirrorSchComponent", "Prim", "corner"): 3,
+    ("Generic.pas", "Gen_MirrorSchComponent", "Prim", "orientation"): 3,
+    ("Generic.pas", "GetSchProperty", "Obj", "getstate_vertex"): 4,
+    ("Generic.pas", "GetSchProperty", "Obj", "orientation"): 3,
+    ("Generic.pas", "GetSchProperty", "Obj", "pinlength"): 3,
+    ("Generic.pas", "GetSchVertexProperty", "Obj", "getstate_vertex"): 2,
+    ("Generic.pas", "GetSchVertexProperty", "Obj",
+     "getstate_verticescount"): 2,
+}
+
 _BASE_LOWER = {t.lower(): t for t in BASE_MEMBERS}
 _BASE_LOWER["idocument"] = "IDocument"
 
@@ -278,8 +315,11 @@ def test_every_non_base_member_on_a_base_typed_reference_is_reviewed():
     new = sorted({f"{h[0]}:{h[5]} {h[1]}: {h[2]}.{h[3]} ({h[4]})"
                   for h in hits if _key(h) not in REVIEWED})
     assert not new, (
-        "member(s) read or written through a base-typed reference that "
-        "nobody has reviewed. On an object whose class lacks the member "
+        "member(s) read or written through a BASE-typed reference that "
+        "nobody has reviewed (this guard sees base-typed references only: "
+        "derived-typed locals and base members on unusual types are "
+        "covered by the FATAL-IF-WRONG probes P15/P28/P41-P49, not here). "
+        "On an object whose class lacks the member "
         "this is the script engine's 'Undeclared identifier' HALT (no "
         "Except runs, the polling loop dies - P21, 2026-10-12). Gate each "
         "on ObjectId (or use a member proven on that runtime type), or "
@@ -322,3 +362,57 @@ def test_the_scanner_sees_the_p21_shape():
     assert got == {("Conn", "Text"), ("Conn", "Side")}
     unreviewed = [h for h in hits if _key(h) not in REVIEWED]
     assert [(h[2], h[3]) for h in unreviewed] == [("Conn", "Side")]
+
+
+def test_each_reviewed_key_makes_exactly_its_recorded_number_of_accesses():
+    """A reviewed key is a SITE, not a licence for the routine: a new,
+    ungated access with the same (unit, routine, name, member) must fail
+    as any new site does."""
+    from collections import Counter
+
+    got = Counter(_key(h) for h in scan())
+    wrong = sorted(f"{k[0]} {k[1]}: {k[2]}.{k[3]} - {got.get(k, 0)} "
+                   f"access(es), recorded {REVIEWED_COUNTS.get(k, 1)}"
+                   for k in REVIEWED
+                   if got.get(k, 0) != REVIEWED_COUNTS.get(k, 1))
+    assert not wrong, (
+        "a reviewed routine gained or lost an access: review the new site "
+        "(gate it, or record why it is safe) and update REVIEWED_COUNTS:\n  "
+        + "\n  ".join(wrong))
+    assert set(REVIEWED_COUNTS) <= set(REVIEWED)
+
+
+def test_a_second_access_under_a_reviewed_key_is_caught():
+    """The count check sees a duplicated, ungated Conn.Text."""
+    import tempfile
+    from collections import Counter
+
+    src = ("Function Gen_PlaceCrossSheetConnector(Params : String) : String;\n"
+           "Var\n    Conn : ISch_GraphicalObject;\nBegin\n"
+           "    Try Conn.Text := 'N'; Except End;\n"
+           "    Conn.Text := 'M';\nEnd;\n")
+    with tempfile.TemporaryDirectory() as d:
+        Path(d, "Generic.pas").write_text(src, encoding="latin-1")
+        got = Counter(_key(h) for h in scan(Path(d)))
+    k = ("Generic.pas", "Gen_PlaceCrossSheetConnector", "Conn", "text")
+    assert got[k] == 2 != REVIEWED_COUNTS.get(k, 1)
+
+
+def test_the_cross_sheet_handler_writes_only_location_and_text():
+    """P21's shape, WHATEVER Conn is declared as: the base-typed scan above
+    would miss ``Conn : ISch_CrossSheetConnector; Conn.Side := 0``. No
+    Side, Orientation or CrossSheetStyle may be touched on the connector
+    (none is proven on that runtime type, and Side halted the engine)."""
+    src = (_ALTIUM / "Generic.pas").read_text(encoding="latin-1")
+    s = _blank(src)
+    m = re.search(r"^Function Gen_PlaceCrossSheetConnector\b.*?^End;", s,
+                  re.S | re.M | re.I)
+    assert m, "Gen_PlaceCrossSheetConnector not found"
+    body = m.group(0)
+    assert not re.search(r"\.\s*(Side|Orientation|CrossSheetStyle)\b", body,
+                         re.I), (
+        "the cross-sheet connector touches Side / Orientation / "
+        "CrossSheetStyle again")
+    members = {mm.group(1).lower() for mm in
+               re.finditer(r"(?<![\w.])Conn\s*\.\s*(\w+)", body, re.I)}
+    assert members == {"location", "text"}, members

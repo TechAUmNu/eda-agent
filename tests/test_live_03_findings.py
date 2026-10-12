@@ -358,6 +358,64 @@ def test_the_allowed_pairs_still_read_and_write():
     assert ctx.modals == [] and ctx.caught == []
 
 
+class _Unregistered:
+    """A constant the AD26 runtime might not register: evaluating it is the
+    engine's halt, which no Except sees."""
+
+    def __eq__(self, other):
+        raise _Halt("Undeclared identifier: eCompileMask")
+
+    __ne__ = __eq__
+    __hash__ = object.__hash__
+
+
+@pytest.mark.parametrize("prop", ["LineWidth", "IsSolid"])
+@pytest.mark.parametrize("type_name", ["eSchComponent", "eNetLabel", "ePin"])
+def test_a_line_width_or_solid_query_never_evaluates_ecompilemask(prop,
+                                                                  type_name):
+    """eCompileMask has never been evaluated by a live run (its users are
+    the 'compilemask' type word and a handler Python cannot reach). As the
+    LAST operand of the LineWidth / IsSolid allowlists it was evaluated for
+    every type no earlier operand matched - a default query path."""
+    ctx, ns = _prop_ns()
+    ns["eCompileMask"] = _Unregistered()
+    o = _obj(ctx, type_name)
+    assert ns["GetSchProperty"](o, prop) == ""
+    ns["SetSchProperty"](o, prop, "1")
+    assert ns["MatchesFilter"](o, f"{prop}=1") is False
+    assert ctx.modals == []
+
+
+@pytest.mark.parametrize("type_name", ["eLine", "eNoERC", "ePin",
+                                       "eSheetSymbol", "eTextFrame", "eImage"])
+def test_a_refused_is_mirrored_write_reports_failed_not_written(type_name):
+    """A non-component outside the IsMirrored allowlist is not written, and
+    the setter says so: -1 ('failed'), never 1 ('written')."""
+    ctx, ns = _prop_ns()
+    o = _obj(ctx, type_name)
+    assert ns["SetSchProperty"](o, "IsMirrored", "true") == -1
+    assert ctx.modals == [], "IsMirrored was touched"
+    assert ctx.diag == [("failed", "IsMirrored")]
+
+
+def test_an_admitted_is_mirrored_write_still_writes():
+    ctx, ns = _prop_ns()
+    lbl = _obj(ctx, "eNetLabel")
+    assert ns["SetSchProperty"](lbl, "IsMirrored", "true") == 1
+    assert lbl.IsMirrored is True and ctx.diag == []
+
+
+@pytest.mark.parametrize("type_name", ["eLine", "eWire", "eJunction",
+                                       "eImage"])
+def test_a_refused_orientation_write_is_unknown_and_not_written(type_name):
+    """It used to note 'unknown' AND return 1 ('written')."""
+    ctx, ns = _prop_ns()
+    o = _obj(ctx, type_name)
+    assert ns["SetSchProperty"](o, "Orientation", "1") == 0
+    assert ctx.modals == []
+    assert ctx.diag == [("unknown", "Orientation")]
+
+
 def test_harness_type_reads_on_a_harness_connector_only():
     ctx, ns = _prop_ns()
     hc = _obj(ctx, "eHarnessConnector", HarnessType="USB")
@@ -544,11 +602,15 @@ class _Fp:
 
 
 class _Lib:
-    def __init__(self, path, names=(), headless=False, drops=()):
+    """A PCB library. ``drops`` are names whose RegisterComponent does not
+    land; ``stuck`` makes RemoveComponent a silent no-op (a removal that
+    does not take)."""
+
+    def __init__(self, path, names=(), drops=(), stuck=False):
         self.path = path
         self.comps = [_Fp(n) for n in names]
-        self.headless = headless
         self.drops = set(drops)
+        self.stuck = stuck
         self.Board = SimpleNamespace(FileName=path,
                                      ViewManager_FullUpdate=None)
         self.RefreshView = None
@@ -572,24 +634,40 @@ class _Lib:
             self.comps.append(fp)
 
     def RemoveComponent(self, fp):
-        if fp in self.comps:
+        if not self.stuck and fp in self.comps:
             self.comps.remove(fp)
 
     def DeRegisterComponent(self, fp):
         pass
 
+    def names(self):
+        return [c.Name for c in self.comps]
+
+
+def _key(p):
+    return p.strip().replace("/", "\\").upper()
+
 
 class _World:
-    """Client documents, PCBServer libraries, OpenObject. A library opened
-    by OpenObject becomes a document; LoadPCBLibraryByPath gives a
-    HEADLESS library no document owns - lib_save_library's NOT_LOADED."""
+    """Documents (by DocPathKey, each with its canonical FileName), the DM
+    focus, OpenObject (opens an openable file as a document and focuses
+    it; focuses an open one), and the PCB server: GetCurrentPCBLibrary is
+    the FOCUSED document's library. ``stale`` maps a path to a BACKGROUND
+    instance that GetPCBLibraryByPath keeps returning even after the path
+    is open as a document - the review's two-call sequence. Background
+    loads are recorded, and must never happen."""
 
-    def __init__(self, libs, docs=(), openable=(), files=()):
-        self.libs = {k.upper(): v for k, v in libs.items()}
-        self.docs = {d.upper() for d in docs}
-        self.openable = {o.upper() for o in openable}
-        self.files = {f.upper() for f in files} | self.openable
+    def __init__(self, libs, docs=(), openable=(), files=(), stale=None,
+                 focus_sticks=True, focus=None):
+        self.libs = {_key(k): v for k, v in libs.items()}
+        self.docs = {_key(d): d for d in docs}
+        self.openable = {_key(o): o for o in openable}
+        self.files = {_key(f) for f in files} | set(self.openable)
+        self.stale = {_key(k): v for k, v in (stale or {}).items()}
+        self.focus_sticks = focus_sticks
+        self.focus = focus
         self.loaded: list = []
+        self.by_path: list = []
         self.opened: list = []
         self.marked: list = []
         self.pre = 0
@@ -599,25 +677,21 @@ class _World:
         class Client:
             @staticmethod
             def GetDocumentByPath(p):
-                return object() if p.upper() in world.docs else None
+                c = world.docs.get(_key(p))
+                return SimpleNamespace(FileName=c) if c else None
 
         class Server:
             @staticmethod
             def GetPCBLibraryByPath(p):
-                lib = world.libs.get(p.upper())
-                if lib is None:
-                    return None
-                if p.upper() in world.docs or lib.headless:
-                    return lib
-                return None
+                world.by_path.append(p)
+                if _key(p) in world.stale:
+                    return world.stale[_key(p)]
+                return world.libs.get(_key(p)) if _key(p) in world.docs else None
 
             @staticmethod
             def LoadPCBLibraryByPath(p):
                 world.loaded.append(p)
-                lib = world.libs.get(p.upper())
-                if lib is not None and p.upper() not in world.docs:
-                    lib.headless = True
-                return lib
+                return world.stale.get(_key(p)) or world.libs.get(_key(p))
 
             @property
             def PreProcess(self):
@@ -627,43 +701,67 @@ class _World:
             def PostProcess(self):
                 world.pre -= 1
 
-            GetCurrentPCBLibrary = None
+            @property
+            def GetCurrentPCBLibrary(self):
+                if world.focus is None:
+                    return None
+                return world.libs.get(_key(world.focus))
 
-        self.client, self.server = Client, Server()
+        class Workspace:
+            @property
+            def DM_FocusedDocument(self):
+                if world.focus is None:
+                    return None
+                return SimpleNamespace(DM_FullPath=world.focus)
+
+        self.client, self.server, self.workspace = Client, Server(), Workspace()
+
+    def find_doc(self, p):
+        c = self.docs.get(_key(p))
+        return SimpleNamespace(FileName=c) if c else None
 
     def run_process(self, name):
         assert name == "WorkspaceManager:OpenObject"
         p = self.params.get("FileName", "")
         self.opened.append(p)
-        if p.upper() in self.openable:
-            self.docs.add(p.upper())
+        k = _key(p)
+        if k not in self.docs and k in self.openable:
+            self.docs[k] = self.openable[k]
+        if k in self.docs and self.focus_sticks:
+            self.focus = self.docs[k]
 
     def ns(self, params):
         world = self
 
         def mark(p):
             world.marked.append(p)
-            return p.upper() in world.docs
+            return _key(p) in world.docs
 
         ns = _common({
             "Client": self.client, "PCBServer": self.server,
+            "GetWorkspace": self.workspace,
+            "FindOpenServerDoc": self.find_doc,
             "ExtractJsonValue": lambda pr, k: params.get(k, ""),
-            "FileExists": lambda p: p.strip().upper() in world.files,
-            "FileLooksLoadable": lambda p: p.strip().upper() in world.files,
+            "FileExists": lambda p: _key(p) in world.files,
+            "FileLooksLoadable": lambda p: _key(p) in world.files,
             "ResetParameters": lambda: world.params.clear(),
             "AddStringParameter": lambda k, v: world.params.__setitem__(k, v),
             "RunProcess": self.run_process,
             "MarkDocDirty": mark, "MarkDocDirtyByPath": mark,
             "MarkOutcomeJson": lambda d: "{}",
-            "PcbLibMayBeCurrent": lambda d: False,
+            "PcbLibMayBeCurrent": lambda d: world.focus is not None,
+            "PcbLibMayBeCurrentAt": lambda p: True,
             "eFullCopy": 1,
         })
+        build(_MAIN, ["ServerDocFileName"], ns)
         bodies = dict(_LIBRARY)
         bodies["Lib_MoveFootprints"] = _nb_rewrite(bodies["Lib_MoveFootprints"])
-        names = [n for n in ("PcbLibIsWorkspaceDoc", "PcbLibOpenAsDocument",
-                             "PcbLibNotOpenMessage") if n in bodies]
-        build(bodies, ["PcbLibLoadable"] + names
-              + ["Lib_CopyFootprint", "Lib_MoveFootprints"], ns)
+        helpers = [n for n in ("PcbLibLoadable", "PcbLibIsWorkspaceDoc",
+                               "PcbLibOpenAsDocument", "PcbLibDocPath",
+                               "PcbLibMayOpen", "PcbLibEnsureDocPath",
+                               "PcbLibDocLibrary", "PcbLibNotOpenMessage",
+                               "PcbLibNoDocLibraryMessage") if n in bodies]
+        build(bodies, helpers + ["Lib_CopyFootprint", "Lib_MoveFootprints"], ns)
         return ns
 
 
@@ -678,13 +776,13 @@ def test_a_copy_into_a_closed_destination_opens_it_as_a_document_first():
                "dest_library": DEST})
     reply = ns["Lib_CopyFootprint"]("{}", "r")
     assert reply[0] == "OK", reply
-    assert w.opened == [DEST] and DEST.upper() in w.docs
-    assert DEST not in w.loaded, "the destination was loaded headless"
-    assert dest.headless is False
-    assert dest.GetComponentByName("P13_COPY") is not None
+    assert DEST in w.opened and _key(DEST) in w.docs
+    assert w.loaded == [], "a library was loaded in the background"
+    assert dest.names() == ["OTHER", "P13_COPY"]
     assert reply[1]["pending_save"] is True
     assert reply[1]["written_to_disk"] is False
     assert reply[1]["marked_modified"] is True and "mark" in reply[1]
+    assert reply[1]["dest_opened"] is True
 
 
 def test_a_destination_that_cannot_be_opened_is_refused_with_nothing_changed():
@@ -695,7 +793,9 @@ def test_a_destination_that_cannot_be_opened_is_refused_with_nothing_changed():
     reply = ns["Lib_CopyFootprint"]("{}", "r")
     assert reply[0] == "ERR" and reply[1] == "DEST_NOT_OPEN", reply
     assert "Nothing was changed" in reply[2]
-    assert [c.Name for c in dest.comps] == ["OTHER"]
+    assert "it was not opened" in reply[2], (
+        "the refusal must say no open ran (the file is not there)")
+    assert dest.names() == ["OTHER"]
     assert w.loaded == [] and w.pre == 0
 
 
@@ -705,16 +805,19 @@ def test_a_relative_closed_destination_is_never_handed_to_openobject():
     ns = w.ns({"source_name": "P13_COPY", "source_library": SRC,
                "dest_library": "rel_dest.PcbLib"})
     reply = ns["Lib_CopyFootprint"]("{}", "r")
-    assert reply[1] == "DEST_NOT_OPEN" and w.opened == []
+    assert reply[1] == "DEST_NOT_OPEN"
+    assert "rel_dest.PcbLib" not in w.opened
 
 
 def test_a_move_out_of_a_closed_source_opens_it_or_deletes_nothing():
     src, dest = _Lib(SRC, ["A", "B"]), _Lib(DEST, [])
-    w = _World({SRC: src, DEST: dest}, docs=[DEST], files=[SRC])  # SRC closed
+    w = _World({SRC: src, DEST: dest}, docs=[DEST], files=[SRC])  # SRC won't open
     ns = w.ns({"source_library": SRC, "dest_library": DEST, "names": "A~~B"})
     reply = ns["Lib_MoveFootprints"]("{}", "r")
     assert reply[0] == "ERR" and reply[1] == "SOURCE_NOT_OPEN", reply
-    assert [c.Name for c in src.comps] == ["A", "B"] and dest.comps == []
+    assert "did not make it one" in reply[2], (
+        "an open WAS tried here, and the refusal must say so")
+    assert src.names() == ["A", "B"] and dest.comps == []
     assert w.loaded == [] and w.pre == 0
 
 
@@ -725,9 +828,9 @@ def test_a_move_into_a_closed_destination_that_opens_moves_and_marks_both():
     reply = ns["Lib_MoveFootprints"]("{}", "r")
     assert reply[0] == "OK", reply
     assert reply[1]["moved"] == 2 and reply[1]["deleted_from_source"] == 2
-    assert src.comps == [] and [c.Name for c in dest.comps] == ["A", "B"]
-    assert DEST not in w.loaded and dest.headless is False
-    assert reply[1]["pending_save"] is True
+    assert src.comps == [] and dest.names() == ["A", "B"]
+    assert w.loaded == []
+    assert reply[1]["pending_save"] is True and reply[1]["dest_opened"] is True
     assert set(w.marked) == {DEST, SRC}
 
 
@@ -737,18 +840,115 @@ def test_a_move_never_deletes_a_footprint_whose_copy_is_not_listed():
     ns = w.ns({"source_library": SRC, "dest_library": DEST, "names": "A~~B"})
     reply = ns["Lib_MoveFootprints"]("{}", "r")
     assert reply[1]["moved"] == 1 and reply[1]["copy_not_listed"] == 1
-    assert [c.Name for c in src.comps] == ["B"]
+    assert src.names() == ["B"]
 
 
-def test_a_copy_only_move_may_read_a_closed_source_in_the_background():
+def test_a_copy_only_move_reads_a_closed_source_through_its_document():
+    """Review of the first fix: a background load is what leaves a stale
+    instance behind for a LATER call, so a source that is only read is
+    opened as a document too - nothing is loaded in the background."""
     src, dest = _Lib(SRC, ["A"]), _Lib(DEST, [])
-    w = _World({SRC: src, DEST: dest}, docs=[DEST], files=[SRC])
+    w = _World({SRC: src, DEST: dest}, docs=[DEST], openable=[SRC])
     ns = w.ns({"source_library": SRC, "dest_library": DEST, "names": "A",
                "delete_from_source": "false"})
     reply = ns["Lib_MoveFootprints"]("{}", "r")
-    assert reply[0] == "OK" and reply[1]["moved"] == 1
-    assert w.loaded == [SRC]                       # read only, never edited
-    assert [c.Name for c in src.comps] == ["A"]
+    assert reply[0] == "OK" and reply[1]["moved"] == 1, reply
+    assert w.loaded == [], "the source was loaded in the background"
+    assert reply[1]["source_opened"] is True and _key(SRC) in w.docs
+    assert src.names() == ["A"] and dest.names() == ["A"]
+
+
+def test_a_stale_background_copy_never_receives_the_copy_or_costs_the_source():
+    """The review's sequence: an earlier call left a BACKGROUND instance of
+    X that GetPCBLibraryByPath keeps returning after X is opened as a
+    document. A move Y -> X (delete_from_source default) must put the copy
+    in X's DOCUMENT library - the one the save writes - and never in the
+    stale instance."""
+    x_doc, x_stale = _Lib(DEST, []), _Lib(DEST, [])
+    y = _Lib(SRC, ["FP"])
+    w = _World({SRC: y, DEST: x_doc}, docs=[SRC], openable=[DEST],
+               stale={DEST: x_stale})
+    ns = w.ns({"source_library": SRC, "dest_library": DEST, "names": "FP"})
+    reply = ns["Lib_MoveFootprints"]("{}", "r")
+    assert reply[0] == "OK", reply
+    assert x_stale.comps == [], "the copy landed in the background instance"
+    assert x_doc.names() == ["FP"], "the document library lacks the copy"
+    assert y.comps == [] and reply[1]["deleted_from_source"] == 1
+    assert w.by_path == [] and w.loaded == []
+
+
+def test_a_copy_into_an_open_library_spelled_with_slashes_copies_as_before():
+    """FindOpenServerDoc's DocPathKey finds an open destination however it
+    is spelled; nothing is opened under the caller's spelling."""
+    src, dest = _Lib(SRC, ["P"]), _Lib(DEST, [])
+    w = _World({SRC: src, DEST: dest}, docs=[SRC, DEST], focus=SRC)
+    slashed = DEST.replace("\\", "/").lower()
+    ns = w.ns({"source_name": "P", "source_library": SRC,
+               "dest_library": slashed})
+    reply = ns["Lib_CopyFootprint"]("{}", "r")
+    assert reply[0] == "OK", reply
+    assert dest.names() == ["P"]
+    assert slashed not in w.opened, "OpenObject ran on the caller's spelling"
+    assert all(o in (SRC, DEST) for o in w.opened), w.opened
+    assert reply[1]["dest_opened"] is False
+    assert reply[1]["dest_library"] == DEST
+
+
+def test_a_focus_that_does_not_land_is_refused_before_any_edit():
+    src, dest = _Lib(SRC, ["A"]), _Lib(DEST, [])
+    w = _World({SRC: src, DEST: dest}, docs=[SRC, DEST], focus=SRC,
+               focus_sticks=False)
+    ns = w.ns({"source_library": SRC, "dest_library": DEST, "names": "A"})
+    reply = ns["Lib_MoveFootprints"]("{}", "r")
+    assert reply[0] == "ERR" and reply[1] == "DEST_NOT_OPEN", reply
+    assert "could not be taken from the document" in reply[2]
+    assert src.names() == ["A"] and dest.comps == [] and w.pre == 0
+
+
+@pytest.mark.parametrize("handler", ["Lib_MoveFootprints", "Lib_CopyFootprint"])
+def test_an_overwrite_whose_old_footprint_survives_never_passes_for_the_copy(
+        handler):
+    """overwrite=true: the old same-named footprint's removal does not take
+    and the new copy does not land. GetComponentByName still answers the
+    OLD one; that must not count as the copy, and the source keeps it."""
+    src = _Lib(SRC, ["A"])
+    dest = _Lib(DEST, ["A"], drops=["A"], stuck=True)
+    old = dest.comps[0]
+    w = _World({SRC: src, DEST: dest}, docs=[SRC, DEST])
+    if handler == "Lib_MoveFootprints":
+        ns = w.ns({"source_library": SRC, "dest_library": DEST, "names": "A",
+                   "overwrite": "true"})
+        reply = ns[handler]("{}", "r")
+        assert reply[1]["moved"] == 0 and reply[1]["copy_not_listed"] == 1
+        assert reply[1]["deleted_from_source"] == 0
+    else:
+        ns = w.ns({"source_name": "A", "source_library": SRC,
+                   "dest_library": DEST, "overwrite": "true"})
+        reply = ns[handler]("{}", "r")
+        assert reply[0] == "ERR" and reply[1] == "COPY_FAILED", reply
+    assert src.names() == ["A"], "the source lost its footprint"
+    assert dest.comps == [old]
+
+
+def test_an_overwrite_that_takes_moves_the_new_copy():
+    src, dest = _Lib(SRC, ["A"]), _Lib(DEST, ["A"])
+    old = dest.comps[0]
+    w = _World({SRC: src, DEST: dest}, docs=[SRC, DEST])
+    ns = w.ns({"source_library": SRC, "dest_library": DEST, "names": "A",
+               "overwrite": "true"})
+    reply = ns["Lib_MoveFootprints"]("{}", "r")
+    assert reply[1]["moved"] == 1 and reply[1]["copy_not_listed"] == 0
+    assert dest.names() == ["A"] and dest.comps[0] is not old
+    assert src.comps == []
+
+
+@pytest.mark.parametrize("fname", ["Lib_MoveFootprints", "Lib_CopyFootprint"])
+def test_neither_handler_loads_or_resolves_a_library_by_path(fname):
+    """Source text: no background load and no by-path lookup are left for a
+    stale instance to come back through."""
+    body = strip_comments(_LIBRARY[fname])
+    assert "LoadPCBLibraryByPath" not in body
+    assert "GetPCBLibraryByPath" not in body
 
 
 # ---------------------------------------------------------------------------
@@ -783,11 +983,14 @@ class _GrpIter:
 class _Footprint:
     """``listed`` holds the body once per registration (a session-added
     primitive is listed twice until a reload); ``stuck`` makes every
-    removal raise, as a footprint that will not let go."""
+    removal raise, as a footprint that will not let go; ``silent`` makes
+    RemovePCBObject return without removing - the .03 run's case
+    (RemoveLibBodyByAddress answered True and the body stayed listed)."""
 
-    def __init__(self, prims, stuck=False):
+    def __init__(self, prims, stuck=False, silent=False):
         self.prims = list(prims)
         self.stuck = stuck
+        self.silent = silent
         self.I_ObjectAddress = 9
         self.removes = 0
 
@@ -802,7 +1005,8 @@ class _Footprint:
         self.removes += 1
         if self.stuck:
             raise PascalError("refused")
-        self.prims.remove(prim)
+        if not self.silent:
+            self.prims.remove(prim)
 
 
 def _snip():
@@ -816,9 +1020,9 @@ def _snip():
 
 
 def _link_empty(fp_listings=1, board_holds=True, board_takes=True,
-                current=True, stuck=False):
+                current=True, stuck=False, silent=False):
     body = _Body()
-    fp = _Footprint([body] * fp_listings, stuck=stuck)
+    fp = _Footprint([body] * fp_listings, stuck=stuck, silent=silent)
     board = {"held": [body.I_ObjectAddress] if board_holds else [],
              "remove_calls": []}
     lib = SimpleNamespace(CurrentComponent=fp if current else object(),
@@ -870,10 +1074,29 @@ def test_the_empty_body_comes_off_the_footprint_and_the_library_board():
     assert "footprint_still_lists=false" in ns["Failure"]
 
 
-def test_a_footprint_that_lists_it_three_times_is_emptied():
+def test_one_body_is_never_removed_more_than_twice():
+    """Body3D_RemoveAll's documented limit: a third sighting of one address
+    means RemovePCBObject is silently refusing it. The .03 run was that
+    case (the removal answered True, the body stayed listed); the first
+    fix repeated RemoveLibBodyByAddress up to 4 rounds = 8 removals."""
+    ns, fp, body, board = _link_empty(silent=True)
+    assert fp.removes == 2, f"{fp.removes} RemovePCBObject calls on one body"
+    det = json.loads(ns["EmptyDetails"])
+    assert det["footprint_still_lists"] is True
+    assert det["footprint_remove_rounds"] == 1
+    assert det["board_removal"] == {"requested": False}
+    assert board["remove_calls"] == []
+    assert det["removed_from_both"] is False
+    assert "Do NOT save this library" in ns["Failure"]
+    assert "footprint_still_lists=true" in ns["Failure"]
+
+
+def test_a_footprint_that_lists_it_three_times_is_reported_not_spun_on():
     ns, fp, body, board = _link_empty(fp_listings=3)
-    assert body not in fp.prims
-    assert json.loads(ns["EmptyDetails"])["footprint_still_lists"] is False
+    assert fp.removes == 2 and fp.prims == [body]
+    det = json.loads(ns["EmptyDetails"])
+    assert det["footprint_still_lists"] is True
+    assert board["remove_calls"] == [], "rule 4: the footprint still lists it"
 
 
 def test_a_board_removal_that_does_not_take_is_reported_not_claimed():
@@ -890,7 +1113,7 @@ def test_a_footprint_that_will_not_let_go_is_bounded_and_skips_the_board():
     ns, fp, body, board = _link_empty(stuck=True)
     det = json.loads(ns["EmptyDetails"])
     assert det["footprint_still_lists"] is True
-    assert det["footprint_remove_rounds"] == 4
+    assert det["footprint_remove_rounds"] == 1 and fp.removes == 1
     assert board["remove_calls"] == [], (
         "the board half ran on a body the footprint still lists (rule 4)")
     assert "Do NOT save this library" in ns["Failure"]

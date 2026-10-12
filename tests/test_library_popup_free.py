@@ -672,61 +672,15 @@ def test_component_count_is_not_asked_of_an_installed_file_that_has_gone():
 # 5. PcbLib load, 3D model format, mechanical kinds
 # ---------------------------------------------------------------------------
 
-class _PcbServer:
-    def __init__(self, get_raises):
-        self.get_raises, self.loaded = get_raises, []
-
-    def GetPCBLibraryByPath(self, p):
-        if self.get_raises:
-            raise PascalError("not loaded")
-        return None
-
-    def LoadPCBLibraryByPath(self, p):
-        self.loaded.append(p)
-        if not p.upper().endswith(".PCBLIB"):
-            raise PascalError("not a PCB library")
-        return "LIB"
-
-
-_LOAD = re.compile(r"Try (\w+) := PCBServer\.GetPCBLibraryByPath\((\w+)\);"
-                   r".*?LoadPCBLibraryByPath\(\2\); Except End;", re.S)
-
-
 @pytest.mark.parametrize("fname", ["Lib_MoveFootprints", "Lib_CopyFootprint"])
-def test_pcb_library_load_is_only_attempted_on_a_loadable_file(fname):
+def test_no_pcb_library_is_loaded_in_the_background(fname):
+    """No background load is left to raise on a bad file (the modal this
+    section once guarded) or to leave a stale instance behind for a later
+    call (review of 2026.10.12.01): every library these handlers read or
+    edit comes from its open document (tests/test_live_03_findings.py)."""
     body = strip_comments(_lib()[fname])
-    blocks = list(_LOAD.finditer(body))
-    # ONE background load since 2026.10.12.01: the SOURCE, and only when it
-    # is read, never edited. A library that will be edited is opened as a
-    # document or refused (P13, tests/test_live_03_findings.py).
-    assert len(blocks) == 1 == body.count("LoadPCBLibraryByPath("), fname
-    for m in blocks:
-        var, path = m.group(1), m.group(2)
-        snip = (f"Procedure Snip({path} : String);\nVar\n    {var} : Variant;\n"
-                f"Begin\n    {var} := Nil;\n" + m.group(0)
-                + f"\n    SnipOut := {var};\nEnd;")
-        here = r"C:\Libs\F.PcbLib"
-        for p, get_raises, want_loads in (
-                (r"C:\Libs\Gone.PcbLib", False, []),
-                (r"C:\Libs\A.SchLib", False, []),
-                (here, False, [here])):
-            server = _PcbServer(get_raises)
-            ns = _ns(files=[here, r"C:\Libs\A.SchLib"],
-                     extra={"PCBServer": server, "DeleteFromSource": False,
-                            "SameLib": False})
-            build(_lib(), ["PcbLibLoadable"], ns)
-            build({"Snip": snip}, ["Snip"], ns)
-            ns["Snip"](p)
-            assert server.loaded == want_loads, (fname, var, p)
-        server = _PcbServer(True)
-        ns = _ns(files=[here], extra={"PCBServer": server,
-                                      "DeleteFromSource": False,
-                                      "SameLib": False})
-        build(_lib(), ["PcbLibLoadable"], ns)
-        build({"Snip": snip}, ["Snip"], ns)
-        ns["Snip"](here)
-        assert ns["_caught"] == [f"{fname}:GetPCBLibraryByPath"]
-        assert ns["SnipOut"] == "LIB"
+    assert "LoadPCBLibraryByPath(" not in body, fname
+    assert "GetPCBLibraryByPath(" not in body, fname
 
 
 def test_an_unloadable_model_format_gets_the_model_nil_reply_before_preprocess():

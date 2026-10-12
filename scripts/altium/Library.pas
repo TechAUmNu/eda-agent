@@ -2240,9 +2240,17 @@ End;
 {    the shape that ran, so the default path makes the Altium calls the base  }
 {    build made and no others.                                                 }
 {                                                                              }
-{ 2. THE LIBRARY-BOARD HALF IS OPT-IN (remove_from_board=true) and runs only   }
-{    through LibBoardRemoveEntries below. UNMEASURED: no live session has run  }
-{    it. It exists because of the owner's report (2026-10-03) that a           }
+{ 2. THE LIBRARY-BOARD HALF IS OPT-IN for the delete tools                    }
+{    (remove_from_board=true) and runs only through LibBoardRemoveEntries      }
+{    below. One caller runs it WITHOUT being asked: lib_link_3d_model's        }
+{    empty-model undo, on the one body it has just added, and only when the   }
+{    footprint is current and no longer lists that body (rules 3 and 4).      }
+{    MEASURED ONCE, AND IT DID NOT TAKE: section 31 (2026-10-05) ran it on a  }
+{    session-created PAD - remove_calls 2, still_listed 1, and the save wrote }
+{    the pad back. No run has removed a component body from the library      }
+{    board. So every caller reads the board again afterwards and reports     }
+{    what it still lists; none may claim the removal. It exists because of   }
+{    the owner's report (2026-10-03) that a                                    }
 {    generated footprint "ignores primitive deletes until the library is       }
 {    reloaded", and the recipe "delete, reload, delete again". That fits an    }
 {    object whose library-board registration outlives a footprint-only         }
@@ -2376,7 +2384,8 @@ Begin
     End;
 End;
 
-{ LibBoardRemoveEntries - THE OPT-IN BOARD HALF. UNMEASURED (rule 2 above).   }
+{ LibBoardRemoveEntries - THE BOARD HALF (rule 2 above: opt-in for the      }
+{ deletes; measured once on a pad, where it did NOT take).                  }
 {                                                                              }
 { For each recorded object the footprint no longer lists:                     }
 {   * a fresh board iterator walks to it BY ADDRESS and stops there;           }
@@ -7088,23 +7097,34 @@ Begin
             { body crashed ADVPCB.DLL in PCB_Place3DBody), so judging before   }
             { Footprint.AddPCBObject would be a new, unproven call.            }
             {                                                                  }
-            { SO THE UNDO TAKES IT OFF BOTH THINGS IT WAS ADDED TO (live       }
-            { 2026-10-12, P7: the footprint-only undo of 2026.10.11.03 left     }
-            { the body listed on the footprint - 2 bodies, 7 after four empty  }
-            { loads - and the save wrote it into the file):                    }
-            {  * the FOOTPRINT, by address, repeated until the footprint's own }
-            {    body list no longer holds that address (bounded, 4 rounds of  }
-            {    RemoveLibBodyByAddress's two passes);                         }
-            {  * the LIBRARY BOARD, through LibBoardRemoveEntries (the         }
-            {    section-31 route: a fresh board iterator walks to the address,}
-            {    broadcast + RemovePCBObject), only while the footprint is     }
-            {    current (rule 3) and never while the footprint still lists it }
-            {    (rule 4);                                                     }
+            { THE UNDO, AND WHAT IT CAN HONESTLY PROMISE (live 2026-10-12, P7: }
+            { the footprint-only undo of 2026.10.11.03 left the body listed on }
+            { the footprint - 2 bodies, 7 after four empty loads - and the     }
+            { save wrote it into the file):                                    }
+            {  * the FOOTPRINT, by address: ONE RemoveLibBodyByAddress call -  }
+            {    its two passes, i.e. at most two RemovePCBObject calls on the }
+            {    one address, Body3D_RemoveAll's documented limit ("a third    }
+            {    sighting means RemovePCBObject is silently refusing it"). No  }
+            {    run has ever removed one body more than twice, and the .03   }
+            {    run is the refusal case: RemoveLibBodyByAddress answered True }
+            {    and the body was still listed, so repeating it is not a fix;  }
+            {  * the LIBRARY BOARD, through LibBoardRemoveEntries, only while  }
+            {    the footprint is current (rule 3) and never while the         }
+            {    footprint still lists the body (rule 4 - kept for a body this }
+            {    call added itself: handing the board an object its footprint  }
+            {    still lists is the interleave a review rejected, and nothing  }
+            {    measured says a self-added body is different). UNPROVEN ON A  }
+            {    BODY: section 31 ran this route once, on a PAD, and it did    }
+            {    NOT take (remove_calls 2, still_listed 1, written back by the }
+            {    save); no run has removed a component body from the board;    }
             { then BOTH are read again and the reply reports what the reads    }
             { say (footprint_still_lists, board_still_lists), never what the   }
-            { removal hoped. Section 31 measured that the board half can fail  }
-            { to take (still_listed 1 after remove_calls 2), which is exactly  }
-            { what board_still_lists exposes.                                  }
+            { removal hoped. THE LIKELY LIVE OUTCOME is the .03 one made       }
+            { honest: footprint_still_lists=true, footprint_remove_rounds=1,   }
+            { board_removal requested:false, "Do NOT save". The real fix is    }
+            { judging the model BEFORE the add, which needs a read of an       }
+            { UNOWNED body proven first; no code makes that read today        }
+            { (RELEASE_VERIFICATION "Still open": the empty-model judge).     }
             EmptyRemoved := False;
             EmptyEntries := '';
             EmptyDetails := '';
@@ -7119,13 +7139,14 @@ Begin
                     If EmptyAddr <> '' Then
                         EmptyEntries := LibAddRemovalEntry('', eComponentBodyObject, EmptyAddr);
 
-                    { The footprint half, until its own list no longer holds it. }
+                    { The footprint half: ONE call (two passes at most), then }
+                    { read the footprint's own list again. Never repeated.    }
                     EmptyFpPasses := 0;
                     EmptyFpStill := (EmptyAddr <> '')
                         And (Pos('|' + EmptyAddr + '|', Body3D_BodyAddresses(Footprint)) > 0);
-                    While EmptyFpStill And (EmptyFpPasses < 4) Do
+                    If EmptyFpStill Then
                     Begin
-                        Inc(EmptyFpPasses);
+                        EmptyFpPasses := 1;
                         EmptyScratch := '';
                         EmptyIgnore := RemoveLibBodyByAddress(Footprint, EmptyAddr, EmptyScratch);
                         EmptyFpStill := Pos('|' + EmptyAddr + '|', Body3D_BodyAddresses(Footprint)) > 0;
@@ -14142,82 +14163,151 @@ Begin
     Result := BuildSuccessResponse(RequestId, RespJson);
 End;
 
-{ Can PCBServer.LoadPCBLibraryByPath be handed Path without raising on an     }
-{ ordinary bad input? A .PcbLib that is not ABSOLUTE-and-missing. A missing  }
-{ file or another document kind (a .SchLib passed by mistake) raised, as a   }
-{ modal, and the handler then answered its NO_PCBLIB 'Failed to open ...'    }
-{ reply; False sends it to that reply directly. GetPCBLibraryByPath (already }
-{ open) is tried first by every caller, so an open unsaved library never     }
-{ reaches this.                                                              }
-Function PcbLibLoadable(Path : String) : Boolean;
-Var
-    P : String;
-Begin
-    P := Trim(Path);
-    Result := False;
-    If UpperCase(ExtractFileExt(P)) <> '.PCBLIB' Then Exit;
-    If LooksAbsolutePath(P) And (Not FileExists(P)) Then Exit;
-    Result := True;
-End;
-
-{ Is Path open as a WORKSPACE DOCUMENT? The test lib_save_library makes before }
-{ it will write anything (Client.GetDocumentByPath): a library loaded only    }
-{ through PCBServer.LoadPCBLibraryByPath is NOT one, and lib_save_library    }
-{ answers NOT_LOADED for it.                                                 }
-Function PcbLibIsWorkspaceDoc(Path : String) : Boolean;
-Var
-    Doc : IServerDocument;
-Begin
-    Result := False;
-    If Trim(Path) = '' Then Exit;
-    Doc := Nil;
-    Try Doc := Client.GetDocumentByPath(Trim(Path)); Except Doc := Nil; End;
-    Result := (Doc <> Nil);
-End;
-
-{ PcbLibOpenAsDocument - make a .PcbLib a real workspace document BEFORE an    }
-{ edit, so the edit can be saved.                                              }
+{..............................................................................}
+{ COPY / MOVE BETWEEN PCB LIBRARIES: EVERY LIBRARY COMES FROM ITS DOCUMENT.    }
 {                                                                              }
-{ WHY (live 2026-10-12, P13, bridge 2026.10.11.03): lib_copy_footprint into a }
+{ WHY (live 2026-10-12, P13, bridge 2026.10.11.03): lib_copy_footprint into a  }
 { CLOSED destination reported success, but the destination had been loaded    }
-{ headless (PCBServer.LoadPCBLibraryByPath), so the copy lived only in a       }
-{ library no document owns: it never reached the file, lib_save_library       }
+{ in the BACKGROUND (PCBServer.LoadPCBLibraryByPath), so the copy lived only   }
+{ in a library no document owns: it never reached the file, lib_save_library  }
 { answered NOT_LOADED, and a move (delete_from_source defaults true) could     }
 { have deleted the only saveable copy from its source.                        }
 {                                                                              }
-{ The open is the WorkspaceManager:OpenObject route every lib_ handler uses   }
-{ (FocusPcbLibForEdit, ResolveLibFootprint). Only an ABSOLUTE path to an       }
-{ existing .PcbLib whose bytes read as non-empty (FileLooksLoadable) is        }
-{ opened: Altium's own "File type not recognised" box for a broken file is    }
-{ uncounted and blocks the loop. Answers whether Path is a workspace document }
-{ AFTERWARDS - the caller refuses on False before any edit. OpenObject        }
-{ focuses the opened library; every caller has resolved what it needs from    }
-{ the previous focus first.                                                   }
-Function PcbLibOpenAsDocument(Path : String) : Boolean;
+{ AND WHY NOT BY PATH AT ALL (review of 2026.10.12.01's first fix): once a     }
+{ background copy of a path exists in the session, GetPCBLibraryByPath can     }
+{ keep handing it back after the same path is opened as a document - a copy   }
+{ then lands in the stale instance, a move deletes the original from a real   }
+{ document, and the save writes the destination WITHOUT the footprint. So     }
+{ neither handler loads anything in the background any more, and neither asks }
+{ GetPCBLibraryByPath: every library they read or edit is taken from its open }
+{ DOCUMENT - focused, then PCBServer.GetCurrentPCBLibrary, the route every    }
+{ lib_ edit handler uses (FocusPcbLibForEdit), which is by construction the   }
+{ document's library and the one lib_save_library writes.                     }
+{..............................................................................}
+
+{ The canonical path of the open workspace document for Path, '' when none.   }
+{ An ABSOLUTE path goes through FindOpenServerDoc (DocPathKey plus the        }
+{ workspace walk, so a forward-slash, case, subst or 8.3 spelling of an open  }
+{ library still finds it); a relative one keeps the plain                    }
+{ Client.GetDocumentByPath lookup. Only a .PcbLib document answers.           }
+Function PcbLibDocPath(Path : String) : String;
+Var
+    Doc : IServerDocument;
+    P, Got : String;
+Begin
+    Result := '';
+    P := Trim(Path);
+    If P = '' Then Exit;
+    Doc := Nil;
+    If LooksAbsolutePath(P) Then
+        Doc := FindOpenServerDoc(P)
+    Else
+        Try Doc := Client.GetDocumentByPath(P); Except Doc := Nil; End;
+    If Doc = Nil Then Exit;
+    Got := Trim(ServerDocFileName(Doc));
+    If Got = '' Then Got := P;
+    If UpperCase(ExtractFileExt(Got)) <> '.PCBLIB' Then Exit;
+    Result := Got;
+End;
+
+{ Would PcbLibEnsureDocPath hand Path to WorkspaceManager:OpenObject? Only an  }
+{ ABSOLUTE path to an existing .PcbLib whose bytes read as non-empty          }
+{ (FileLooksLoadable): Altium's own "File type not recognised" box for a      }
+{ broken file is uncounted and blocks the loop.                               }
+Function PcbLibMayOpen(Path : String) : Boolean;
 Var
     P : String;
 Begin
     P := Trim(Path);
-    Result := PcbLibIsWorkspaceDoc(P);
-    If Result Then Exit;
+    Result := False;
     If Not LooksAbsolutePath(P) Then Exit;
     If UpperCase(ExtractFileExt(P)) <> '.PCBLIB' Then Exit;
     If Not FileLooksLoadable(P) Then Exit;
-    ResetParameters;
-    AddStringParameter('ObjectKind', 'Document');
-    AddStringParameter('FileName', P);
-    RunProcess('WorkspaceManager:OpenObject');
-    Result := PcbLibIsWorkspaceDoc(P);
+    Result := True;
 End;
 
-{ The refusal both handlers give for a library that is not, and could not be  }
-{ made, a workspace document. Role is 'destination' or 'source'.              }
+{ The canonical document path for Path, OPENING it as a document first when   }
+{ it is closed and PcbLibMayOpen allows it; '' when it is not, and could not  }
+{ be made, a workspace document. Never a background load.                     }
+Function PcbLibEnsureDocPath(Path : String) : String;
+Begin
+    Result := PcbLibDocPath(Path);
+    If Result <> '' Then Exit;
+    If Not PcbLibMayOpen(Path) Then Exit;
+    ResetParameters;
+    AddStringParameter('ObjectKind', 'Document');
+    AddStringParameter('FileName', Trim(Path));
+    RunProcess('WorkspaceManager:OpenObject');
+    Result := PcbLibDocPath(Path);
+End;
+
+{ The LIBRARY OF THE OPEN DOCUMENT at Canon (a PcbLibDocPath answer), Nil when }
+{ it cannot be taken from that document. FocusPcbLibForEdit's route: focus     }
+{ the document (WorkspaceManager:OpenObject only when the DM focus is not      }
+{ already on it, compared by DocPathKey), read the focus back, then           }
+{ PcbLibMayBeCurrentAt + PCBServer.GetCurrentPCBLibrary. The library's own    }
+{ Board.FileName must name the same FILE (DocNameKey) when it reads: a        }
+{ current library of another file means the focus did not land, and the      }
+{ caller refuses.                                                             }
+Function PcbLibDocLibrary(Canon : String) : IPCB_Library;
+Var
+    Workspace : IWorkspace;
+    Doc : IDocument;
+    FocusedPath, LibFile : String;
+    Lib : IPCB_Library;
+Begin
+    Result := Nil;
+    If Trim(Canon) = '' Then Exit;
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Exit;
+    FocusedPath := '';
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+    If DocPathKey(FocusedPath) <> DocPathKey(Canon) Then
+    Begin
+        ResetParameters;
+        AddStringParameter('ObjectKind', 'Document');
+        AddStringParameter('FileName', Canon);
+        RunProcess('WorkspaceManager:OpenObject');
+        FocusedPath := '';
+        Doc := Workspace.DM_FocusedDocument;
+        If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+        If DocPathKey(FocusedPath) <> DocPathKey(Canon) Then Exit;
+    End;
+    Lib := Nil;
+    If PcbLibMayBeCurrentAt(Canon) Then Lib := PCBServer.GetCurrentPCBLibrary;
+    If Lib = Nil Then Exit;
+    LibFile := '';
+    Try LibFile := Lib.Board.FileName; Except LibFile := ''; End;
+    If (Trim(LibFile) <> '') And (DocNameKey(LibFile) <> DocNameKey(Canon)) Then Exit;
+    Result := Lib;
+End;
+
+{ The refusal for a library that is not, and could not be made, an open       }
+{ document. Role is 'destination' or 'source'. Says whether this call tried   }
+{ to open it, so a refusal never claims an open that did not run.            }
 Function PcbLibNotOpenMessage(Role : String; Path : String; Why : String) : String;
 Begin
     Result := 'The ' + Role + ' library ' + Path + ' is not open in Altium as '
-        + 'a document and could not be opened as one (it must be the ABSOLUTE '
-        + 'path of an existing, readable .PcbLib). ' + Why + ' Nothing was '
-        + 'changed.';
+        + 'a document';
+    If PcbLibMayOpen(Path) Then
+        Result := Result + ', and opening it as one (WorkspaceManager:'
+            + 'OpenObject) did not make it one.'
+    Else
+        Result := Result + ', and it was not opened: only the ABSOLUTE path '
+            + 'of an existing, readable .PcbLib is opened.';
+    Result := Result + ' ' + Why + ' Nothing was changed.';
+End;
+
+{ The refusal for a library that IS an open document whose library could not  }
+{ be taken from it (the focus did not land on it, or the current library is  }
+{ another file).                                                              }
+Function PcbLibNoDocLibraryMessage(Role : String; Canon : String) : String;
+Begin
+    Result := 'The ' + Role + ' library ' + Canon + ' is open, but its '
+        + 'library could not be taken from the document (focusing it did not '
+        + 'make it the current PCB library). Click its tab and retry, or run '
+        + 'lib_reload_library on it. Nothing was changed.';
 End;
 
 { Lib_MoveFootprints - bulk copy (+ optional delete) of footprints between two  }
@@ -14227,22 +14317,23 @@ End;
 { A name already in dest is skipped unless overwrite. delete_from_source         }
 { defaults true. Names arrive '~~'-separated.                                    }
 {                                                                                }
-{ BOTH ENDS THAT WILL BE EDITED MUST BE SAVEABLE (PcbLibOpenAsDocument): the     }
-{ destination always, the source when delete_from_source is set. A closed one   }
-{ is opened as a document; one that cannot be is refused (DEST_NOT_OPEN /        }
-{ SOURCE_NOT_OPEN) before anything is edited. A source that is only READ (no    }
-{ delete) may still be loaded in the background. A footprint is deleted from    }
-{ the source only after the destination LISTS its copy (GetComponentByName),    }
-{ so a copy that did not land never costs the original.                         }
+{ BOTH LIBRARIES COME FROM THEIR DOCUMENTS (the block above): a closed one is   }
+{ opened as a document first, one that cannot be is refused (SOURCE_NOT_OPEN /   }
+{ DEST_NOT_OPEN) before anything is edited, and nothing is loaded in the       }
+{ background. A footprint is deleted from the source only after the            }
+{ destination lists ITS COPY: the new footprint itself when overwrite replaced }
+{ a same-named one (an Existing whose removal did not take must not stand in   }
+{ for it), any same-named one otherwise (there was none before).               }
 { Params: source_library, dest_library, names (required), overwrite,            }
 {         delete_from_source.                                                    }
 Function Lib_MoveFootprints(Params : String; RequestId : String) : String;
 Var
     SourcePath, DestPath, NamesStr, Remaining, Name, OverwriteStr, DeleteStr, RespJson, FpName : String;
-    DestMarkJson, SourceMarkJson : String;
-    Overwrite, DeleteFromSource, DestMarked, SourceMarked : Boolean;
+    DestMarkJson, SourceMarkJson, SourceCanon, DestCanon, OpenedNote : String;
+    Overwrite, DeleteFromSource, DestMarked, SourceMarked, Listed : Boolean;
+    SourceWasOpen, DestWasOpen : Boolean;
     SourceLib, DestLib : IPCB_Library;
-    Footprint, NewFP, Existing, Fp : IPCB_LibComponent;
+    Footprint, NewFP, Existing, Fp, Got : IPCB_LibComponent;
     Moved, Skipped, Failed, NotVerified, Deleted, J : Integer;
 Begin
     SourcePath := ExtractJsonValue(Params, 'source_library');
@@ -14263,51 +14354,63 @@ Begin
         Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'names is required');
         Exit;
     End;
-    If UpperCase(SourcePath) = UpperCase(DestPath) Then
+    If DocPathKey(SourcePath) = DocPathKey(DestPath) Then
     Begin
         Result := BuildErrorResponse(RequestId, 'SAME_LIBRARY', 'source_library and dest_library are the same');
         Exit;
     End;
 
-    { Saveable ends FIRST, before either library is resolved: an OpenObject }
-    { after a resolve could leave the handler holding a background copy.    }
-    If Not PcbLibOpenAsDocument(DestPath) Then
+    { Both ends as open documents FIRST (opened if closed), then each      }
+    { library from its document. Never a background load.                 }
+    SourceWasOpen := (PcbLibDocPath(SourcePath) <> '');
+    SourceCanon := PcbLibEnsureDocPath(SourcePath);
+    If SourceCanon = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'SOURCE_NOT_OPEN',
+            PcbLibNotOpenMessage('source', SourcePath,
+                'The source is read (and, with delete_from_source, edited) '
+                + 'through its open document, never a background copy.'));
+        Exit;
+    End;
+    OpenedNote := '';
+    If Not SourceWasOpen Then
+        OpenedNote := ' The source library ' + SourceCanon + ' was opened as '
+            + 'a document by this call and is still open.';
+    DestWasOpen := (PcbLibDocPath(DestPath) <> '');
+    DestCanon := PcbLibEnsureDocPath(DestPath);
+    If DestCanon = '' Then
     Begin
         Result := BuildErrorResponse(RequestId, 'DEST_NOT_OPEN',
             PcbLibNotOpenMessage('destination', DestPath,
                 'A copy into a library loaded in the background can never be '
                 + 'saved (lib_save_library answers NOT_LOADED), so the move '
-                + 'would report footprints that never reach the file.'));
+                + 'would report footprints that never reach the file.')
+            + OpenedNote);
         Exit;
     End;
-    If DeleteFromSource And (Not PcbLibOpenAsDocument(SourcePath)) Then
+    If Not DestWasOpen Then
+        OpenedNote := OpenedNote + ' The destination library ' + DestCanon
+            + ' was opened as a document by this call and is still open.';
+    If DocPathKey(SourceCanon) = DocPathKey(DestCanon) Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'SOURCE_NOT_OPEN',
-            PcbLibNotOpenMessage('source', SourcePath,
-                'delete_from_source needs it open as a document so the '
-                + 'deletion can be saved; pass delete_from_source=false to '
-                + 'copy only.'));
+        Result := BuildErrorResponse(RequestId, 'SAME_LIBRARY',
+            'source_library and dest_library are the same open library ('
+            + DestCanon + ').' + OpenedNote);
         Exit;
     End;
 
-    SourceLib := Nil;
-    Try SourceLib := PCBServer.GetPCBLibraryByPath(SourcePath);
-    Except RecordCaughtException('Lib_MoveFootprints:GetPCBLibraryByPath'); End;
-    { Only a source that is READ, never edited, may come from the           }
-    { background load: with delete_from_source it is a document by now.     }
-    If (SourceLib = Nil) And (Not DeleteFromSource) And PcbLibLoadable(SourcePath) Then
-        Try SourceLib := PCBServer.LoadPCBLibraryByPath(SourcePath); Except End;
+    SourceLib := PcbLibDocLibrary(SourceCanon);
     If SourceLib = Nil Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'Failed to open source PCB library at ' + SourcePath + '. Nothing was changed.');
+        Result := BuildErrorResponse(RequestId, 'SOURCE_NOT_OPEN',
+            PcbLibNoDocLibraryMessage('source', SourceCanon) + OpenedNote);
         Exit;
     End;
-    DestLib := Nil;
-    Try DestLib := PCBServer.GetPCBLibraryByPath(DestPath);
-    Except RecordCaughtException('Lib_MoveFootprints:GetPCBLibraryByPath'); End;
-    If DestLib = Nil Then
+    DestLib := PcbLibDocLibrary(DestCanon);
+    If (DestLib = Nil) Or (DestLib = SourceLib) Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'Failed to open destination PCB library at ' + DestPath + '. Nothing was changed.');
+        Result := BuildErrorResponse(RequestId, 'DEST_NOT_OPEN',
+            PcbLibNoDocLibraryMessage('destination', DestCanon) + OpenedNote);
         Exit;
     End;
 
@@ -14348,8 +14451,13 @@ Begin
         Try NewFP.Name := Name; Except End;
         DestLib.RegisterComponent(NewFP);
 
-        { THE COPY MUST BE LISTED BEFORE THE ORIGINAL GOES. }
-        If DestLib.GetComponentByName(Name) = Nil Then
+        { THE COPY MUST BE LISTED BEFORE THE ORIGINAL GOES - the NEW one   }
+        { when a same-named footprint was replaced (interface equality,    }
+        { the PcbLib.CurrentComponent = Footprint form).                   }
+        Got := DestLib.GetComponentByName(Name);
+        Listed := (Got <> Nil);
+        If Listed And (Existing <> Nil) Then Listed := (Got = NewFP);
+        If Not Listed Then
         Begin
             Inc(NotVerified);
             Inc(Failed);
@@ -14373,20 +14481,20 @@ Begin
     DestMarkJson := 'null';
     If Moved > 0 Then
     Begin
-        DestMarked := MarkDocDirty(DestPath);
+        DestMarked := MarkDocDirty(DestCanon);
         DestMarkJson := MarkOutcomeJson(0);
     End;
     SourceMarked := False;
     SourceMarkJson := 'null';
     If Deleted > 0 Then
     Begin
-        SourceMarked := MarkDocDirty(SourcePath);
+        SourceMarked := MarkDocDirty(SourceCanon);
         SourceMarkJson := MarkOutcomeJson(0);
     End;
 
     RespJson := '{"success":true'
-        + ',"source_library":"' + EscapeJsonString(SourcePath) + '"'
-        + ',"dest_library":"' + EscapeJsonString(DestPath) + '"'
+        + ',"source_library":"' + EscapeJsonString(SourceCanon) + '"'
+        + ',"dest_library":"' + EscapeJsonString(DestCanon) + '"'
         + ',"moved":' + IntToStr(Moved)
         + ',"skipped":' + IntToStr(Skipped)
         + ',"failed":' + IntToStr(Failed)
@@ -14396,6 +14504,8 @@ Begin
         + ',"mark":' + DestMarkJson
         + ',"source_marked_modified":' + BoolToJsonStr(SourceMarked)
         + ',"source_mark":' + SourceMarkJson
+        + ',"source_opened":' + BoolToJsonStr(Not SourceWasOpen)
+        + ',"dest_opened":' + BoolToJsonStr(Not DestWasOpen)
         + ',"pending_save":' + BoolToJsonStr(Moved > 0)
         + ',"written_to_disk":false}';
     Result := BuildSuccessResponse(RequestId, RespJson);
@@ -14403,24 +14513,25 @@ End;
 
 { Lib_CopyFootprint - copy ONE footprint (all pads/primitives) by name into a   }
 { PcbLib, optionally renaming, the footprint analog of Lib_CopyComponent. No     }
-{ delete. Same-library copy requires a different new_name. Libraries resolve by  }
-{ path (default source = focused, dest = source). A name already in dest errors  }
-{ unless overwrite.                                                              }
+{ delete. Same-library copy requires a different new_name. Default source =     }
+{ the focused PcbLib, dest = source. A name already in dest errors unless        }
+{ overwrite.                                                                     }
 {                                                                                }
-{ THE DESTINATION MUST BE SAVEABLE (PcbLibOpenAsDocument): a closed one is      }
-{ opened as a document first, and one that cannot be is refused DEST_NOT_OPEN    }
-{ before anything is edited (P13, 2026-10-12: the copy into a background-loaded  }
-{ library said success and never reached the file). The source of a copy into  }
-{ ANOTHER library is only read, and may still be loaded in the background.      }
+{ EVERY LIBRARY COMES FROM ITS DOCUMENT (the block above Lib_MoveFootprints): a  }
+{ named library that is closed is opened as a document first, one that cannot  }
+{ be is refused (DEST_NOT_OPEN for the library that will be edited,            }
+{ SOURCE_NOT_OPEN for a source that is only read) before anything is edited,   }
+{ and nothing is loaded in the background (P13, 2026-10-12: the copy into a    }
+{ background-loaded library said success and never reached the file).        }
 { Params: source_name (required), new_name (default source_name),               }
 {         source_library (optional), dest_library (optional), overwrite.         }
 Function Lib_CopyFootprint(Params : String; RequestId : String) : String;
 Var
     SourceLibPath, DestLibPath, SourceName, NewName, OverwriteStr, RespJson, FpName : String;
-    MarkJson : String;
-    Overwrite, SameLib, Listed, Marked : Boolean;
+    MarkJson, SourceCanon, DestCanon : String;
+    Overwrite, SameLib, Listed, Marked, SourceWasOpen, DestWasOpen : Boolean;
     SourceLib, DestLib : IPCB_Library;
-    Footprint, NewFP, Existing, Fp : IPCB_LibComponent;
+    Footprint, NewFP, Existing, Fp, Got : IPCB_LibComponent;
     J : Integer;
 Begin
     SourceLibPath := ExtractJsonValue(Params, 'source_library');
@@ -14436,26 +14547,42 @@ Begin
     End;
     If NewName = '' Then NewName := SourceName;
 
-    { Source library: by path, else the focused PcbLib. }
+    { Source library: from its document by path, else the focused PcbLib. }
     SourceLib := Nil;
     SameLib := False;
+    SourceWasOpen := True;
+    SourceCanon := '';
     If SourceLibPath <> '' Then
     Begin
-        SameLib := (DestLibPath = '') Or (UpperCase(DestLibPath) = UpperCase(SourceLibPath));
-        { A same-library copy EDITS the source: it must be a document BEFORE }
-        { it is resolved, or the handler would hold the background copy.     }
-        If SameLib And (Not PcbLibOpenAsDocument(SourceLibPath)) Then
+        SameLib := (DestLibPath = '') Or (DocPathKey(DestLibPath) = DocPathKey(SourceLibPath));
+        SourceWasOpen := (PcbLibDocPath(SourceLibPath) <> '');
+        SourceCanon := PcbLibEnsureDocPath(SourceLibPath);
+        If SourceCanon = '' Then
         Begin
-            Result := BuildErrorResponse(RequestId, 'DEST_NOT_OPEN',
-                PcbLibNotOpenMessage('destination', SourceLibPath,
-                    'A copy into a library loaded in the background can never '
-                    + 'be saved (lib_save_library answers NOT_LOADED).'));
+            If SameLib Then
+                Result := BuildErrorResponse(RequestId, 'DEST_NOT_OPEN',
+                    PcbLibNotOpenMessage('destination', SourceLibPath,
+                        'A copy into a library loaded in the background can '
+                        + 'never be saved (lib_save_library answers NOT_LOADED).'))
+            Else
+                Result := BuildErrorResponse(RequestId, 'SOURCE_NOT_OPEN',
+                    PcbLibNotOpenMessage('source', SourceLibPath,
+                        'The source is read through its open document, never '
+                        + 'a background copy.'));
             Exit;
         End;
-        Try SourceLib := PCBServer.GetPCBLibraryByPath(SourceLibPath);
-        Except RecordCaughtException('Lib_CopyFootprint:GetPCBLibraryByPath'); End;
-        If (SourceLib = Nil) And (Not SameLib) And PcbLibLoadable(SourceLibPath) Then
-            Try SourceLib := PCBServer.LoadPCBLibraryByPath(SourceLibPath); Except End;
+        SourceLib := PcbLibDocLibrary(SourceCanon);
+        If SourceLib = Nil Then
+        Begin
+            If SameLib Then
+                Result := BuildErrorResponse(RequestId, 'DEST_NOT_OPEN',
+                    PcbLibNoDocLibraryMessage('destination', SourceCanon))
+            Else
+                Result := BuildErrorResponse(RequestId, 'SOURCE_NOT_OPEN',
+                    PcbLibNoDocLibraryMessage('source', SourceCanon));
+            Exit;
+        End;
+        SourceLibPath := SourceCanon;
     End
     { The focused PcbLib, asked only when one may be current            }
     { (PcbLibMayBeCurrent, Main.pas): a focused SchLib in a session with }
@@ -14468,13 +14595,14 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'No source PCB library (source_library not supplied and none focused)');
         Exit;
     End;
-    If SourceLibPath = '' Then
+    If SourceCanon = '' Then
     Begin
         Try SourceLibPath := SourceLib.Board.FileName; Except End;
-        SameLib := (DestLibPath = '') Or (UpperCase(DestLibPath) = UpperCase(SourceLibPath));
+        SameLib := (DestLibPath = '') Or (DocPathKey(DestLibPath) = DocPathKey(SourceLibPath));
     End;
 
     { Destination library: default = source. }
+    DestWasOpen := True;
     If SameLib Then
     Begin
         DestLib := SourceLib;
@@ -14487,7 +14615,9 @@ Begin
     End
     Else
     Begin
-        If Not PcbLibOpenAsDocument(DestLibPath) Then
+        DestWasOpen := (PcbLibDocPath(DestLibPath) <> '');
+        DestCanon := PcbLibEnsureDocPath(DestLibPath);
+        If DestCanon = '' Then
         Begin
             Result := BuildErrorResponse(RequestId, 'DEST_NOT_OPEN',
                 PcbLibNotOpenMessage('destination', DestLibPath,
@@ -14495,13 +14625,28 @@ Begin
                     + 'be saved (lib_save_library answers NOT_LOADED).'));
             Exit;
         End;
-        DestLib := Nil;
-        Try DestLib := PCBServer.GetPCBLibraryByPath(DestLibPath);
-        Except RecordCaughtException('Lib_CopyFootprint:GetPCBLibraryByPath'); End;
-        If DestLib = Nil Then
+        If DocPathKey(DestCanon) = DocPathKey(SourceLibPath) Then
         Begin
-            Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'Failed to open destination PCB library at ' + DestLibPath + '. Nothing was changed.');
-            Exit;
+            { Another spelling of the source's own document. }
+            SameLib := True;
+            DestLib := SourceLib;
+            DestLibPath := SourceLibPath;
+            If NewName = SourceName Then
+            Begin
+                Result := BuildErrorResponse(RequestId, 'SAME_NAME', 'Copying within the same library requires a different new_name');
+                Exit;
+            End;
+        End
+        Else
+        Begin
+            DestLib := PcbLibDocLibrary(DestCanon);
+            If (DestLib = Nil) Or (DestLib = SourceLib) Then
+            Begin
+                Result := BuildErrorResponse(RequestId, 'DEST_NOT_OPEN',
+                    PcbLibNoDocLibraryMessage('destination', DestCanon));
+                Exit;
+            End;
+            DestLibPath := DestCanon;
         End;
     End;
 
@@ -14543,20 +14688,25 @@ Begin
     Try NewFP.Name := NewName; Except End;
     DestLib.RegisterComponent(NewFP);
     PCBServer.PostProcess;
-    Listed := (DestLib.GetComponentByName(NewName) <> Nil);
+    { The NEW footprint must be listed: when overwrite replaced a same-named }
+    { one, a surviving Existing must not pass for the copy.                  }
+    Got := DestLib.GetComponentByName(NewName);
+    Listed := (Got <> Nil);
+    If Listed And (Existing <> Nil) Then Listed := (Got = NewFP);
     If Not Listed Then
     Begin
         Result := BuildErrorResponse(RequestId, 'COPY_FAILED',
-            'The destination does not list "' + NewName + '" after the copy '
-            + 'was registered, so nothing is claimed. Run lib_get_footprints on '
-            + DestLibPath + ' before saving it.');
+            'The destination does not list the new "' + NewName + '" after the '
+            + 'copy was registered (with overwrite the name may still answer '
+            + 'the OLD footprint), so nothing is claimed. Run lib_get_footprints '
+            + 'on ' + DestLibPath + ' before saving it.');
         Exit;
     End;
 
     Try DestLib.Board.ViewManager_FullUpdate; Except End;
     Try DestLib.RefreshView; Except End;
-    { The caller's path first (the document the saveable check found), then }
-    { the library board's own file name if that mark did not take.          }
+    { The document's path first (the one the open check found), then the    }
+    { library board's own file name if that mark did not take.               }
     Marked := MarkDocDirty(DestLibPath);
     MarkJson := MarkOutcomeJson(0);
     If Not Marked Then
@@ -14576,6 +14726,8 @@ Begin
         + ',"source":"' + EscapeJsonString(SourceName) + '"'
         + ',"new_name":"' + EscapeJsonString(NewName) + '"'
         + ',"same_library":' + BoolToJsonStr(SameLib)
+        + ',"source_opened":' + BoolToJsonStr(Not SourceWasOpen)
+        + ',"dest_opened":' + BoolToJsonStr(Not DestWasOpen)
         + ',"marked_modified":' + BoolToJsonStr(Marked)
         + ',"mark":' + MarkJson
         + ',"pending_save":true,"written_to_disk":false}';

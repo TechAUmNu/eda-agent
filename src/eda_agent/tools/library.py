@@ -6543,19 +6543,24 @@ def register_library_tools(mcp):
             dest_library: destination .PcbLib path (default source).
             overwrite: replace a same-named footprint already in dest.
 
-        A CLOSED destination is opened as a document first, so the copy
-        can be saved; one that cannot be (not an absolute path to an
-        existing, readable .PcbLib) is refused ``DEST_NOT_OPEN`` with
-        nothing changed. Live 2026-10-12 a copy into a closed library
-        said success while the library was loaded only in the background:
-        the copy never reached the file and lib_save_library answered
-        NOT_LOADED.
+        Every named library is taken from its OPEN DOCUMENT: a closed one
+        (source or destination) is opened as a document first, and one
+        that cannot be (not an absolute path to an existing, readable
+        .PcbLib) is refused - ``DEST_NOT_OPEN`` for the library that will
+        be edited, ``SOURCE_NOT_OPEN`` for a source that is only read -
+        with nothing changed. Nothing is loaded in the background: live
+        2026-10-12 a copy into a closed library said success while the
+        library was loaded only in the background, the copy never reached
+        the file and lib_save_library answered NOT_LOADED. With overwrite,
+        the copy counts only if the destination lists the NEW footprint
+        (``COPY_FAILED`` otherwise).
 
         Returns:
             {"success": true, "source": "...", "new_name": "...",
-             "same_library": bool, "marked_modified", "mark",
-             "pending_save": true, "written_to_disk": false}. Save with
-            lib_save_library on dest_library.
+             "same_library": bool, "source_opened", "dest_opened",
+             "marked_modified", "mark", "pending_save": true,
+             "written_to_disk": false}. Save with lib_save_library on
+            dest_library.
         """
         params: dict[str, Any] = {"source_name": source_name}
         if new_name:
@@ -6705,19 +6710,21 @@ def register_library_tools(mcp):
                 short pattern selects far more than intended, and the
                 default is to delete them from the source afterwards.
 
-        Both libraries that will be EDITED must be saveable: the
-        destination always, the source when delete_from_source is set. A
-        closed one is opened as a document first; one that cannot be is
-        refused (``DEST_NOT_OPEN`` / ``SOURCE_NOT_OPEN``) before anything
-        is edited. A footprint is deleted from the source only after the
-        destination lists its copy (``copy_not_listed`` counts the rest,
-        which stay in the source).
+        Both libraries are taken from their OPEN DOCUMENTS: a closed one
+        is opened as a document first (and stays open); one that cannot
+        be is refused (``SOURCE_NOT_OPEN`` / ``DEST_NOT_OPEN``) before
+        anything is edited. Nothing is loaded in the background, so a
+        copy can never land in a library the save does not write. A
+        footprint is deleted from the source only after the destination
+        lists its copy - the NEW footprint when overwrite replaced one
+        (``copy_not_listed`` counts the rest, which stay in the source).
 
         Returns:
             {"success": true, "moved": N, "skipped": N, "failed": N,
             "copy_not_listed", "deleted_from_source", "marked_modified",
             "mark", "source_marked_modified", "source_mark",
-            "pending_save", "written_to_disk": false}, or in dry-run
+            "source_opened", "dest_opened", "pending_save",
+            "written_to_disk": false}, or in dry-run
             {"dry_run", "resolved", "count", ...} with nothing sent to
             the bridge. Save both libraries with lib_save_library.
         """

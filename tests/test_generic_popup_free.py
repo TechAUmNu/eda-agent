@@ -368,23 +368,27 @@ def test_setter_part_writes_ask_for_a_component_first(prop, type_name):
     assert rc == 1 and ctx.diag == []
 
 
-def test_setter_isMirrored_on_a_mirrorless_type_keeps_result_1():
+def test_setter_isMirrored_on_a_mirrorless_type_is_not_written_and_fails():
+    """Not written, and reported 'failed' - it used to keep Result 1, a
+    write claimed that never happened (review of 2026.10.12.01)."""
     ctx, ns = _prop_ns()
     for t in ("eWire", "eBus", "eJunction", "eRectangle"):
-        assert ns["SetSchProperty"](_obj(ctx, t), "IsMirrored", "true") == 1
-    assert ctx.modals == [] and ctx.diag == []
+        assert ns["SetSchProperty"](_obj(ctx, t), "IsMirrored", "true") == -1
+    assert ctx.modals == []
+    assert ctx.diag == [("failed", "IsMirrored")] * 4
 
 
-def test_setter_isMirrored_unprobed_type_keeps_the_write_and_counts_it():
+def test_setter_isMirrored_admitted_type_writes_and_a_raise_is_counted_failed():
     ctx, ns = _prop_ns()
     label = _obj(ctx, "eNetLabel")
     assert ns["SetSchProperty"](label, "IsMirrored", "true") == 1
     assert label.IsMirrored is True          # declared: the write lands
     assert ns["SetSchProperty"](_obj(ctx, "eParameterSet"), "IsMirrored",
-                                "true") == 1
+                                "true") == -1
     assert ctx.modals == [("eParameterSet", "IsMirrored")]
     assert ctx.caught == [
         f"SetSchProperty:IsMirrored:{ctx.ids['eParameterSet']}"]
+    assert ctx.diag == [("failed", "IsMirrored")]
 
 
 def test_setter_still_writes_every_member_the_type_has():

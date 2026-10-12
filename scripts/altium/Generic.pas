@@ -297,14 +297,17 @@ Begin
             Or (Id = ePowerObject) Or (Id = eParameterSet) Or (Id = eLabel)
             Or (Id = eSheetEntry) Or (Id = eTextFrame) Or (Id = eNote)
             Or (Id = eProbe) Or (Id = eCrossSheetConnector)
-    { LineWidth: WI, LI, RE (proven); PT, BU, BE, PS, SS, IM, TF, NO, PR, HC, }
-    { CK.                                                                    }
+    { LineWidth: WI, LI, RE (proven); PT, BU, BE, PS, SS, IM, TF, NO, PR, HC. }
+    { NOT eCompileMask: no live run has evaluated that identifier (its only   }
+    { users are the 'compilemask' type word and a handler Python cannot      }
+    { reach), and an Or chain evaluates it for every type no earlier operand }
+    { matched - an unregistered constant would be the same uncounted halt.   }
     Else If PropName = 'LineWidth' Then
         Ok := (Id = eWire) Or (Id = eLine) Or (Id = eRectangle)
             Or (Id = ePort) Or (Id = eBus) Or (Id = eBusEntry)
             Or (Id = eParameterSet) Or (Id = eSheetSymbol) Or (Id = eImage)
             Or (Id = eTextFrame) Or (Id = eNote) Or (Id = eProbe)
-            Or (Id = eHarnessConnector) Or (Id = eCompileMask)
+            Or (Id = eHarnessConnector)
     { Style: PT, PW (proven); PS, SE, NE, PR, HC, XC. }
     Else If PropName = 'Style' Then
         Ok := (Id = ePort) Or (Id = ePowerObject) Or (Id = eParameterSet)
@@ -334,11 +337,12 @@ Begin
         Ok := (Id = ePort) Or (Id = eParameterSet) Or (Id = eSheetEntry)
             Or (Id = eTextFrame) Or (Id = eNote) Or (Id = eProbe)
             Or (Id = eHarnessConnector)
-    { IsSolid: RE (proven); PS, SS, IM, TF, NO, PR, HC, CK. }
+    { IsSolid: RE (proven); PS, SS, IM, TF, NO, PR, HC (not eCompileMask:   }
+    { see LineWidth).                                                       }
     Else If PropName = 'IsSolid' Then
         Ok := (Id = eRectangle) Or (Id = eParameterSet) Or (Id = eSheetSymbol)
             Or (Id = eImage) Or (Id = eTextFrame) Or (Id = eNote)
-            Or (Id = eProbe) Or (Id = eHarnessConnector) Or (Id = eCompileMask)
+            Or (Id = eProbe) Or (Id = eHarnessConnector)
     Else
         Ok := True;
     Result := Not Ok;
@@ -1136,10 +1140,14 @@ Begin
         // Integer properties
         Else If PropName = 'Orientation' Then
         Begin
+            { A type outside SchObjectHasOrientation is not written, and the }
+            { reply says so: Result 0, noted 'unknown' once below (its       }
+            { long-standing answer). It used to note 'unknown' here and then }
+            { return 1 ('written') as well.                                  }
             If SchObjectHasOrientation(Obj) Then
                 Obj.Orientation := StrToIntDef(Value, 0)
             Else
-                NotePropertyDiag('unknown', PropName);
+                Matched := False;
         End
         Else If PropName = 'FontId'      Then Obj.FontId := StrToIntDef(Value, 1)
         Else If PropName = 'LineWidth'   Then Obj.LineWidth := StrToIntDef(Value, 1)
@@ -1205,14 +1213,19 @@ Begin
             End
             Else
             Begin
-                { A type with no mirror at all popped a modal here and the  }
-                { swallowed write left Result 1; skipping it leaves Result  }
-                { 1 too. Unprobed types keep the write and its counter.     }
-                If Not SchObjectLacksIsMirrored(Obj) Then
+                { A type outside the SchObjectLacksIsMirrored allowlist is   }
+                { NOT written and the write is reported FAILED (Result -1),  }
+                { never 'written': it used to keep Result 1 on a skipped     }
+                { write. An admitted type that raises is failed too, and     }
+                { counted.                                                   }
+                If SchObjectLacksIsMirrored(Obj) Then
+                    WroteOK := False
+                Else
                     Try
                         Obj.IsMirrored := StrToBool(Value);
                     Except
                         RecordCaughtException('SetSchProperty:IsMirrored:' + SchObjTypeTag(Obj));
+                        WroteOK := False;
                     End;
             End;
         End
