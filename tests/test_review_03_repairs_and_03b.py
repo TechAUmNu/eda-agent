@@ -310,108 +310,11 @@ def test_obj_batch_create_with_nothing_created_in_a_component_flags_nothing():
     assert not any(e.startswith("invalidate:") for e in events)
 
 
-# ---------------------------------------------------------------------------
-# 6. lib_link_3d_model's empty-model reply never claims the FILE is clean
-# ---------------------------------------------------------------------------
-
-class _Body:
-    def __init__(self):
-        self.OverallHeight = 0
-        self.I_ObjectAddress = 4242
-        self.ObjectId = 12
-
-
-class _GrpIter:
-    def __init__(self, items):
-        self.items, self.i = list(items), 0
-
-    def AddFilter_ObjectSet(self, _s):
-        pass
-
-    @property
-    def FirstPCBObject(self):
-        self.i = 0
-        return self.items[0] if self.items else None
-
-    @property
-    def NextPCBObject(self):
-        self.i += 1
-        return self.items[self.i] if self.i < len(self.items) else None
-
-
-class _Footprint:
-    def __init__(self, prims):
-        self.prims = list(prims)
-        self.I_ObjectAddress = 9
-
-    @property
-    def GroupIterator_Create(self):
-        return _GrpIter(self.prims)
-
-    def GroupIterator_Destroy(self, _it):
-        pass
-
-    def RemovePCBObject(self, prim):
-        self.prims.remove(prim)
-
-
-def _snip():
-    body = strip_comments(_LIBRARY["Lib_Link3DModel"])
-    start = body.index("Body3D_ReadRect(Body, X1, Y1, X2, Y2, HaveRect);")
-    start = body.index(";", start) + 1
-    end = body.index("If AlignStr = 'none' Then", start)
-    return ("Procedure Snip(Body : Integer; Footprint : Integer; ModelPath : String;"
-            " Replace : Boolean; RemovedDistinct : Integer; HaveRect : Boolean;"
-            " PcbLib : Integer);\nBegin\n" + body[start:end] + "\nEnd;")
-
-
-def _link_empty(current=True, board_lists=1):
-    from tests.pascal_eval import translate
-    body = _Body()
-    fp = _Footprint([body])
-    board_reads: list = []
-    lib = SimpleNamespace(CurrentComponent=fp if current else object(),
-                          Board=object())
-
-    def still(board, entries):
-        board_reads.append(entries)
-        return board_lists
-
-    ns = {"PCBServer": SimpleNamespace(SendMessageToRobots=lambda *a: None),
-          "c_Broadcast": 0, "PCBM_BeginModify": 0, "PCBM_EndModify": 0,
-          "c_NoEventData": 0, "eComponentBodyObject": 12, "MkSet": lambda *a: a,
-          "Failure": "", "FailCode": "", "LibBoardStillListsCount": still}
-    _caught(ns)
-    build(_LIBRARY, ["LibAddRemovalEntry"], ns)
-    build({"R": _LIBRARY["RemoveLibBodyByAddress"].replace(
-        "Var Entries : String", "Entries : String")}, ["R"], ns)
-    src = translate(_snip())[1]
-    exec(compile(src, "<pascal Snip>", "exec"), ns)  # noqa: S102
-    ns["Snip"](body, fp, r"C:\scratch\stub.igs", False, 0, False, lib)
-    return ns, fp, body, board_reads
-
-
-def test_the_empty_body_removal_is_reported_as_in_memory_only():
-    """Review: 'The empty body was taken off the footprint again' while the
-    library board still holds the copy measured to come back on save."""
-    ns, fp, body, reads = _link_empty(current=True, board_lists=1)
-    msg = ns["Failure"]
-    assert ns["FailCode"] == "MODEL_LOAD_FAILED"
-    assert body not in fp.prims
-    assert "IN MEMORY only" in msg
-    assert "board_still_lists=1" in msg
-    assert "Do NOT save this library" in msg
-    assert "lib_reload_library" in msg
-    assert "taken off the footprint again." not in msg
-    # One read of the board (the evaluator passes RemoveLibBodyByAddress's
-    # Var Entries by value, so the entry text itself is not visible here).
-    assert len(reads) == 1
-
-
-def test_the_board_count_is_not_read_when_the_footprint_is_not_current():
-    ns, _fp, _body, reads = _link_empty(current=False)
-    assert "board_still_lists=null" in ns["Failure"]
-    assert reads == [], "the board was walked for a footprint that is not current"
+# The two empty-body reply tests that stood here pinned the 2026.10.11.03
+# footprint-only undo, which the live P7 run (2026-10-12) showed leaving
+# the body listed and in the file. The undo now takes it off the footprint
+# AND the library board and reports both reads: the contract moved to
+# tests/test_live_03_findings.py section 6.
 
 
 # ---------------------------------------------------------------------------

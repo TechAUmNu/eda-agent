@@ -538,9 +538,16 @@ def _run_link(overall, prims_before=(), replace=False, removed=0):
           "eTextObject": 5, "MkSet": lambda *a: a, "Failure": "", "FailCode": "",
           # Since the review of 498e5ca the empty-model reply reads what the
           # library board still lists (tests/test_review_03_repairs_and_03b.py).
-          "LibBoardStillListsCount": lambda board, entries: 0}
+          "LibBoardStillListsCount": lambda board, entries: 0,
+          # 2026.10.12.01: the undo also takes the body off the library
+          # board and reports both reads (tests/test_live_03_findings.py).
+          "LibBoardRemoveEntries": lambda *a: '{"requested":true}',
+          "EscapeJsonString": lambda s: s,
+          "BoolToJsonStr": lambda b: "true" if b else "false"}
     _caught(ns)
-    build(_LIBRARY, ["LibAddRemovalEntry"], ns)
+    build(load(_ALTIUM / "Utils.pas", minimum=20),
+          ["JsonStr", "JsonInt", "JsonBool", "JsonRaw", "JsonObj"], ns)
+    build(_LIBRARY, ["LibAddRemovalEntry", "Body3D_BodyAddresses"], ns)
     if "RemoveLibBodyByAddress" in _LIBRARY:
         # The evaluator takes value parameters only; Entries is an OUT list
         # nothing here reads, so it is passed by value.

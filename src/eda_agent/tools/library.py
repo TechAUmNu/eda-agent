@@ -5395,8 +5395,10 @@ def register_library_tools(mcp):
         2 = 180, 3 = 270 degrees), written to the label as given, NOT a
         degree count: 90 is out of range. ``justification`` is the
         0..8 text-justification ordinal (0 = bottom-left ... 8 =
-        top-right). Out-of-range values are not refused here; how
-        Altium takes them is an open release-run probe.
+        top-right). An out-of-range value is refused with
+        ``INVALID_ARGUMENT`` naming the op, the field and the range, and
+        nothing is sent: live (2026-10-12) Altium stored 90 and 12 as
+        given and the save wrote them into the library file.
 
         At least one style field must be set per op. Targets are
         ``"designator"``, ``"comment"``, or ``"parameter:<Name>"``.
@@ -5458,12 +5460,28 @@ def register_library_tools(mcp):
                             f"ops[{i}].is_hidden must be true or false"}
                 parts.append(f"is_hidden={'true' if hidden else 'false'}")
                 style_set = True
-            for key in ("orientation", "justification"):
+            for key, top in (("orientation", 3), ("justification", 8)):
                 if op.get(key) is not None:
                     value = whole_number(op[key])
                     if value is None:
                         return {"ok": False, "reason":
                                 f"ops[{i}].{key} must be a whole number"}
+                    # Live 2026-10-12 (P11): Altium does not refuse an
+                    # out-of-enum ordinal, it STORES it and the save writes
+                    # it. The handler repeats this check.
+                    if not 0 <= value <= top:
+                        return {
+                            "ok": False, "success": False,
+                            "error": "INVALID_ARGUMENT",
+                            "reason": (
+                                f"ops[{i}].{key}={value} is out of range "
+                                f"0..{top}"
+                                + (" (the quarter-turn ordinal: 0 = 0, "
+                                   "1 = 90, 2 = 180, 3 = 270 degrees)"
+                                   if key == "orientation" else
+                                   " (0 = bottom-left ... 8 = top-right)")
+                                + "; nothing was sent."),
+                        }
                     parts.append(f"{key}={value}")
                     style_set = True
             if not style_set:
@@ -6525,9 +6543,19 @@ def register_library_tools(mcp):
             dest_library: destination .PcbLib path (default source).
             overwrite: replace a same-named footprint already in dest.
 
+        A CLOSED destination is opened as a document first, so the copy
+        can be saved; one that cannot be (not an absolute path to an
+        existing, readable .PcbLib) is refused ``DEST_NOT_OPEN`` with
+        nothing changed. Live 2026-10-12 a copy into a closed library
+        said success while the library was loaded only in the background:
+        the copy never reached the file and lib_save_library answered
+        NOT_LOADED.
+
         Returns:
             {"success": true, "source": "...", "new_name": "...",
-             "same_library": bool}.
+             "same_library": bool, "marked_modified", "mark",
+             "pending_save": true, "written_to_disk": false}. Save with
+            lib_save_library on dest_library.
         """
         params: dict[str, Any] = {"source_name": source_name}
         if new_name:
@@ -6677,10 +6705,21 @@ def register_library_tools(mcp):
                 short pattern selects far more than intended, and the
                 default is to delete them from the source afterwards.
 
+        Both libraries that will be EDITED must be saveable: the
+        destination always, the source when delete_from_source is set. A
+        closed one is opened as a document first; one that cannot be is
+        refused (``DEST_NOT_OPEN`` / ``SOURCE_NOT_OPEN``) before anything
+        is edited. A footprint is deleted from the source only after the
+        destination lists its copy (``copy_not_listed`` counts the rest,
+        which stay in the source).
+
         Returns:
-            {"success": true, "moved": N, "skipped": N, "failed": N}, or
-            in dry-run {"dry_run", "resolved", "count", ...} with nothing
-            sent to the bridge.
+            {"success": true, "moved": N, "skipped": N, "failed": N,
+            "copy_not_listed", "deleted_from_source", "marked_modified",
+            "mark", "source_marked_modified", "source_mark",
+            "pending_save", "written_to_disk": false}, or in dry-run
+            {"dry_run", "resolved", "count", ...} with nothing sent to
+            the bridge. Save both libraries with lib_save_library.
         """
         resolved: list[str] = list(names or [])
         if not resolved and name_regex:
@@ -6813,7 +6852,13 @@ def register_library_tools(mcp):
             library_path: absolute path to the library file.
 
         Returns:
-            {"installed": bool, "library_path": "..."}.
+            {"installed": bool, "library_path", "added": [paths],
+            "reason"}. ``installed`` is true only when the environment's
+            installed list GAINED an entry (read before and after the
+            call, compared by path); otherwise false with ``reason`` (no
+            file at that path, already installed, the list did not
+            change, or it could not be read). Live 2026-10-12 a relative
+            name with no file behind it used to answer true.
         """
         bridge = get_bridge()
         return await bridge.send_command_async(
@@ -6825,10 +6870,17 @@ def register_library_tools(mcp):
         """Unregister a library from the environment's Available Libraries.
 
         Args:
-            library_path: absolute path to the library file.
+            library_path: absolute path to the library file, spelled as
+                the installed list holds it.
 
         Returns:
-            {"uninstalled": bool, "library_path": "..."}.
+            {"uninstalled": bool, "library_path", "removed": [paths],
+            "reason"}. ``uninstalled`` is true only when the installed
+            list LOST an entry (read before and after, compared by
+            path); otherwise false with ``reason``, which names the
+            installed spelling when the same file name is installed
+            under another path. Live 2026-10-12 a respelled path used to
+            answer true while the library stayed installed.
         """
         bridge = get_bridge()
         return await bridge.send_command_async(

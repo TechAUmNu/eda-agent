@@ -98,6 +98,17 @@ def test_the_board_half_is_reached_only_on_request(lib, name):
              re.finditer(re.escape(_CALLERS[name]), body)]
     assert calls, f"{name} no longer calls the shared board half"
     for at in calls:
+        # The ONE exception (2026.10.12.01, live P7): lib_link_3d_model's
+        # undo of the EMPTY body it has just added itself takes it off the
+        # library board too - only that body (EmptyEntries), only while
+        # the footprint is current (rule 3) and no longer lists it (rule 4).
+        if body[at:at + 80].find("EmptyEntries") >= 0:
+            guard = body.rfind("If (EmptyEntries <> '') And EmptyCurrent "
+                               "And (Not EmptyFpStill) Then", 0, at)
+            assert guard >= 0 and at - guard < 200, (
+                f"{name}: the empty-body undo reaches the board half "
+                f"without its rule-3/rule-4 guard")
+            continue
         guard = body.rfind("If FromBoard", 0, at)
         assert guard >= 0 and at - guard < 300, (
             f"{name} reaches LibBoardRemoveEntries without an "

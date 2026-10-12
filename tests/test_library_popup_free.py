@@ -621,8 +621,13 @@ def _ilm_ns(ilm, files=()):
         "InstalledLibTypeOrdinal": lambda p: 0,
         "LibTypeName": lambda o: "Integrated",
     })
-    build(_lib(), ["InstalledLibNameKnown", "Lib_InstallLibrary",
-                   "Lib_UninstallLibrary", "Lib_GetInstalledLibraries"], ns)
+    build(_main(), ["DocPathKey"], ns)
+    helpers = [n for n in ("InstalledLibPathList", "InstalledPathsNotIn",
+                           "InstalledPathWithName", "InstalledPathsJson")
+               if n in _lib()]
+    build(_lib(), helpers + ["InstalledLibNameKnown", "Lib_InstallLibrary",
+                             "Lib_UninstallLibrary",
+                             "Lib_GetInstalledLibraries"], ns)
     return ns
 
 
@@ -691,7 +696,10 @@ _LOAD = re.compile(r"Try (\w+) := PCBServer\.GetPCBLibraryByPath\((\w+)\);"
 def test_pcb_library_load_is_only_attempted_on_a_loadable_file(fname):
     body = strip_comments(_lib()[fname])
     blocks = list(_LOAD.finditer(body))
-    assert len(blocks) == 2 == body.count("LoadPCBLibraryByPath("), fname
+    # ONE background load since 2026.10.12.01: the SOURCE, and only when it
+    # is read, never edited. A library that will be edited is opened as a
+    # document or refused (P13, tests/test_live_03_findings.py).
+    assert len(blocks) == 1 == body.count("LoadPCBLibraryByPath("), fname
     for m in blocks:
         var, path = m.group(1), m.group(2)
         snip = (f"Procedure Snip({path} : String);\nVar\n    {var} : Variant;\n"
@@ -704,13 +712,16 @@ def test_pcb_library_load_is_only_attempted_on_a_loadable_file(fname):
                 (here, False, [here])):
             server = _PcbServer(get_raises)
             ns = _ns(files=[here, r"C:\Libs\A.SchLib"],
-                     extra={"PCBServer": server})
+                     extra={"PCBServer": server, "DeleteFromSource": False,
+                            "SameLib": False})
             build(_lib(), ["PcbLibLoadable"], ns)
             build({"Snip": snip}, ["Snip"], ns)
             ns["Snip"](p)
             assert server.loaded == want_loads, (fname, var, p)
         server = _PcbServer(True)
-        ns = _ns(files=[here], extra={"PCBServer": server})
+        ns = _ns(files=[here], extra={"PCBServer": server,
+                                      "DeleteFromSource": False,
+                                      "SameLib": False})
         build(_lib(), ["PcbLibLoadable"], ns)
         build({"Snip": snip}, ["Snip"], ns)
         ns["Snip"](here)

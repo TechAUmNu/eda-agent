@@ -6753,8 +6753,10 @@ Var
     RX1, RY1, RX2, RY2, GapX, GapY, Gap, BX1, BY1, BX2, BY2 : TCoord;
     PadCount, Removed, RemovedDistinct, Remaining, BoardRemoved, BoardStill : Integer;
     EmptyOverall : TCoord;
-    EmptyRemoved, EmptyCurrent : Boolean;
-    EmptyAddr, EmptyEntries, EmptyBoardText : String;
+    EmptyRemoved, EmptyCurrent, EmptyFpStill, EmptyIgnore : Boolean;
+    EmptyFpPasses, EmptyBoardRemoved, EmptyBoardStill : Integer;
+    EmptyAddr, EmptyEntries, EmptyScratch, EmptyBoardJson : String;
+    EmptyFpStillJson, EmptyBoardStillJson, EmptyDetails : String;
 Begin
     ModelPath := ExtractJsonValue(Params, 'model_path');
     ComponentName := ExtractJsonValue(Params, 'component_name');
@@ -6935,6 +6937,7 @@ Begin
 
     Failure := '';
     FailCode := '';
+    EmptyDetails := '';
     DidModelState := False;
     DidMove := False;
     Aligned := False;
@@ -7074,18 +7077,37 @@ Begin
 
             { AN EMPTY MODEL IS A FAILED LOAD (live 2026-10-11, probe P7):     }
             { placeholder .wrl / .igs / .stl / .dat stubs loaded NON-Nil, the  }
-            { body had no box, the reply said success false / placement_ok    }
-            { false - and the empty body stayed on the footprint. Altium reads }
-            { a model by its CONTENT, so no extension list catches it; no box  }
-            { AND a 0 overall height (read only when the box is missing) is    }
-            { MODEL_LOAD_FAILED, and the body comes off the footprint again,   }
-            { IN MEMORY, inside this transaction (RemoveLibBodyByAddress, the  }
-            { footprint half: rule 1 beside RemoveLibTextByAddress; the reply  }
-            { never claims the FILE is clean - see below). With replace=true   }
-            { the old bodies went before the add (they go only after a NON-Nil }
-            { load, and an empty model is non-Nil), so the reply says so.      }
+            { body had no box, and the empty body stayed. Altium reads a model }
+            { by its CONTENT, so no extension list catches it; no box AND a 0  }
+            { overall height (read only when the box is missing) is            }
+            { MODEL_LOAD_FAILED.                                               }
+            {                                                                  }
+            { WHY IT IS JUDGED HERE, AFTER THE ADDS: no read of an UNOWNED     }
+            { body has ever run in this codebase (every Body3D_ReadRect /      }
+            { OverallHeight read follows an add, and a SETTER on an unowned    }
+            { body crashed ADVPCB.DLL in PCB_Place3DBody), so judging before   }
+            { Footprint.AddPCBObject would be a new, unproven call.            }
+            {                                                                  }
+            { SO THE UNDO TAKES IT OFF BOTH THINGS IT WAS ADDED TO (live       }
+            { 2026-10-12, P7: the footprint-only undo of 2026.10.11.03 left     }
+            { the body listed on the footprint - 2 bodies, 7 after four empty  }
+            { loads - and the save wrote it into the file):                    }
+            {  * the FOOTPRINT, by address, repeated until the footprint's own }
+            {    body list no longer holds that address (bounded, 4 rounds of  }
+            {    RemoveLibBodyByAddress's two passes);                         }
+            {  * the LIBRARY BOARD, through LibBoardRemoveEntries (the         }
+            {    section-31 route: a fresh board iterator walks to the address,}
+            {    broadcast + RemovePCBObject), only while the footprint is     }
+            {    current (rule 3) and never while the footprint still lists it }
+            {    (rule 4);                                                     }
+            { then BOTH are read again and the reply reports what the reads    }
+            { say (footprint_still_lists, board_still_lists), never what the   }
+            { removal hoped. Section 31 measured that the board half can fail  }
+            { to take (still_listed 1 after remove_calls 2), which is exactly  }
+            { what board_still_lists exposes.                                  }
             EmptyRemoved := False;
             EmptyEntries := '';
+            EmptyDetails := '';
             If Not HaveRect Then
             Begin
                 EmptyOverall := 0;
@@ -7094,56 +7116,83 @@ Begin
                 Begin
                     EmptyAddr := '';
                     Try EmptyAddr := IntToStr(Body.I_ObjectAddress); Except EmptyAddr := ''; End;
-                    EmptyRemoved := RemoveLibBodyByAddress(Footprint, EmptyAddr, EmptyEntries);
-                    { THE REMOVAL IS IN MEMORY, AND MAY NOT SURVIVE A SAVE. The    }
-                    { body was added to the footprint AND to the library board     }
-                    { (above), and RemoveLibBodyByAddress takes it off the         }
-                    { footprint only. That is the case measured 2026-10-04 on      }
-                    { carrier.PcbLib (LibBoardStillListsCount's header): an object }
-                    { created this session and removed from its CURRENT footprint  }
-                    { only CAME BACK on the next lib_save_library. So the reply    }
-                    { says what the board still lists (read-only, and only while   }
-                    { the footprint is current, as the replace path reads it;      }
-                    { null otherwise) and never claims the file is clean.          }
-                    EmptyBoardText := '';
-                    If EmptyRemoved Then
+                    If EmptyAddr <> '' Then
+                        EmptyEntries := LibAddRemovalEntry('', eComponentBodyObject, EmptyAddr);
+
+                    { The footprint half, until its own list no longer holds it. }
+                    EmptyFpPasses := 0;
+                    EmptyFpStill := (EmptyAddr <> '')
+                        And (Pos('|' + EmptyAddr + '|', Body3D_BodyAddresses(Footprint)) > 0);
+                    While EmptyFpStill And (EmptyFpPasses < 4) Do
                     Begin
-                        EmptyCurrent := False;
-                        Try EmptyCurrent := (PcbLib.CurrentComponent = Footprint); Except EmptyCurrent := False; End;
-                        If EmptyCurrent Then
-                            EmptyBoardText := ' board_still_lists='
-                                + IntToStr(LibBoardStillListsCount(PcbLib.Board, EmptyEntries))
-                                + ' (copies of it the library board still holds).'
-                        Else
-                            EmptyBoardText := ' board_still_lists=null (not read: the '
-                                + 'footprint was not current).';
+                        Inc(EmptyFpPasses);
+                        EmptyScratch := '';
+                        EmptyIgnore := RemoveLibBodyByAddress(Footprint, EmptyAddr, EmptyScratch);
+                        EmptyFpStill := Pos('|' + EmptyAddr + '|', Body3D_BodyAddresses(Footprint)) > 0;
                     End;
+
+                    { The board half: footprint current, and the body no     }
+                    { longer on the footprint.                               }
+                    EmptyCurrent := False;
+                    Try EmptyCurrent := (PcbLib.CurrentComponent = Footprint); Except EmptyCurrent := False; End;
+                    EmptyBoardRemoved := 0;
+                    EmptyBoardJson := JsonObj(JsonBool('requested', False));
+                    If (EmptyEntries <> '') And EmptyCurrent And (Not EmptyFpStill) Then
+                        EmptyBoardJson := LibBoardRemoveEntries(PcbLib.Board, EmptyEntries,
+                            Body3D_BodyAddresses(Footprint), True, EmptyBoardRemoved);
+
+                    { READ BOTH AGAIN. An unreadable address is reported as  }
+                    { unknown (null), never as gone.                          }
+                    If EmptyAddr = '' Then
+                        EmptyFpStillJson := 'null'
+                    Else
+                    Begin
+                        EmptyFpStill := Pos('|' + EmptyAddr + '|', Body3D_BodyAddresses(Footprint)) > 0;
+                        EmptyFpStillJson := BoolToJsonStr(EmptyFpStill);
+                    End;
+                    EmptyBoardStill := -1;
+                    EmptyBoardStillJson := 'null';
+                    If (EmptyEntries <> '') And EmptyCurrent Then
+                    Begin
+                        EmptyBoardStill := LibBoardStillListsCount(PcbLib.Board, EmptyEntries);
+                        EmptyBoardStillJson := IntToStr(EmptyBoardStill);
+                    End;
+                    EmptyRemoved := (EmptyFpStillJson = 'false') And (EmptyBoardStill = 0);
+
+                    EmptyDetails := JsonObj(
+                        JsonStr('model_path', ModelPath) + ','
+                        + JsonRaw('footprint_still_lists', EmptyFpStillJson) + ','
+                        + JsonInt('footprint_remove_rounds', EmptyFpPasses) + ','
+                        + JsonRaw('board_still_lists', EmptyBoardStillJson) + ','
+                        + JsonBool('footprint_current', EmptyCurrent) + ','
+                        + JsonRaw('board_removal', EmptyBoardJson) + ','
+                        + JsonBool('removed_from_both', EmptyRemoved) + ','
+                        + JsonInt('replaced_before_judging', RemovedDistinct));
+
                     FailCode := 'MODEL_LOAD_FAILED';
+                    Failure := 'Could not load a 3D model from ' + ModelPath
+                        + ': it loaded as an empty model (no readable bounding '
+                        + 'box and an overall height of 0), so the file is not a '
+                        + 'model Altium can read, whatever its extension.';
                     If EmptyRemoved Then
-                        Failure := 'Could not load a 3D model from ' + ModelPath
-                            + ': it loaded as an empty model (no readable bounding '
-                            + 'box and an overall height of 0), so the file is not a '
-                            + 'model Altium can read, whatever its extension. The '
-                            + 'empty body was taken off the footprint IN MEMORY only;'
-                            + EmptyBoardText + ' A body created in this session and '
-                            + 'removed this way has been measured to come back on the '
-                            + 'next save (2026-10-04). Do NOT save this library: run '
-                            + 'lib_reload_library to discard the change (if nothing '
-                            + 'else in it is unsaved). If it was saved with the body, '
-                            + 'remove it with lib_delete_footprint_primitives '
-                            + '(object_type componentbody, reload_first true): a '
-                            + 'disk-loaded body is the case measured to persist. Count '
-                            + 'the bodies IN THE FILE (lib_read_pcblib_file) after any '
+                        Failure := Failure + ' The empty body was taken off the '
+                            + 'footprint and off the library board, and both read '
+                            + 'back without it (footprint_still_lists=false, '
+                            + 'board_still_lists=0). That is IN MEMORY: count the '
+                            + 'bodies IN THE FILE (lib_read_pcblib_file) after any '
                             + 'save.'
                     Else
-                        Failure := 'Could not load a 3D model from ' + ModelPath
-                            + ': it loaded as an empty model (no readable bounding '
-                            + 'box and an overall height of 0), and the empty body '
-                            + 'could NOT be taken off the footprint again. Do NOT save '
-                            + 'this library: run lib_reload_library to discard the '
-                            + 'change, or remove the body with '
-                            + 'lib_delete_footprint_primitives (object_type '
-                            + 'componentbody).';
+                        Failure := Failure + ' The empty body could NOT be taken '
+                            + 'off everything it was added to: footprint_still_lists='
+                            + EmptyFpStillJson + ', board_still_lists='
+                            + EmptyBoardStillJson + ' (null = not read: the '
+                            + 'footprint was not current, or its address was '
+                            + 'unreadable). Do NOT save this library: run '
+                            + 'lib_reload_library to discard the change (if nothing '
+                            + 'else in it is unsaved). If it was saved with the '
+                            + 'body, remove it with lib_delete_footprint_primitives '
+                            + '(object_type componentbody, reload_first true) and '
+                            + 'count the bodies IN THE FILE (lib_read_pcblib_file).';
                     If Replace And (RemovedDistinct > 0) Then
                         Failure := Failure + ' replace=true had ALREADY removed '
                             + IntToStr(RemovedDistinct) + ' existing bod(ies) before '
@@ -7197,7 +7246,11 @@ Begin
 
     If Failure <> '' Then
     Begin
-        Result := BuildErrorResponse(RequestId, FailCode, Failure);
+        { The empty-model undo carries what the reads said, as fields. }
+        If EmptyDetails <> '' Then
+            Result := BuildErrorResponseDetailed(RequestId, FailCode, Failure, EmptyDetails)
+        Else
+            Result := BuildErrorResponse(RequestId, FailCode, Failure);
         Exit;
     End;
 
@@ -10451,6 +10504,48 @@ Begin
     End;
 End;
 
+{ LabelOrdinalProblem - the range test both label-format handlers make       }
+{ BEFORE any PreProcess, library focus or write. '' = both fields absent or   }
+{ in range; otherwise the refusal text, naming the op (OpIndex >= 0, the      }
+{ batch handler's ops[Index]; -1 for the single handler), the field, the      }
+{ value and the range.                                                        }
+{                                                                              }
+{ WHY A REFUSAL (live 2026-10-12, P11, bridge 2026.10.11.03): orientation 90   }
+{ and justification 12 did NOT raise. The label stored them as given and      }
+{ lib_save_library wrote "Orientation=90|Justification=12" into the file - a  }
+{ value outside the enums (TRotationBy90 0..3, the text justification 0..8)  }
+{ that the editor then has to interpret. The Python tool refuses the same    }
+{ values; this repeats it for a stale client and the single handler.         }
+{ A value that is not a whole number reads as -1 here, so it is refused too. }
+Function LabelOrdinalProblem(OpIndex : Integer; OrientStr : String; JustStr : String) : String;
+Var
+    Where : String;
+    V : Integer;
+Begin
+    Result := '';
+    If OpIndex >= 0 Then Where := 'ops[' + IntToStr(OpIndex) + '].'
+    Else Where := '';
+    If Trim(OrientStr) <> '' Then
+    Begin
+        V := StrToIntDef(Trim(OrientStr), -1);
+        If (V < 0) Or (V > 3) Then
+        Begin
+            Result := Where + 'orientation=' + Trim(OrientStr) + ' is out of '
+                + 'range 0..3 (the quarter-turn ordinal: 0 = 0, 1 = 90, 2 = '
+                + '180, 3 = 270 degrees). Nothing was changed.';
+            Exit;
+        End;
+    End;
+    If Trim(JustStr) <> '' Then
+    Begin
+        V := StrToIntDef(Trim(JustStr), -1);
+        If (V < 0) Or (V > 8) Then
+            Result := Where + 'justification=' + Trim(JustStr) + ' is out of '
+                + 'range 0..8 (0 = bottom-left ... 8 = top-right). Nothing was '
+                + 'changed.';
+    End;
+End;
+
 Function ApplyLabelFormat(Lbl : ISch_Label;
     HasFontId : Boolean; NewFontId : Integer;
     HasColor : Boolean; NewColor : Integer;
@@ -10492,11 +10587,11 @@ Begin
         SchEndModify(Lbl);
         Result := 1;
     Except
-        { NEEDS PROBE, not guarded. An out-of-enum Orientation (TRotationBy90 }
-        { is 0..3, and the Python docstring offers 0/90/180/270) or          }
-        { Justification (0..8) is the suspected raise, but whether the write  }
-        { raises or silently stores the ordinal is not measured, and a range  }
-        { refusal would turn the second into a failure. Counted instead.      }
+        { SETTLED (live 2026-10-12, P11): an out-of-enum Orientation or      }
+        { Justification does NOT raise here - the label stores the value as  }
+        { given, and the save writes it - so both handlers refuse it first   }
+        { (LabelOrdinalProblem). What is left is an ordinary-raise backstop, }
+        { counted.                                                           }
         RecordCaughtException('ApplyLabelFormat:write');
         Result := -1;
     End;
@@ -10546,6 +10641,14 @@ Begin
     Begin
         Result := BuildErrorResponse(RequestId, 'NOTHING_TO_SET',
             'At least one of font_id / color / is_hidden / orientation / justification must be supplied');
+        Exit;
+    End;
+    If LabelOrdinalProblem(-1, ExtractJsonValue(Params, 'orientation'),
+        ExtractJsonValue(Params, 'justification')) <> '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'INVALID_ARGUMENT',
+            LabelOrdinalProblem(-1, ExtractJsonValue(Params, 'orientation'),
+                ExtractJsonValue(Params, 'justification')));
         Exit;
     End;
 
@@ -10787,6 +10890,24 @@ Begin
     FlagStr := ExtractJsonValue(Params, 'only_mismatched');
     OnlyMismatched := (FlagStr <> 'false') And (FlagStr <> 'False') And (FlagStr <> '0');
     Limit := StrToIntDef(ExtractJsonValue(Params, 'limit'), 5000);
+
+    { Every op's ordinals in range BEFORE the library is focused or any     }
+    { transaction opens (LabelOrdinalProblem: P11 stored 90 and 12 as given). }
+    Remaining := OpsStr;
+    J := 0;
+    While True Do
+    Begin
+        OpStr := NextBatchOp(Remaining);
+        If OpStr = '' Then Break;
+        Target := LabelOrdinalProblem(J, GetBatchField(OpStr, 'orientation'),
+            GetBatchField(OpStr, 'justification'));
+        If Target <> '' Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'INVALID_ARGUMENT', Target);
+            Exit;
+        End;
+        Inc(J);
+    End;
 
     { Workspace + library focus checks BEFORE allocating TStringLists so an  }
     { early-exit error path does not leak.                                    }
@@ -12025,10 +12146,127 @@ End;
 { Lib_InstallLibrary / Lib_UninstallLibrary - register or unregister a library }
 { (.IntLib / .SchLib / .PcbLib) with the environment's Available Libraries.    }
 {..............................................................................}
+{ THE INSTALLED LIST, READ BEFORE AND AFTER: what install / uninstall report. }
+{                                                                              }
+{ Live 2026-10-12 (P12, bridge 2026.10.11.03): both handlers reported success  }
+{ whenever the call did not raise. A RELATIVE name with no file behind it      }
+{ answered installed:true while the list stayed at 3; an uninstall of the     }
+{ right file under ANOTHER SPELLING of its path answered uninstalled:true     }
+{ while the library stayed installed. Neither call raises on those inputs, so }
+{ the reply now says what the list shows changed, compared by DocPathKey, and }
+{ false with a reason otherwise. InstalledLibraryCount / InstalledLibraryPath }
+{ are the readers lib_get_installed_libraries runs (live, P12's list reads).  }
+
+{ The installed paths as '|p1|p2|', or '?' when the list cannot be read. }
+Function InstalledLibPathList(Dummy : Integer) : String;
+Var
+    I, N : Integer;
+    P : String;
+    Unread : Boolean;
+Begin
+    Result := '?';
+    N := -1;
+    Try N := IntegratedLibraryManager.InstalledLibraryCount; Except N := -1; End;
+    If N < 0 Then Exit;
+    Result := '|';
+    For I := 0 To N - 1 Do
+    Begin
+        P := '';
+        Unread := False;
+        Try P := IntegratedLibraryManager.InstalledLibraryPath(I); Except Unread := True; End;
+        If Unread Then
+        Begin
+            Result := '?';
+            Exit;
+        End;
+        Result := Result + P + '|';
+    End;
+End;
+
+{ The entries of List ('|p1|p2|') whose DocPathKey is NOT the key of any entry }
+{ of Other, as '|'-joined original spellings ('' when none). }
+Function InstalledPathsNotIn(List : String; Other : String) : String;
+Var
+    Rest, Tok, Keys, R2, T2 : String;
+    BarPos : Integer;
+Begin
+    Result := '';
+    Keys := '|';
+    R2 := Other;
+    While R2 <> '' Do
+    Begin
+        BarPos := Pos('|', R2);
+        If BarPos = 0 Then Break;
+        T2 := Copy(R2, 1, BarPos - 1);
+        R2 := Copy(R2, BarPos + 1, Length(R2));
+        If T2 <> '' Then Keys := Keys + DocPathKey(T2) + '|';
+    End;
+    Rest := List;
+    While Rest <> '' Do
+    Begin
+        BarPos := Pos('|', Rest);
+        If BarPos = 0 Then Break;
+        Tok := Copy(Rest, 1, BarPos - 1);
+        Rest := Copy(Rest, BarPos + 1, Length(Rest));
+        If (Tok <> '') And (Pos('|' + DocPathKey(Tok) + '|', Keys) = 0) Then
+        Begin
+            If Result <> '' Then Result := Result + '|';
+            Result := Result + Tok;
+        End;
+    End;
+End;
+
+{ The first entry of List whose FILE NAME matches Path's ('' when none): what  }
+{ an uninstall that changed nothing points the caller at.                     }
+Function InstalledPathWithName(List : String; Path : String) : String;
+Var
+    Rest, Tok, Want : String;
+    BarPos : Integer;
+Begin
+    Result := '';
+    Want := DocNameKey(Path);
+    If Want = '' Then Exit;
+    Rest := List;
+    While Rest <> '' Do
+    Begin
+        BarPos := Pos('|', Rest);
+        If BarPos = 0 Then Break;
+        Tok := Copy(Rest, 1, BarPos - 1);
+        Rest := Copy(Rest, BarPos + 1, Length(Rest));
+        If (Tok <> '') And (DocNameKey(Tok) = Want) Then
+        Begin
+            Result := Tok;
+            Exit;
+        End;
+    End;
+End;
+
+{ A '|'-joined path list as a JSON array body. }
+Function InstalledPathsJson(L : String) : String;
+Var
+    Rest, Tok : String;
+    BarPos : Integer;
+Begin
+    Result := '';
+    Rest := L + '|';
+    While Rest <> '' Do
+    Begin
+        BarPos := Pos('|', Rest);
+        If BarPos = 0 Then Break;
+        Tok := Copy(Rest, 1, BarPos - 1);
+        Rest := Copy(Rest, BarPos + 1, Length(Rest));
+        If Tok <> '' Then
+        Begin
+            If Result <> '' Then Result := Result + ',';
+            Result := Result + '"' + EscapeJsonString(Tok) + '"';
+        End;
+    End;
+End;
+
 Function Lib_InstallLibrary(Params : String; RequestId : String) : String;
 Var
-    Path : String;
-    Ok : Boolean;
+    Path, Before, After, Added, Reason : String;
+    Asked, Raised : Boolean;
 Begin
     Path := ExtractJsonValue(Params, 'library_path');
     If Path = '' Then
@@ -12041,20 +12279,47 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_MANAGER', 'IntegratedLibraryManager unavailable');
         Exit;
     End;
-    Ok := False;
+    Before := InstalledLibPathList(0);
+    Asked := False;
+    Raised := False;
+    Reason := '';
     { An ABSOLUTE path with no file behind it cannot be installed; asking    }
-    { raised (a modal) and the reply was installed:false. Answer that        }
-    { without asking. A relative path goes ahead as before.                  }
-    If Not (LooksAbsolutePath(Trim(Path)) And (Not FileExists(Trim(Path)))) Then
+    { raised (a modal). Answer that without asking. A relative path is asked }
+    { as before, and the list read afterwards says whether it took.          }
+    If LooksAbsolutePath(Trim(Path)) And (Not FileExists(Trim(Path))) Then
+        Reason := 'no file at that path'
+    Else If (Before <> '?') And (InstalledPathsNotIn('|' + Path + '|', Before) = '') Then
+        Reason := 'already installed (the list holds that path)'
+    Else
+    Begin
+        Asked := True;
         Try
             IntegratedLibraryManager.InstallLibrary(Path);
-            Ok := True;
         Except
+            Raised := True;
             RecordCaughtException('Lib_InstallLibrary:InstallLibrary');
         End;
+    End;
+    After := InstalledLibPathList(0);
+    Added := '';
+    If Asked And (Before <> '?') And (After <> '?') Then
+        Added := InstalledPathsNotIn(After, Before);
+    If Asked And (Reason = '') Then
+    Begin
+        If Raised Then Reason := 'InstallLibrary raised'
+        Else If (Before = '?') Or (After = '?') Then
+            Reason := 'the installed list could not be read, so the install '
+                + 'could not be confirmed'
+        Else If Added = '' Then
+            Reason := 'the installed list did not change: Altium accepted the '
+                + 'call but added no entry (pass the ABSOLUTE path of an '
+                + 'existing library file)';
+    End;
     Result := BuildSuccessResponse(RequestId,
-        '{"installed":' + BoolToJsonStr(Ok) + ',"library_path":"'
-        + EscapeJsonString(Path) + '"}');
+        '{"installed":' + BoolToJsonStr(Added <> '')
+        + ',"library_path":"' + EscapeJsonString(Path) + '"'
+        + ',"added":[' + InstalledPathsJson(Added) + ']'
+        + ',"reason":"' + EscapeJsonString(Reason) + '"}');
 End;
 
 { Could Path be an installed library? False only when the installed list was  }
@@ -12086,8 +12351,8 @@ End;
 
 Function Lib_UninstallLibrary(Params : String; RequestId : String) : String;
 Var
-    Path : String;
-    Ok : Boolean;
+    Path, Before, After, Removed, Reason, Stored : String;
+    Asked, Raised : Boolean;
 Begin
     Path := ExtractJsonValue(Params, 'library_path');
     If Path = '' Then
@@ -12100,20 +12365,49 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_MANAGER', 'IntegratedLibraryManager unavailable');
         Exit;
     End;
-    Ok := False;
+    Before := InstalledLibPathList(0);
+    Asked := False;
+    Raised := False;
+    Reason := '';
     { Not installed (no installed entry even carries the file name): the   }
-    { call raised and the reply was uninstalled:false. Answer that without  }
-    { asking (InstalledLibNameKnown).                                       }
-    If InstalledLibNameKnown(Path) Then
+    { call raised. Answer that without asking (InstalledLibNameKnown).      }
+    If Not InstalledLibNameKnown(Path) Then
+        Reason := 'not installed (no installed entry has that file name)'
+    Else
+    Begin
+        Asked := True;
         Try
             IntegratedLibraryManager.UnInstallLibrary(Path);
-            Ok := True;
         Except
+            Raised := True;
             RecordCaughtException('Lib_UninstallLibrary:UnInstallLibrary');
         End;
+    End;
+    After := InstalledLibPathList(0);
+    Removed := '';
+    If Asked And (Before <> '?') And (After <> '?') Then
+        Removed := InstalledPathsNotIn(Before, After);
+    If Asked And (Reason = '') Then
+    Begin
+        If Raised Then Reason := 'UnInstallLibrary raised'
+        Else If (Before = '?') Or (After = '?') Then
+            Reason := 'the installed list could not be read, so the uninstall '
+                + 'could not be confirmed'
+        Else If Removed = '' Then
+        Begin
+            Stored := InstalledPathWithName(After, Path);
+            Reason := 'the installed list did not change: Altium accepted the '
+                + 'call but removed no entry';
+            If Stored <> '' Then
+                Reason := Reason + '. It is installed as "' + Stored + '": '
+                    + 'pass that exact path';
+        End;
+    End;
     Result := BuildSuccessResponse(RequestId,
-        '{"uninstalled":' + BoolToJsonStr(Ok) + ',"library_path":"'
-        + EscapeJsonString(Path) + '"}');
+        '{"uninstalled":' + BoolToJsonStr(Removed <> '')
+        + ',"library_path":"' + EscapeJsonString(Path) + '"'
+        + ',"removed":[' + InstalledPathsJson(Removed) + ']'
+        + ',"reason":"' + EscapeJsonString(Reason) + '"}');
 End;
 
 {..............................................................................}
@@ -13866,22 +14160,90 @@ Begin
     Result := True;
 End;
 
+{ Is Path open as a WORKSPACE DOCUMENT? The test lib_save_library makes before }
+{ it will write anything (Client.GetDocumentByPath): a library loaded only    }
+{ through PCBServer.LoadPCBLibraryByPath is NOT one, and lib_save_library    }
+{ answers NOT_LOADED for it.                                                 }
+Function PcbLibIsWorkspaceDoc(Path : String) : Boolean;
+Var
+    Doc : IServerDocument;
+Begin
+    Result := False;
+    If Trim(Path) = '' Then Exit;
+    Doc := Nil;
+    Try Doc := Client.GetDocumentByPath(Trim(Path)); Except Doc := Nil; End;
+    Result := (Doc <> Nil);
+End;
+
+{ PcbLibOpenAsDocument - make a .PcbLib a real workspace document BEFORE an    }
+{ edit, so the edit can be saved.                                              }
+{                                                                              }
+{ WHY (live 2026-10-12, P13, bridge 2026.10.11.03): lib_copy_footprint into a }
+{ CLOSED destination reported success, but the destination had been loaded    }
+{ headless (PCBServer.LoadPCBLibraryByPath), so the copy lived only in a       }
+{ library no document owns: it never reached the file, lib_save_library       }
+{ answered NOT_LOADED, and a move (delete_from_source defaults true) could     }
+{ have deleted the only saveable copy from its source.                        }
+{                                                                              }
+{ The open is the WorkspaceManager:OpenObject route every lib_ handler uses   }
+{ (FocusPcbLibForEdit, ResolveLibFootprint). Only an ABSOLUTE path to an       }
+{ existing .PcbLib whose bytes read as non-empty (FileLooksLoadable) is        }
+{ opened: Altium's own "File type not recognised" box for a broken file is    }
+{ uncounted and blocks the loop. Answers whether Path is a workspace document }
+{ AFTERWARDS - the caller refuses on False before any edit. OpenObject        }
+{ focuses the opened library; every caller has resolved what it needs from    }
+{ the previous focus first.                                                   }
+Function PcbLibOpenAsDocument(Path : String) : Boolean;
+Var
+    P : String;
+Begin
+    P := Trim(Path);
+    Result := PcbLibIsWorkspaceDoc(P);
+    If Result Then Exit;
+    If Not LooksAbsolutePath(P) Then Exit;
+    If UpperCase(ExtractFileExt(P)) <> '.PCBLIB' Then Exit;
+    If Not FileLooksLoadable(P) Then Exit;
+    ResetParameters;
+    AddStringParameter('ObjectKind', 'Document');
+    AddStringParameter('FileName', P);
+    RunProcess('WorkspaceManager:OpenObject');
+    Result := PcbLibIsWorkspaceDoc(P);
+End;
+
+{ The refusal both handlers give for a library that is not, and could not be  }
+{ made, a workspace document. Role is 'destination' or 'source'.              }
+Function PcbLibNotOpenMessage(Role : String; Path : String; Why : String) : String;
+Begin
+    Result := 'The ' + Role + ' library ' + Path + ' is not open in Altium as '
+        + 'a document and could not be opened as one (it must be the ABSOLUTE '
+        + 'path of an existing, readable .PcbLib). ' + Why + ' Nothing was '
+        + 'changed.';
+End;
+
 { Lib_MoveFootprints - bulk copy (+ optional delete) of footprints between two  }
 { PcbLibs, the PcbLib analog of Lib_MoveComponents. Uses the canonical combine   }
 { pattern: DestLib.CreateNewComponent + Footprint.CopyTo(NewFP, eFullCopy) +     }
 { RegisterComponent, then RemoveComponent + DeRegisterComponent on the source.   }
-{ Both libraries are resolved by path (GetPCBLibraryByPath, load if needed), so  }
-{ neither needs to be focused. A name already in dest is skipped unless          }
-{ overwrite. delete_from_source defaults true. Names arrive '~~'-separated.      }
+{ A name already in dest is skipped unless overwrite. delete_from_source         }
+{ defaults true. Names arrive '~~'-separated.                                    }
+{                                                                                }
+{ BOTH ENDS THAT WILL BE EDITED MUST BE SAVEABLE (PcbLibOpenAsDocument): the     }
+{ destination always, the source when delete_from_source is set. A closed one   }
+{ is opened as a document; one that cannot be is refused (DEST_NOT_OPEN /        }
+{ SOURCE_NOT_OPEN) before anything is edited. A source that is only READ (no    }
+{ delete) may still be loaded in the background. A footprint is deleted from    }
+{ the source only after the destination LISTS its copy (GetComponentByName),    }
+{ so a copy that did not land never costs the original.                         }
 { Params: source_library, dest_library, names (required), overwrite,            }
 {         delete_from_source.                                                    }
 Function Lib_MoveFootprints(Params : String; RequestId : String) : String;
 Var
     SourcePath, DestPath, NamesStr, Remaining, Name, OverwriteStr, DeleteStr, RespJson, FpName : String;
-    Overwrite, DeleteFromSource : Boolean;
+    DestMarkJson, SourceMarkJson : String;
+    Overwrite, DeleteFromSource, DestMarked, SourceMarked : Boolean;
     SourceLib, DestLib : IPCB_Library;
     Footprint, NewFP, Existing, Fp : IPCB_LibComponent;
-    Moved, Skipped, Failed, J : Integer;
+    Moved, Skipped, Failed, NotVerified, Deleted, J : Integer;
 Begin
     SourcePath := ExtractJsonValue(Params, 'source_library');
     DestPath := ExtractJsonValue(Params, 'dest_library');
@@ -13907,33 +14269,53 @@ Begin
         Exit;
     End;
 
+    { Saveable ends FIRST, before either library is resolved: an OpenObject }
+    { after a resolve could leave the handler holding a background copy.    }
+    If Not PcbLibOpenAsDocument(DestPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'DEST_NOT_OPEN',
+            PcbLibNotOpenMessage('destination', DestPath,
+                'A copy into a library loaded in the background can never be '
+                + 'saved (lib_save_library answers NOT_LOADED), so the move '
+                + 'would report footprints that never reach the file.'));
+        Exit;
+    End;
+    If DeleteFromSource And (Not PcbLibOpenAsDocument(SourcePath)) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'SOURCE_NOT_OPEN',
+            PcbLibNotOpenMessage('source', SourcePath,
+                'delete_from_source needs it open as a document so the '
+                + 'deletion can be saved; pass delete_from_source=false to '
+                + 'copy only.'));
+        Exit;
+    End;
+
     SourceLib := Nil;
-    { NEEDS PROBE: whether GetPCBLibraryByPath raises for a library that is not }
-    { loaded (the normal case for a destination). No guard that cannot lose an  }
-    { open library exists, so a catch is counted.                               }
     Try SourceLib := PCBServer.GetPCBLibraryByPath(SourcePath);
     Except RecordCaughtException('Lib_MoveFootprints:GetPCBLibraryByPath'); End;
-    If (SourceLib = Nil) And PcbLibLoadable(SourcePath) Then
+    { Only a source that is READ, never edited, may come from the           }
+    { background load: with delete_from_source it is a document by now.     }
+    If (SourceLib = Nil) And (Not DeleteFromSource) And PcbLibLoadable(SourcePath) Then
         Try SourceLib := PCBServer.LoadPCBLibraryByPath(SourcePath); Except End;
     If SourceLib = Nil Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'Failed to open source PCB library at ' + SourcePath);
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'Failed to open source PCB library at ' + SourcePath + '. Nothing was changed.');
         Exit;
     End;
     DestLib := Nil;
     Try DestLib := PCBServer.GetPCBLibraryByPath(DestPath);
     Except RecordCaughtException('Lib_MoveFootprints:GetPCBLibraryByPath'); End;
-    If (DestLib = Nil) And PcbLibLoadable(DestPath) Then
-        Try DestLib := PCBServer.LoadPCBLibraryByPath(DestPath); Except End;
     If DestLib = Nil Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'Failed to open destination PCB library at ' + DestPath);
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'Failed to open destination PCB library at ' + DestPath + '. Nothing was changed.');
         Exit;
     End;
 
     Moved := 0;
     Skipped := 0;
     Failed := 0;
+    NotVerified := 0;
+    Deleted := 0;
     PCBServer.PreProcess;
     Remaining := NamesStr;
     While True Do
@@ -13966,10 +14348,19 @@ Begin
         Try NewFP.Name := Name; Except End;
         DestLib.RegisterComponent(NewFP);
 
+        { THE COPY MUST BE LISTED BEFORE THE ORIGINAL GOES. }
+        If DestLib.GetComponentByName(Name) = Nil Then
+        Begin
+            Inc(NotVerified);
+            Inc(Failed);
+            Continue;
+        End;
+
         If DeleteFromSource Then
         Begin
             Try SourceLib.RemoveComponent(Footprint); Except End;
             Try SourceLib.DeRegisterComponent(Footprint); Except End;
+            Inc(Deleted);
         End;
 
         Inc(Moved);
@@ -13978,15 +14369,35 @@ Begin
 
     Try DestLib.Board.ViewManager_FullUpdate; Except End;
     Try DestLib.RefreshView; Except End;
-    MarkDocDirtyByPath(DestLib.Board.FileName);
-    If DeleteFromSource Then MarkDocDirtyByPath(SourceLib.Board.FileName);
+    DestMarked := False;
+    DestMarkJson := 'null';
+    If Moved > 0 Then
+    Begin
+        DestMarked := MarkDocDirty(DestPath);
+        DestMarkJson := MarkOutcomeJson(0);
+    End;
+    SourceMarked := False;
+    SourceMarkJson := 'null';
+    If Deleted > 0 Then
+    Begin
+        SourceMarked := MarkDocDirty(SourcePath);
+        SourceMarkJson := MarkOutcomeJson(0);
+    End;
 
     RespJson := '{"success":true'
         + ',"source_library":"' + EscapeJsonString(SourcePath) + '"'
         + ',"dest_library":"' + EscapeJsonString(DestPath) + '"'
         + ',"moved":' + IntToStr(Moved)
         + ',"skipped":' + IntToStr(Skipped)
-        + ',"failed":' + IntToStr(Failed) + '}';
+        + ',"failed":' + IntToStr(Failed)
+        + ',"copy_not_listed":' + IntToStr(NotVerified)
+        + ',"deleted_from_source":' + IntToStr(Deleted)
+        + ',"marked_modified":' + BoolToJsonStr(DestMarked)
+        + ',"mark":' + DestMarkJson
+        + ',"source_marked_modified":' + BoolToJsonStr(SourceMarked)
+        + ',"source_mark":' + SourceMarkJson
+        + ',"pending_save":' + BoolToJsonStr(Moved > 0)
+        + ',"written_to_disk":false}';
     Result := BuildSuccessResponse(RequestId, RespJson);
 End;
 
@@ -13995,12 +14406,19 @@ End;
 { delete. Same-library copy requires a different new_name. Libraries resolve by  }
 { path (default source = focused, dest = source). A name already in dest errors  }
 { unless overwrite.                                                              }
+{                                                                                }
+{ THE DESTINATION MUST BE SAVEABLE (PcbLibOpenAsDocument): a closed one is      }
+{ opened as a document first, and one that cannot be is refused DEST_NOT_OPEN    }
+{ before anything is edited (P13, 2026-10-12: the copy into a background-loaded  }
+{ library said success and never reached the file). The source of a copy into  }
+{ ANOTHER library is only read, and may still be loaded in the background.      }
 { Params: source_name (required), new_name (default source_name),               }
 {         source_library (optional), dest_library (optional), overwrite.         }
 Function Lib_CopyFootprint(Params : String; RequestId : String) : String;
 Var
     SourceLibPath, DestLibPath, SourceName, NewName, OverwriteStr, RespJson, FpName : String;
-    Overwrite, SameLib : Boolean;
+    MarkJson : String;
+    Overwrite, SameLib, Listed, Marked : Boolean;
     SourceLib, DestLib : IPCB_Library;
     Footprint, NewFP, Existing, Fp : IPCB_LibComponent;
     J : Integer;
@@ -14020,11 +14438,23 @@ Begin
 
     { Source library: by path, else the focused PcbLib. }
     SourceLib := Nil;
+    SameLib := False;
     If SourceLibPath <> '' Then
     Begin
+        SameLib := (DestLibPath = '') Or (UpperCase(DestLibPath) = UpperCase(SourceLibPath));
+        { A same-library copy EDITS the source: it must be a document BEFORE }
+        { it is resolved, or the handler would hold the background copy.     }
+        If SameLib And (Not PcbLibOpenAsDocument(SourceLibPath)) Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'DEST_NOT_OPEN',
+                PcbLibNotOpenMessage('destination', SourceLibPath,
+                    'A copy into a library loaded in the background can never '
+                    + 'be saved (lib_save_library answers NOT_LOADED).'));
+            Exit;
+        End;
         Try SourceLib := PCBServer.GetPCBLibraryByPath(SourceLibPath);
         Except RecordCaughtException('Lib_CopyFootprint:GetPCBLibraryByPath'); End;
-        If (SourceLib = Nil) And PcbLibLoadable(SourceLibPath) Then
+        If (SourceLib = Nil) And (Not SameLib) And PcbLibLoadable(SourceLibPath) Then
             Try SourceLib := PCBServer.LoadPCBLibraryByPath(SourceLibPath); Except End;
     End
     { The focused PcbLib, asked only when one may be current            }
@@ -14038,10 +14468,13 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'No source PCB library (source_library not supplied and none focused)');
         Exit;
     End;
-    If SourceLibPath = '' Then Try SourceLibPath := SourceLib.Board.FileName; Except End;
+    If SourceLibPath = '' Then
+    Begin
+        Try SourceLibPath := SourceLib.Board.FileName; Except End;
+        SameLib := (DestLibPath = '') Or (UpperCase(DestLibPath) = UpperCase(SourceLibPath));
+    End;
 
     { Destination library: default = source. }
-    SameLib := (DestLibPath = '') Or (UpperCase(DestLibPath) = UpperCase(SourceLibPath));
     If SameLib Then
     Begin
         DestLib := SourceLib;
@@ -14054,14 +14487,20 @@ Begin
     End
     Else
     Begin
+        If Not PcbLibOpenAsDocument(DestLibPath) Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'DEST_NOT_OPEN',
+                PcbLibNotOpenMessage('destination', DestLibPath,
+                    'A copy into a library loaded in the background can never '
+                    + 'be saved (lib_save_library answers NOT_LOADED).'));
+            Exit;
+        End;
         DestLib := Nil;
         Try DestLib := PCBServer.GetPCBLibraryByPath(DestLibPath);
         Except RecordCaughtException('Lib_CopyFootprint:GetPCBLibraryByPath'); End;
-        If (DestLib = Nil) And PcbLibLoadable(DestLibPath) Then
-            Try DestLib := PCBServer.LoadPCBLibraryByPath(DestLibPath); Except End;
         If DestLib = Nil Then
         Begin
-            Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'Failed to open destination PCB library at ' + DestLibPath);
+            Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'Failed to open destination PCB library at ' + DestLibPath + '. Nothing was changed.');
             Exit;
         End;
     End;
@@ -14104,17 +14543,42 @@ Begin
     Try NewFP.Name := NewName; Except End;
     DestLib.RegisterComponent(NewFP);
     PCBServer.PostProcess;
+    Listed := (DestLib.GetComponentByName(NewName) <> Nil);
+    If Not Listed Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'COPY_FAILED',
+            'The destination does not list "' + NewName + '" after the copy '
+            + 'was registered, so nothing is claimed. Run lib_get_footprints on '
+            + DestLibPath + ' before saving it.');
+        Exit;
+    End;
 
     Try DestLib.Board.ViewManager_FullUpdate; Except End;
     Try DestLib.RefreshView; Except End;
-    MarkDocDirtyByPath(DestLib.Board.FileName);
+    { The caller's path first (the document the saveable check found), then }
+    { the library board's own file name if that mark did not take.          }
+    Marked := MarkDocDirty(DestLibPath);
+    MarkJson := MarkOutcomeJson(0);
+    If Not Marked Then
+    Begin
+        Try
+            If MarkDocDirty(DestLib.Board.FileName) Then
+            Begin
+                Marked := True;
+                MarkJson := MarkOutcomeJson(0);
+            End;
+        Except End;
+    End;
 
     RespJson := '{"success":true'
         + ',"source_library":"' + EscapeJsonString(SourceLibPath) + '"'
         + ',"dest_library":"' + EscapeJsonString(DestLibPath) + '"'
         + ',"source":"' + EscapeJsonString(SourceName) + '"'
         + ',"new_name":"' + EscapeJsonString(NewName) + '"'
-        + ',"same_library":' + BoolToJsonStr(SameLib) + '}';
+        + ',"same_library":' + BoolToJsonStr(SameLib)
+        + ',"marked_modified":' + BoolToJsonStr(Marked)
+        + ',"mark":' + MarkJson
+        + ',"pending_save":true,"written_to_disk":false}';
     Result := BuildSuccessResponse(RequestId, RespJson);
 End;
 
