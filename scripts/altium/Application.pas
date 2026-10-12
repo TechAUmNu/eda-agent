@@ -482,10 +482,17 @@ Begin
     { loaded, and the call on it raised - a modal before the Except - on    }
     { every call in a PCB-only session. Nil emits exactly the text the      }
     { Except emitted.                                                       }
+    { sch_server_loaded says which null this is: "schematic": null alone   }
+    { cannot tell "no schematic server" from "server registered, no current }
+    { schematic document". MEASURED 2026-10-12 (AD 26.10.1.5, a fresh      }
+    { Altium with only the Home page and a PcbDoc): the server was already }
+    { registered, so the Nil branch is not reached by restarting Altium.   }
+    { Both branches only add literals; the Nil test is the one above.      }
     If SchServer = Nil Then
-        Data := Data + ',"schematic":null'
+        Data := Data + ',"sch_server_loaded":false,"schematic":null'
     Else
     Begin
+        Data := Data + ',"sch_server_loaded":true';
         Try
             SchDoc := SchServer.GetCurrentSchDocument;
             If SchDoc <> Nil Then
@@ -1071,7 +1078,7 @@ End;
 { reference script does exactly this and nothing else.                         }
 Function App_ExitActiveCommand(RequestId : String) : String;
 Var
-    PcbOk, SchOk, PcbFailed : Boolean;
+    PcbOk, SchOk, PcbFailed, SchLoaded : Boolean;
     DirtyBefore, DirtyAfter, I : Integer;
 Begin
     DirtyBefore := CountDirtyDocuments(0);
@@ -1112,9 +1119,16 @@ Begin
     { CHECK FIRST: with no schematic server loaded SchServer is Nil and the   }
     { call raised (a modal before the Except); Nil leaves SchOk False, as the }
     { Except did.                                                             }
+    { sch_post_process true therefore means only that the server is         }
+    { registered and the call did not raise. MEASURED 2026-10-12 (AD         }
+    { 26.10.1.5): true in a fresh Altium with no schematic document at all - }
+    { the server is registered at startup. sch_server_loaded reports the     }
+    { Nil test on its own, so "server present, no document" is visible.      }
     SchOk := False;
+    SchLoaded := False;
     If SchServer <> Nil Then
     Begin
+        SchLoaded := True;
         Try
             SchServer.ProcessControl.PostProcess(SchServer.GetCurrentSchDocument, '');
             SchOk := True;
@@ -1126,6 +1140,7 @@ Begin
     Result := BuildSuccessResponse(RequestId,
         '{"pcb_post_process":' + BoolToJsonStr(PcbOk)
         + ',"sch_post_process":' + BoolToJsonStr(SchOk)
+        + ',"sch_server_loaded":' + BoolToJsonStr(SchLoaded)
         + ',"dirty_before":' + IntToStr(DirtyBefore)
         + ',"dirty_after":' + IntToStr(DirtyAfter)
         + ',"note":"this closes a transaction left open by a handler that '

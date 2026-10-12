@@ -630,12 +630,21 @@ def _prefs(sch_server, board=None):
 
 
 def test_preferences_with_no_schematic_server_say_null_without_raising():
-    assert _prefs(None) == {"pcb": None, "schematic": None}
+    assert _prefs(None) == {"pcb": None, "sch_server_loaded": False,
+                            "schematic": None}
 
 
 def test_preferences_still_read_a_current_sheet():
     got = _prefs(SimpleNamespace(GetCurrentSchDocument=_SchDoc()))
     assert got["schematic"] == {"visible_grid_size": 10, "snap_grid_size": 5}
+    assert got["sch_server_loaded"] is True
+
+
+def test_preferences_tell_a_registered_server_with_no_sheet_apart():
+    """F1 (2026-10-12): "schematic": null with the server registered and no
+    current document. sch_server_loaded separates that from no server."""
+    got = _prefs(SimpleNamespace(GetCurrentSchDocument=None))
+    assert got["schematic"] is None and got["sch_server_loaded"] is True
 
 
 class _Pcb:
@@ -663,6 +672,7 @@ def test_exit_active_command_stops_at_the_first_pcb_raise_and_counts_it():
     assert pcb.calls == 1, "seven more modals bought nothing"
     assert got["pcb_post_process"] is False
     assert got["sch_post_process"] is False
+    assert got["sch_server_loaded"] is False
     assert ns["_rec"].calls == [("App_ExitActiveCommand:PCBServer.PostProcess",)]
 
 
@@ -674,6 +684,7 @@ def test_exit_active_command_still_unwinds_eight_levels_when_it_can():
     ns, got = _exit_cmd(pcb, sch)
     assert pcb.calls == 8
     assert got["pcb_post_process"] is True and got["sch_post_process"] is True
+    assert got["sch_server_loaded"] is True
     assert posted == [None]
     assert ns["_rec"].calls == []
 

@@ -563,6 +563,10 @@ def register_application_tools(mcp):
         Returns:
             Dict reporting whether each server accepted the unwind, plus
             the count of still-modified documents before and after.
+            "sch_server_loaded" says whether the schematic server is
+            registered at all; "sch_post_process" true means only that
+            it is and the unwind did not raise (on AD 26.10.1.5 the
+            server is registered at startup, schematic or not).
         """
         bridge = get_bridge()
         result = await bridge.send_command_async(
@@ -1103,7 +1107,10 @@ def register_application_tools(mcp):
 
         Returns:
             Dictionary with "pcb" and "schematic" sub-objects containing
-            grid and unit settings
+            grid and unit settings, and "sch_server_loaded": whether the
+            schematic server is registered, so a null "schematic" with
+            the server present (no current schematic document) can be
+            told from no server at all.
         """
         bridge = get_bridge()
         result = await bridge.send_command_async("application.get_preferences")
