@@ -272,7 +272,7 @@ RULE_PCB_SUBTYPE_ON_BASE = LineRule(
     ),
     severity="error",
     memory="delphiscript_interface_narrowing.md",
-    description="Subtype-only PCB property on a base IPCB_Primitive var; narrow to a typed local (Track/Arc/Pad/...) via ObjectId.",
+    description="Subtype-only PCB property on a base IPCB_Primitive var: gate it on ObjectId first (the ObjectId test is the guard; DelphiScript resolves the member against the runtime object, so a typed local alone does not narrow).",
 )
 
 # IPCB_Rule.Priority is a read-only function, not a property.

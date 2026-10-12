@@ -135,45 +135,53 @@ End;
 {..............................................................................}
 
 {..............................................................................}
-{ Typed component property helper, extract designator / comment text by    }
-{ casting to ISch_Component first. Required because `Obj.Designator` on a    }
-{ base ISch_GraphicalObject fails to compile, DelphiScript cannot late-bind }
-{ properties that return compound interfaces (ISch_Parameter) the way it can  }
-{ for primitive returns.                                                      }
+{ Typed component property helper, extract designator / comment text through }
+{ an ISch_Component local, entered only after an ObjectId test. The ObjectId }
+{ test is what makes it safe, not the local's type: DelphiScript resolves a   }
+{ member against the object actually held, and a typed copy does not narrow  }
+{ (RELEASE_VERIFICATION 39; the cross-sheet connector's Side, 2026-10-12).   }
 {..............................................................................}
 
-{ Which schematic objects carry Text, IsHidden and Orientation.                }
+{..............................................................................}
+{ WHICH SCHEMATIC OBJECT TYPE CARRIES WHICH LATE-BOUND MEMBER: ALLOWLISTS.     }
 {                                                                              }
-{ Neither lives on the base ISch_GraphicalObject, and reaching for one on a    }
-{ type that lacks it raises "Undeclared identifier". That is not catchable:    }
-{ the script engine surfaces it as a modal before any Try/Except runs, so the  }
-{ polling loop stops. Issue #22, reproduced with                              }
-{ obj_query(object_type='ePort', properties='...,Orientation') on AD25.       }
+{ A member read or written on an object whose class does not publish it is   }
+{ the script engine's "Undeclared identifier" HALT: the Script IDE parks on    }
+{ the line, no Except runs, nothing is counted, a Finally is skipped and the   }
+{ polling loop is dead until somebody restarts it (live 2026-10-11, P8;        }
+{ 2026-10-12, P21; issue #22 on AD25 before them). These helpers used to be   }
+{ DENYLISTS on the premise that a type nobody had checked would at worst      }
+{ raise a COUNTED exception, so "keep today's Try" could never lose a read.  }
+{ That premise is false: the unchecked pair kills the loop, which inverts     }
+{ the asymmetry - a wrong deny costs one empty field ('unreadable' in the     }
+{ reply), a wrong allow costs the session.                                    }
 {                                                                              }
-{ A DENYLIST, deliberately. The types below are the ones there is evidence     }
-{ for: PlaceAPort.pas in the scripting reference builds a Port from Name,      }
-{ Style, IOType, Alignment and Width and never touches Text or Orientation,    }
-{ and ReplaceSchObjects.pas reads a cross-sheet connector's Orientation in     }
-{ order to map it onto Port.Style. Enumerating every type that DOES have       }
-{ these would be guesswork and would silently break queries that work today.  }
-{ IsHidden is the exception, below.                                            }
+{ So each governed name answers only for the object types listed with it,    }
+{ and every other type - including any ObjectId not in ObjectTypeFromString's }
+{ list - is not asked. The lists are the 24 queryable types MINUS the pairs   }
+{ the 2026-10-12 base-typed sweep found the SDK interface lacks (its section  }
+{ 2 matrix): every pair proven live, plus the pairs whose interface does      }
+{ declare the member but have never run (probe P15, FATAL-IF-WRONG). A list  }
+{ grows only on a probe's evidence or a certain interface declaration.        }
+{                                                                              }
+{ Two-letter keys used in the comments: NL net label, PT port, PW power port,  }
+{ CM component, WI wire, BU bus, BE bus entry, PA parameter, PS parameter    }
+{ set, PI pin, LB label, LI line, RE rectangle, SS sheet symbol, SE sheet     }
+{ entry, NE no-ERC, JU junction, IM image, TF text frame, NO note, PR probe,  }
+{ HC harness connector, XC cross-sheet connector, CK compile mask.           }
+{..............................................................................}
 
+{ Text: NL, PW, PA, LB, TF, NO, XC. Ports and sheet entries are named by Name, }
+{ parameter sets were measured without it (AD 21, AD 26), and the compile     }
+{ mask, pins, containers, wiring and graphics have none.                      }
 Function SchObjectHasText(Obj : ISch_GraphicalObject) : Boolean;
 Begin
-    Result := True;
+    Result := False;
     If Obj = Nil Then Exit;
-    { None of these has Text in Altium's interface: ports and sheet entries
-      (named by Name), parameter-set directives (measured on AD 21 and
-      AD 26), pins, the containers, and wiring and graphics. }
-    If (Obj.ObjectId = ePort) Or (Obj.ObjectId = eSheetEntry)
-        Or (Obj.ObjectId = eParameterSet) Or (Obj.ObjectId = ePin)
-        Or (Obj.ObjectId = eSchComponent) Or (Obj.ObjectId = eSheetSymbol)
-        Or (Obj.ObjectId = eHarnessConnector) Or (Obj.ObjectId = eProbe)
-        Or (Obj.ObjectId = eWire) Or (Obj.ObjectId = eBus)
-        Or (Obj.ObjectId = eBusEntry) Or (Obj.ObjectId = eJunction)
-        Or (Obj.ObjectId = eNoERC) Or (Obj.ObjectId = eLine)
-        Or (Obj.ObjectId = eRectangle) Or (Obj.ObjectId = eImage) Then
-        Result := False;
+    Result := (Obj.ObjectId = eNetLabel) Or (Obj.ObjectId = ePowerObject)
+        Or (Obj.ObjectId = eParameter) Or (Obj.ObjectId = eLabel)
+        Or (Obj.ObjectId = eTextFrame) Or (Obj.ObjectId = eNote)
+        Or (Obj.ObjectId = eCrossSheetConnector);
 End;
 
 { IsHidden belongs to pins and to the complex text types (parameters,
@@ -226,90 +234,114 @@ Begin
     End;
 End;
 
+{ Orientation: NL, PW, CM, PA, PS, PI, LB, NE, PR, XC. A Port carries its     }
+{ direction in Style and a sheet entry in Side (issue #22); the wiring,       }
+{ graphics, frames, sheet symbol, harness and compile mask have none.         }
 Function SchObjectHasOrientation(Obj : ISch_GraphicalObject) : Boolean;
-Begin
-    Result := True;
-    If Obj = Nil Then Exit;
-    { A Port carries its direction in Style, and a sheet entry in Side. }
-    If (Obj.ObjectId = ePort) Or (Obj.ObjectId = eSheetEntry) Then
-        Result := False;
-End;
-
-{..............................................................................}
-{ CHECK FIRST, DO NOT CATCH.                                                   }
-{                                                                              }
-{ Altium's DelphiScript engine shows an undeclared-identifier exception as a   }
-{ MODAL 'press OK' dialog BEFORE the surrounding Try/Except runs (measured;    }
-{ see WriteFileContent in Main.pas). A Try around a member some types do not   }
-{ have is therefore not a guard: every object of the wrong type pops a dialog  }
-{ and the polling loop waits on it. The helpers below answer "does this type   }
-{ lack that member" BEFORE the read or write.                                  }
-{                                                                              }
-{ THEY ARE DENYLISTS, AND THAT IS WHAT MAKES THEM SAFE. Each names only types  }
-{ whose interface certainly lacks the member (the polyline, label, port,       }
-{ rectangle and container shapes in docs/altium-delphiscript/02). A True can   }
-{ only send a caller down the branch today's Except already produced; a type   }
-{ nobody has checked (eLine, eBusEntry, eProbe, eParameterSet, eCompileMask)   }
-{ answers False and keeps today's Try, so a wrong guess can never take away a  }
-{ read or write that works today. Grow a list only on a probe's evidence.      }
-{..............................................................................}
-
-{ Types plainly without a library link or pin semantics: the wiring, text,   }
-{ port, graphic and frame shapes. The shared core of the lists below.        }
-Function SchObjectIsPlainShape(Obj : ISch_GraphicalObject) : Boolean;
-Var
-    Id : Integer;
 Begin
     Result := False;
     If Obj = Nil Then Exit;
-    Id := Obj.ObjectId;
-    Result := (Id = eNetLabel) Or (Id = ePort) Or (Id = ePowerObject)
-        Or (Id = eWire) Or (Id = eBus) Or (Id = eParameter) Or (Id = eLabel)
-        Or (Id = eRectangle) Or (Id = eSheetEntry) Or (Id = eNoERC)
-        Or (Id = eJunction) Or (Id = eImage) Or (Id = eTextFrame)
-        Or (Id = eNote) Or (Id = eCrossSheetConnector);
+    Result := (Obj.ObjectId = eNetLabel) Or (Obj.ObjectId = ePowerObject)
+        Or (Obj.ObjectId = eSchComponent) Or (Obj.ObjectId = eParameter)
+        Or (Obj.ObjectId = eParameterSet) Or (Obj.ObjectId = ePin)
+        Or (Obj.ObjectId = eLabel) Or (Obj.ObjectId = eNoERC)
+        Or (Obj.ObjectId = eProbe) Or (Obj.ObjectId = eCrossSheetConnector);
 End;
 
-{ No vertex array: GetState_VerticesCount / GetState_Vertex are polyline     }
-{ members (ISch_Wire, bus, polyline, polygon, bezier). eLine, eBusEntry and  }
-{ the unprobed types are deliberately NOT listed: if one of them does carry  }
-{ vertices today, listing it would blank a read that works.                  }
+{ The vertex array (GetState_VerticesCount / GetState_Vertex): WI, BU, and    }
+{ the library polyline family the mirror walks (ePolyline, ePolygon,          }
+{ eBezier). eLine and eBusEntry are two-point Location/Corner shapes: read     }
+{ them through Corner.X / Corner.Y.                                           }
 Function SchObjectLacksVertexArray(Obj : ISch_GraphicalObject) : Boolean;
 Var
     Id : Integer;
 Begin
-    Result := False;
+    Result := True;
     If Obj = Nil Then Exit;
     Id := Obj.ObjectId;
-    If (Id = eWire) Or (Id = eBus) Then Exit;
-    Result := SchObjectIsPlainShape(Obj) Or (Id = eSchComponent)
-        Or (Id = ePin) Or (Id = eSheetSymbol) Or (Id = eHarnessConnector);
+    Result := Not ((Id = eWire) Or (Id = eBus) Or (Id = ePolyline)
+        Or (Id = ePolygon) Or (Id = eBezier));
 End;
 
-{ The generic getter's and setter's late-bound names that some types are     }
-{ certain not to have. True means "do not touch it": the getter answers ''   }
-{ and the setter reports the write failed, which is exactly what each one's  }
-{ outer Except produced after the modal. Names not listed answer False, and  }
-{ every name listed is one BOTH the getter and the setter have a case for.   }
+{ The generic getter's and setter's governed late-bound names. True means     }
+{ "this type is not asked": the getter answers '' (noted 'unreadable') and    }
+{ the setter reports the write failed. Names not governed here answer False. }
+{ Every name governed is one BOTH the getter and the setter have a case for.  }
 Function SchPropAbsentOn(Obj : ISch_GraphicalObject; PropName : String) : Boolean;
 Var
     Id : Integer;
+    Ok : Boolean;
 Begin
     Result := False;
     If Obj = Nil Then Exit;
     Id := Obj.ObjectId;
-    { ISch_Component members. }
+    { ISch_Component members: CM only. }
     If (PropName = 'LibReference') Or (PropName = 'SourceLibraryName')
         Or (PropName = 'DesignItemId') Or (PropName = 'ComponentDescription')
         Or (PropName = 'Description') Then
-        Result := SchObjectIsPlainShape(Obj) Or (Id = ePin)
-    { ISch_Pin members. }
+        Ok := (Id = eSchComponent)
+    { ISch_Pin members: PI only. }
     Else If (PropName = 'Electrical') Or (PropName = 'PinLength') Then
-        Result := SchObjectIsPlainShape(Obj) Or (Id = eSchComponent)
-            Or (Id = eSheetSymbol) Or (Id = eHarnessConnector)
-    { ISch_RectangularGroup members (sheet symbol, harness connector). }
+        Ok := (Id = ePin)
+    { ISch_RectangularGroup members: SS, HC. }
     Else If (PropName = 'XSize') Or (PropName = 'YSize') Then
-        Result := SchObjectIsPlainShape(Obj) Or (Id = ePin);
+        Ok := (Id = eSheetSymbol) Or (Id = eHarnessConnector)
+    { Name: PT, PI, SE, PA (proven); PS, PR, HC (declared, P15). }
+    Else If PropName = 'Name' Then
+        Ok := (Id = ePort) Or (Id = ePin) Or (Id = eSheetEntry)
+            Or (Id = eParameter) Or (Id = eParameterSet) Or (Id = eProbe)
+            Or (Id = eHarnessConnector)
+    { FontId: NL, PA (proven); PT, PW, PS, LB, SE, TF, NO, PR, XC. }
+    Else If PropName = 'FontId' Then
+        Ok := (Id = eNetLabel) Or (Id = eParameter) Or (Id = ePort)
+            Or (Id = ePowerObject) Or (Id = eParameterSet) Or (Id = eLabel)
+            Or (Id = eSheetEntry) Or (Id = eTextFrame) Or (Id = eNote)
+            Or (Id = eProbe) Or (Id = eCrossSheetConnector)
+    { LineWidth: WI, LI, RE (proven); PT, BU, BE, PS, SS, IM, TF, NO, PR, HC, }
+    { CK.                                                                    }
+    Else If PropName = 'LineWidth' Then
+        Ok := (Id = eWire) Or (Id = eLine) Or (Id = eRectangle)
+            Or (Id = ePort) Or (Id = eBus) Or (Id = eBusEntry)
+            Or (Id = eParameterSet) Or (Id = eSheetSymbol) Or (Id = eImage)
+            Or (Id = eTextFrame) Or (Id = eNote) Or (Id = eProbe)
+            Or (Id = eHarnessConnector) Or (Id = eCompileMask)
+    { Style: PT, PW (proven); PS, SE, NE, PR, HC, XC. }
+    Else If PropName = 'Style' Then
+        Ok := (Id = ePort) Or (Id = ePowerObject) Or (Id = eParameterSet)
+            Or (Id = eSheetEntry) Or (Id = eNoERC) Or (Id = eProbe)
+            Or (Id = eHarnessConnector) Or (Id = eCrossSheetConnector)
+    { IOType: PT (proven); SE, HC. }
+    Else If PropName = 'IOType' Then
+        Ok := (Id = ePort) Or (Id = eSheetEntry) Or (Id = eHarnessConnector)
+    { Alignment: PT (proven); PS, SE, TF, NO, PR, HC. }
+    Else If PropName = 'Alignment' Then
+        Ok := (Id = ePort) Or (Id = eParameterSet) Or (Id = eSheetEntry)
+            Or (Id = eTextFrame) Or (Id = eNote) Or (Id = eProbe)
+            Or (Id = eHarnessConnector)
+    { TextColor: PT, PS, SS, SE, TF, NO, PR, HC (none proven yet). }
+    Else If PropName = 'TextColor' Then
+        Ok := (Id = ePort) Or (Id = eParameterSet) Or (Id = eSheetSymbol)
+            Or (Id = eSheetEntry) Or (Id = eTextFrame) Or (Id = eNote)
+            Or (Id = eProbe) Or (Id = eHarnessConnector)
+    { Justification: PA (proven); NL, PT, PW, PS, LB, TF, NO, PR, XC. }
+    Else If PropName = 'Justification' Then
+        Ok := (Id = eParameter) Or (Id = eNetLabel) Or (Id = ePort)
+            Or (Id = ePowerObject) Or (Id = eParameterSet) Or (Id = eLabel)
+            Or (Id = eTextFrame) Or (Id = eNote) Or (Id = eProbe)
+            Or (Id = eCrossSheetConnector)
+    { Width: PT (proven); PS, SE, TF, NO, PR, HC. }
+    Else If PropName = 'Width' Then
+        Ok := (Id = ePort) Or (Id = eParameterSet) Or (Id = eSheetEntry)
+            Or (Id = eTextFrame) Or (Id = eNote) Or (Id = eProbe)
+            Or (Id = eHarnessConnector)
+    { IsSolid: RE (proven); PS, SS, IM, TF, NO, PR, HC, CK. }
+    Else If PropName = 'IsSolid' Then
+        Ok := (Id = eRectangle) Or (Id = eParameterSet) Or (Id = eSheetSymbol)
+            Or (Id = eImage) Or (Id = eTextFrame) Or (Id = eNote)
+            Or (Id = eProbe) Or (Id = eHarnessConnector) Or (Id = eCompileMask)
+    Else
+        Ok := True;
+    Result := Not Ok;
 End;
 
 { The getter's exact-name polyline reads. Read-only names: the setter has    }
@@ -322,19 +354,20 @@ Begin
         Or (PropName = 'Vertex.2.Y');
 End;
 
-{ IsMirrored on a NON-component. The component path is SetState_IsMirrored  }
-{ and is dispatched by ObjectId already. The wiring and plain graphics have  }
-{ no mirror at all; the text-like types (labels, net labels, parameters)     }
-{ might, and so might eNoERC and eLine, so they are not listed.             }
+{ IsMirrored on a NON-component: NL, PW, PA, PS, LB (declared, P17). The     }
+{ component path is SetState_IsMirrored and is dispatched by ObjectId        }
+{ already (the getter's plain read on CM ran live, layout learner). Every    }
+{ other type is not asked.                                                   }
 Function SchObjectLacksIsMirrored(Obj : ISch_GraphicalObject) : Boolean;
 Var
     Id : Integer;
 Begin
-    Result := False;
+    Result := True;
     If Obj = Nil Then Exit;
     Id := Obj.ObjectId;
-    Result := (Id = eWire) Or (Id = eBus) Or (Id = eJunction)
-        Or (Id = eRectangle);
+    Result := Not ((Id = eSchComponent) Or (Id = eNetLabel)
+        Or (Id = ePowerObject) Or (Id = eParameter) Or (Id = eParameterSet)
+        Or (Id = eLabel));
 End;
 
 { The type tag a RecordCaughtException row carries, so a live run says WHICH }
@@ -516,8 +549,8 @@ Begin
     { A type with no vertex array would pop an undeclared-identifier modal  }
     { at GetState_VerticesCount below, once per object iterated, and then   }
     { answer '' through the swallowed exception. Answer '' without asking.  }
-    { Types not certainly vertex-less keep the Trys below (they stay as the }
-    { fault backstop).                                                      }
+    { Only the types SchObjectLacksVertexArray allows reach the Trys below  }
+    { (an ordinary-raise backstop; a member the object lacks is the halt).  }
     If SchObjectLacksVertexArray(Obj) Then Exit;
 
     { Bulk dump. VerticesCount itself stays on the caller's fast path. }
@@ -599,28 +632,39 @@ Var
     POrient, PLen, PCoord : Integer;
 Begin
     Result := '';
-    { CHECK FIRST (see SchPropAbsentOn). A name this type certainly lacks    }
-    { popped an undeclared-identifier modal per object, then the Except below }
-    { answered ''. Answer '' without asking. In a FILTER that was one modal   }
-    { for every object of the type on the sheet.                             }
-    If SchPropAbsentOn(Obj, PropName) Then Exit;
+    { CHECK FIRST (the allowlists above SchObjectHasText). A governed name  }
+    { on a type not listed for it is NOT ASKED: on a type whose class lacks  }
+    { the member the read is the engine's halt, which no Except below sees,  }
+    { and in a FILTER it ran once for every object of the type. The answer   }
+    { is '' noted 'unreadable', so the caller sees the gap.                  }
+    If SchPropAbsentOn(Obj, PropName) Then
+    Begin
+        NotePropertyDiag('unreadable', PropName);
+        Exit;
+    End;
     If SchVertexReadName(PropName) Then
-        If SchObjectLacksVertexArray(Obj) Then Exit;
+        If SchObjectLacksVertexArray(Obj) Then
+        Begin
+            NotePropertyDiag('unreadable', PropName);
+            Exit;
+        End;
     If PropName = 'IsMirrored' Then
-        If SchObjectLacksIsMirrored(Obj) Then Exit;
+        If SchObjectLacksIsMirrored(Obj) Then
+        Begin
+            NotePropertyDiag('unreadable', PropName);
+            Exit;
+        End;
     Try
         // Identity
         If PropName = 'ObjectId'    Then Result := IntToStr(Obj.ObjectId)
 
-        // Coordinates (returned in mils). Corner is declared only on
-        // ISch_Rectangle and ISch_Line (ISch_RoundRectangle inherits from
-        // ISch_Rectangle), NOT on the base ISch_GraphicalObject. The
-        // DelphiScript compiler rejects any textual reference to
-        // 'Obj.Corner' when Obj is typed ISch_GraphicalObject, regardless
-        // of the assignment target. The only compile-safe path is to
-        // dispatch on Obj.ObjectId and narrow to a typed-local interface
-        // that actually has Corner (R := Obj is a legal interface
-        // narrowing in DelphiScript, same pattern as GetSchComponentSubText).
+        // Coordinates (returned in mils). Corner is published only by
+        // rectangles (round rectangles included) and lines, NOT by every
+        // schematic object, and on one that lacks it the read is the
+        // engine's halt. What makes the read below safe is the ObjectId
+        // test in front of it; the typed local (R := Obj) is decoration,
+        // since the engine resolves a member against the object actually
+        // held (a typed copy does not narrow, RELEASE_VERIFICATION 39).
         Else If PropName = 'Location.X'  Then Result := IntToStr(CoordToMils(Obj.Location.X))
         Else If PropName = 'Location.Y'  Then Result := IntToStr(CoordToMils(Obj.Location.Y))
         Else If (PropName = 'Corner.X') Or (PropName = 'Corner.Y') Then
@@ -760,6 +804,16 @@ Begin
             If Obj.ObjectId = eSheetEntry Then
                 Result := IntToStr(CoordToMils(Obj.DistanceFromTop));
         End
+        { The value sch_place_harness_connector wrote. The member resolved   }
+        { on THIS type live (P20, 2026-10-12, a write); on any other type it }
+        { is not asked for at all.                                           }
+        Else If PropName = 'HarnessType' Then
+        Begin
+            If Obj.ObjectId = eHarnessConnector Then
+                Result := Obj.HarnessType
+            Else
+                NotePropertyDiag('unreadable', PropName);
+        End
 
         // Coord properties (returned in mils)
         Else If PropName = 'Width'       Then Result := IntToStr(CoordToMils(Obj.Width))
@@ -817,8 +871,9 @@ Begin
         Else If PropName = 'BoundingRectangle.X2' Then Result := IntToStr(CoordToMils(Obj.BoundingRectangle.X2))
         Else If PropName = 'BoundingRectangle.Y2' Then Result := IntToStr(CoordToMils(Obj.BoundingRectangle.Y2))
 
-        // Polyline vertex access. eWire / eBus / eLine are ISch_Polyline
-        // children with GetState_Vertex(i : Integer) : TLocation. Audit
+        // Polyline vertex access: wires and buses (and the library polyline
+        // family) publish GetState_Vertex(i : Integer) : TLocation; a line
+        // and a bus entry do not (Corner.X/Y), and are refused above. Audit
         // code reads the first two vertices to test wire-vs-component
         // segment intersection; higher indices are theoretically valid
         // but rarely needed (most wires are 2-vertex).
@@ -850,10 +905,10 @@ Begin
         Else If PropName = 'IsSolid'     Then Result := BoolToJsonStr(Obj.IsSolid)
         Else If PropName = 'IsMirrored'  Then Result := BoolToJsonStr(Obj.IsMirrored);
     Except
-        { Reached by a name no check above covers on a type that lacks it    }
-        { (Name, FontId, Style, Width, ... on the unprobed types). Counted so }
-        { a live run shows which pairs still pop; the probe matrix turns them }
-        { into SchPropAbsentOn entries.                                     }
+        { A FAULT-ONLY BACKSTOP for an ordinary raise (a getter failing on   }
+        { an odd object). It CANNOT catch a member the object lacks: that is  }
+        { the engine's halt, which is why every governed name is gated by the }
+        { allowlists above before this Try is entered. Counted all the same.  }
         RecordCaughtException('GetSchProperty:' + PropName + ':' + SchObjTypeTag(Obj));
         Result := '';
     End;
@@ -898,12 +953,12 @@ Begin
     Matched := True;
     WroteOK := True;
     Try
-        { CHECK FIRST (see SchPropAbsentOn). Writing a name this type          }
-        { certainly lacks popped an undeclared-identifier modal per matched    }
-        { object, then the Except below set Result := -1 ('failed'). Report    }
-        { the same failure without asking. Every name SchPropAbsentOn lists    }
-        { has a case below, so a listed name can never turn 'unknown' into     }
-        { 'failed'.                                                            }
+        { CHECK FIRST (the allowlists above SchObjectHasText). A governed     }
+        { name on a type not listed for it is NOT WRITTEN: on a type whose     }
+        { class lacks the member the write is the engine's halt, with the      }
+        { caller's PreProcess open. Reported 'failed', as before. Every name   }
+        { SchPropAbsentOn governs has a case below, so a governed name can     }
+        { never turn 'unknown' into 'failed'.                                  }
         If SchPropAbsentOn(Obj, PropName) Then
             WroteOK := False
 
@@ -944,10 +999,9 @@ Begin
             Else
                 Obj.Location := Loc;
         End
-        // Corner lives on ISch_Rectangle and ISch_Line only (not on the base
-        // ISch_GraphicalObject, the compiler rejects Obj.Corner regardless
-        // of assignment target). Dispatch on ObjectId and narrow to a typed
-        // local before touching Corner. See GetSchProperty for the read side.
+        // Corner is published only by rectangles and lines. The ObjectId
+        // test is the guard (the typed local does not narrow); see
+        // GetSchProperty for the read side.
         Else If (PropName = 'Corner.X') Or (PropName = 'Corner.Y') Then
         Begin
             If (Obj.ObjectId = eRectangle) Or (Obj.ObjectId = eRoundRectangle) Then
@@ -1173,8 +1227,9 @@ Begin
         Else If Not WroteOK Then Result := -1
         Else Result := 1;
     Except
-        { A name no check above covers, written on a type that lacks it      }
-        { (Name, FontId, Style, Selection, ... on the unprobed types).       }
+        { A FAULT-ONLY BACKSTOP for an ordinary raise. A member the object   }
+        { lacks is the engine's halt, never this Except: the allowlists gate  }
+        { every governed name before the Try. Counted all the same.           }
         RecordCaughtException('SetSchProperty:' + PropName + ':' + SchObjTypeTag(Obj));
         Result := -1;
     End;
@@ -8231,10 +8286,12 @@ Begin
     Harness.Location := Point(MilsToCoord(X), MilsToCoord(Y));
     Harness.XSize := MilsToCoord(W);
     Harness.YSize := MilsToCoord(H);
-    { NEEDS A LIVE PROBE: HarnessType is not a documented member of        }
-    { ISch_HarnessConnector (the label is probably a complex-text sub-      }
-    { object, like a sheet symbol's SheetName). Dropping the write would    }
-    { lose it if the member DOES exist, so it stays, counted.               }
+    { SETTLED, live 2026-10-12 (P20, bridge 2026.10.11.03): the write      }
+    { RESOLVES on this object type - no box, no count. What it stores is    }
+    { not yet verified: GetSchProperty's HarnessType branch (eHarness-      }
+    { Connector only) reads it back, a release-run step. Had the member     }
+    { been absent this would have been the engine's halt, not a count: a    }
+    { member resolves only when the object actually held publishes it.      }
     If HarnessType <> '' Then
         Try
             Harness.HarnessType := HarnessType;
@@ -8264,20 +8321,41 @@ End;
 {..............................................................................}
 { Gen_PlaceCrossSheetConnector - Place an ISch_CrossSheetConnector (the off-    }
 { sheet port variant used for hierarchical signal links).                      }
-{ Params: x, y, net (net name to connect), side (left|right)                    }
+{ Params: x, y, net (net name to connect). A 'side' is REFUSED (below).        }
+{                                                                              }
+{ NO Side, EVER (live 2026-10-12 02:51, probe P21, bridge 2026.10.11.03):      }
+{ 'Conn.Side := 0' halted the script engine with "Undeclared identifier:      }
+{ Side" - the cross-sheet connector's class publishes no Side - inside the    }
+{ PreProcess opened below, so no Except ran, nothing was counted, the polling  }
+{ loop died and the transaction stayed open. The line before it, Conn.Text,   }
+{ RAN through the same local, so the local's declared type is not what the    }
+{ engine resolves against: re-declaring Conn as ISch_CrossSheetConnector     }
+{ would halt on the same line. A non-empty side is refused here, BEFORE        }
+{ anything is created, because a stale Python client still sends it; the     }
+{ Python tool refuses it too. Do not re-add a direction write unless it goes  }
+{ through a member proven live on THIS object type.                            }
 {..............................................................................}
 
 Function Gen_PlaceCrossSheetConnector(Params : String; RequestId : String) : String;
 Var
     X, Y : Integer;
-    NetName, SideStr : String;
+    NetName : String;
     SchDoc : ISch_Document;
     Conn : ISch_GraphicalObject;
 Begin
     X := StrToIntDef(ExtractJsonValue(Params, 'x'), 0);
     Y := StrToIntDef(ExtractJsonValue(Params, 'y'), 0);
     NetName := ExtractJsonValue(Params, 'net');
-    SideStr := LowerCase(ExtractJsonValue(Params, 'side'));
+
+    If Trim(ExtractJsonValue(Params, 'side')) <> '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_SCRIPTABLE',
+            'side is not supported: a cross-sheet connector has no Side '
+            + 'member, and writing one stops the Altium script engine (live '
+            + '2026-10-12). Place it without side and set its direction in '
+            + 'Altium''s Properties panel. Nothing was placed.');
+        Exit;
+    End;
 
     SchDoc := SchServer.GetCurrentSchDocument;
     If SchDoc = Nil Then
@@ -8295,28 +8373,9 @@ Begin
 
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     Try Conn.Location := Point(MilsToCoord(X), MilsToCoord(Y)); Except End;
+    { Text on THIS object type ran live (P21, net given, 2026-10-12). }
     If NetName <> '' Then
         Try Conn.Text := NetName; Except End;
-    { NEEDS A LIVE PROBE: Side is a sheet-entry member; a cross-sheet      }
-    { connector is a power-object descendant and probably carries its      }
-    { direction in Orientation or CrossSheetStyle. Dropping the write would }
-    { lose it if Side DOES exist, so it stays, counted.                     }
-    If SideStr = 'left' Then
-    Begin
-        Try
-            Conn.Side := 0;
-        Except
-            RecordCaughtException('Gen_PlaceCrossSheetConnector:Side');
-        End;
-    End
-    Else If SideStr = 'right' Then
-    Begin
-        Try
-            Conn.Side := 1;
-        Except
-            RecordCaughtException('Gen_PlaceCrossSheetConnector:Side');
-        End;
-    End;
 
     SchDoc.RegisterSchObjectInContainer(Conn);
     SchRegisterObject(SchDoc, Conn);

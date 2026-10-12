@@ -190,9 +190,10 @@ Begin
                 If Obj.Component <> Nil Then Result := Obj.Component.Name.Text;
             End;
         End
-        { Subtype members. DelphiScript resolves members against the DECLARED }
-        { type, so Obj.X1 on an IPCB_Primitive is "Undeclared identifier".    }
-        { Narrow to a typed local via ObjectId (no Forward casts in script).  }
+        { Subtype members. A member the object actually held lacks is the     }
+        { engine's "Undeclared identifier" halt, so each is asked only after  }
+        { an ObjectId test (the typed local is decoration: the engine         }
+        { resolves against the runtime object, not the declaration).          }
         { A ratsnest line has two ends the same way a track does. }
         Else If PropName = 'X1' Then
         Begin

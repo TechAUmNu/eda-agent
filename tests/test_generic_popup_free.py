@@ -16,10 +16,12 @@ sees once somebody presses OK. Each test fails on the code before the fix
 (eec334c) because a modal was recorded where the fix asks first, or because
 a site that cannot be guarded yet does not count its catch.
 
-THE GUARDS ARE DENYLISTS (see the comment block above SchObjectIsPlainShape):
-they name only types certain to lack a member, so an unchecked type keeps
-today's path. `test_*_unprobed_type_keeps_todays_path` pins that property: a
-wrong guard could otherwise blank a read that works today.
+THE GUARDS ARE ALLOWLISTS since 2026.10.12.01 (the comment block above
+SchObjectHasText). They were denylists on the premise that an unchecked type
+would at worst raise a COUNTED exception; live 2026-10-12 (P21) a member the
+object's class lacks is the engine's halt instead, so a governed name is now
+asked only of the types listed for it, and every other type answers ''
+noted 'unreadable' (tests/test_live_03_findings.py holds the sweep's pairs).
 """
 from __future__ import annotations
 
@@ -233,8 +235,8 @@ def test_getter_asks_before_a_member_the_type_lacks(type_name, prop):
     ctx, ns = _prop_ns()
     got = ns["GetSchProperty"](_obj(ctx, type_name), prop)
     assert ctx.modals == [], f"{prop} on {type_name} popped a modal"
-    assert got == ""              # what the swallowed exception gave
-    assert ctx.diag == []         # and no diag entry, byte-identical reply
+    assert got == ""
+    assert ctx.diag == [("unreadable", prop)]   # the gap is named
 
 
 @pytest.mark.parametrize("type_name", _NO_VERTICES)
@@ -286,37 +288,47 @@ def test_getter_still_reads_every_member_the_type_has():
     assert ctx.modals == [] and ctx.caught == []
 
 
-def test_getter_unprobed_type_keeps_todays_path():
-    """eLine / eBusEntry / eProbe are NOT in any list. If one of them does
-    carry the member the read must still happen."""
+def test_getter_never_asks_a_type_outside_the_allowlist():
+    """eLine / eProbe used to keep 'today's path' because no list named
+    them. The SDK interfaces lack these members, and an absent member is the
+    engine's halt (P21, 2026-10-12): they are not asked any more, even when
+    the object would have answered."""
     ctx, ns = _prop_ns()
     get = ns["GetSchProperty"]
     line = _obj(ctx, "eLine", **_vertex_members(3))
-    assert get(line, "VerticesCount") == "3"
-    assert get(line, "Vertices") == "100,7;200,14;300,21"
+    assert get(line, "VerticesCount") == ""
+    assert get(line, "Vertices") == ""
     probe = _obj(ctx, "eProbe", LibReference="X", XSize=5, Electrical=1)
-    assert get(probe, "LibReference") == "X"
-    assert get(probe, "XSize") == "5"
-    assert get(probe, "Electrical") == "elec1"
+    assert get(probe, "LibReference") == ""
+    assert get(probe, "XSize") == ""
+    assert get(probe, "Electrical") == ""
     assert ctx.modals == []
+    assert ("unreadable", "VerticesCount") in ctx.diag
 
 
-def test_getter_counts_a_catch_no_check_covers():
-    """Name on a wire has no capability map yet (needs the probe matrix):
-    the Try stays, the reply stays '', and the catch is COUNTED with the
-    property and the type, so a live run says which pair still pops."""
+def test_getter_counts_an_ordinary_raise_on_an_allowed_pair():
+    """Name on a probe is ALLOWED (declared, P15). If the getter raises an
+    ordinary exception there, the Try stays the backstop and the catch is
+    COUNTED with the property and the type. Name on a wire is not asked."""
     ctx, ns = _prop_ns()
+    assert ns["GetSchProperty"](_obj(ctx, "eProbe"), "Name") == ""
+    assert ctx.modals == [("eProbe", "Name")]
+    assert ctx.caught == [f"GetSchProperty:Name:{ctx.ids['eProbe']}"]
     assert ns["GetSchProperty"](_obj(ctx, "eWire"), "Name") == ""
-    assert ctx.modals == [("eWire", "Name")]
-    assert ctx.caught == [f"GetSchProperty:Name:{ctx.ids['eWire']}"]
+    assert ctx.modals == [("eProbe", "Name")]
 
 
-def test_vertex_helper_counts_a_catch_on_an_unprobed_type():
+def test_vertex_helper_counts_an_ordinary_raise_on_an_allowed_type():
+    """A polyline is allowed; an ordinary raise there is counted. A bus
+    entry is not asked at all."""
     ctx, ns = _prop_ns()
     assert ns["GetSchVertexProperty"](_obj(ctx, "eBusEntry"), "Vertices") == ""
-    assert ctx.modals == [("eBusEntry", "GetState_VerticesCount")]
+    assert ctx.modals == []
+    poly = SchObj(ctx, "ePolyline")
+    assert ns["GetSchVertexProperty"](poly, "Vertices") == ""
+    assert ctx.modals == [("ePolyline", "GetState_VerticesCount")]
     assert ctx.caught == [
-        f"GetSchVertexProperty:VerticesCount:{ctx.ids['eBusEntry']}"]
+        f"GetSchVertexProperty:VerticesCount:{ctx.ids['ePolyline']}"]
 
 
 def test_a_bad_filter_name_no_longer_pops_once_per_object():
@@ -389,8 +401,8 @@ def test_setter_still_writes_every_member_the_type_has():
     sym = _obj(ctx, "eSheetSymbol")
     assert s(sym, "XSize", "900") == 1 and sym.XSize == 900
     probe = _obj(ctx, "eProbe", LibReference="X")
-    assert s(probe, "LibReference", "Y") == 1 and probe.LibReference == "Y"
-    assert ctx.modals == [] and ctx.diag == []
+    assert s(probe, "LibReference", "Y") == -1 and probe.LibReference == "X"
+    assert ctx.modals == [] and ctx.diag == [("failed", "LibReference")]
 
 
 def test_setter_read_only_vertex_names_still_answer_unknown():
@@ -403,11 +415,14 @@ def test_setter_read_only_vertex_names_still_answer_unknown():
     assert ctx.modals == []
 
 
-def test_setter_counts_a_catch_no_check_covers():
+def test_setter_counts_an_ordinary_raise_on_an_allowed_pair():
     ctx, ns = _prop_ns()
-    assert ns["SetSchProperty"](_obj(ctx, "eWire"), "Name", "X") == -1
+    assert ns["SetSchProperty"](_obj(ctx, "eProbe"), "Name", "X") == -1
     assert ctx.diag == [("failed", "Name")]
-    assert ctx.caught == [f"SetSchProperty:Name:{ctx.ids['eWire']}"]
+    assert ctx.caught == [f"SetSchProperty:Name:{ctx.ids['eProbe']}"]
+    # A wire is not written at all: failed, no modal, nothing counted.
+    assert ns["SetSchProperty"](_obj(ctx, "eWire"), "Name", "X") == -1
+    assert ctx.caught == [f"SetSchProperty:Name:{ctx.ids['eProbe']}"]
 
 
 # ---------------------------------------------------------------------------
@@ -740,29 +755,8 @@ def test_harness_type_write_lands_when_the_member_exists():
     assert made.HarnessType == "USB" and ctx.caught == []
 
 
-@pytest.mark.parametrize("side,value", [("left", 0), ("right", 1)])
-def test_cross_sheet_side_write_is_counted_when_it_pops(side, value):
-    ctx = Ctx()
-    g = _generic()
-    ns, made = _placement_ns(ctx, g,
-                             lambda c: _obj(c, "eCrossSheetConnector"))
-    ns["ExtractJsonValue"] = lambda p, k: {"side": side, "net": "N"}.get(k, "")
-    build(g, ["Gen_PlaceCrossSheetConnector"], ns)
-    reply = ns["Gen_PlaceCrossSheetConnector"]("{}", "r")
-    assert reply.endswith('"net":"N"}')
-    assert ctx.caught == ["Gen_PlaceCrossSheetConnector:Side"]
-
-
-@pytest.mark.parametrize("side,value", [("left", 0), ("right", 1)])
-def test_cross_sheet_side_write_lands_when_the_member_exists(side, value):
-    ctx = Ctx()
-    g = _generic()
-    ns, made = _placement_ns(
-        ctx, g, lambda c: _obj(c, "eCrossSheetConnector", Side=-1))
-    ns["ExtractJsonValue"] = lambda p, k: {"side": side}.get(k, "")
-    build(g, ["Gen_PlaceCrossSheetConnector"], ns)
-    ns["Gen_PlaceCrossSheetConnector"]("{}", "r")
-    assert made.Side == value and ctx.caught == []
+# The cross-sheet connector's Side write is GONE (P21 halted on it,
+# 2026-10-12); tests/test_live_03_findings.py pins the refusal.
 
 
 # Gen_AddSheet / Gen_DeleteSheet are long handlers whose path read is one

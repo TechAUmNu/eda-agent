@@ -67,13 +67,22 @@ def test_the_access_is_gated_by_type(prop):
 
 @pytest.mark.parametrize("guard", ["SchObjectHasText", "SchObjectHasOrientation"])
 def test_a_port_is_excluded(guard):
-    """The reported type. Both properties are absent on ISch_Port."""
-    code = _source()
-    start = code.index(f"Function {guard}")
-    body = code[start:code.index("\nEnd;", start)]
-    assert "ePort" in body, (
-        f"{guard} does not exclude ePort, which is the type the report "
-        f"reproduced against")
+    """The reported type. Both properties are absent on ISch_Port, so the
+    guard (an ALLOWLIST since 2026.10.12.01) must answer False for it -
+    EXECUTED, so a guard that merely mentions ePort cannot pass."""
+    from tests.pascal_eval import build
+    from tests.pascal_source import load
+
+    ids = {"ePort": 1, "eNetLabel": 2}
+    code = load(GENERIC, minimum=40)
+    ns = {k: v for k, v in ids.items()}
+    for n in set(re.findall(r"\be[A-Z]\w*", code[guard])) - set(ids):
+        ns[n] = 100 + len(ns)
+    build(code, [guard], ns)
+    port = type("O", (), {"ObjectId": ids["ePort"]})()
+    label = type("O", (), {"ObjectId": ids["eNetLabel"]})()
+    assert ns[guard](port) is False
+    assert ns[guard](label) is True
 
 
 def test_the_connection_point_is_pin_only():
@@ -181,8 +190,8 @@ def _assert_property_contract(code: str, prop: str, guard: str, rejected: str,
 
 
 _UNSUPPORTED = [
-    ("Text", "SchObjectHasText", "eParameterSet", ()),
-    ("Text", "SchObjectHasText", "eWire", ()),
+    ("Text", "SchObjectHasText", "eParameterSet", ("eNetLabel", "eParameter")),
+    ("Text", "SchObjectHasText", "eWire", ("eNetLabel", "eParameter")),
     ("IsHidden", "SchObjectHasIsHidden", "eNetLabel", ("ePin", "eParameter")),
     ("IsHidden", "SchObjectHasIsHidden", "eWire", ("ePin", "eParameter")),
 ]

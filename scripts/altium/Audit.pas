@@ -1809,11 +1809,11 @@ Begin
                 NetStr := '';
                 If Obj.InNet Then
                     Try NetStr := Obj.Net.Name; Except End;
-                { Obj is declared IPCB_Primitive, which publishes no x/y:  }
-                { DelphiScript resolves members against the DECLARED type, }
-                { so Obj.x raised a modal before the Except. The resolver  }
-                { narrows pads and vias to their own types, and answers 0  }
-                { for anything else, which is what the Except gave.        }
+                { Not every primitive publishes x/y, and a member the     }
+                { object actually held lacks is the engine's halt, not an  }
+                { exception the Except sees. The resolver asks by ObjectId }
+                { (pads and vias) and answers 0 for anything else. The     }
+                { ObjectId test is the guard; a typed local alone is not.  }
                 PadX := PCBPrimitivePos(Obj, False, PosFound);
                 PadY := PCBPrimitivePos(Obj, True, PosFound);
 

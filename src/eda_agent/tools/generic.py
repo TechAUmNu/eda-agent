@@ -2739,17 +2739,34 @@ def register_generic_tools(mcp):
         Args:
             x, y: Connector location in mils.
             net: Net name the connector binds to.
-            side: "left" or "right" orientation (optional).
+            side: NOT SUPPORTED; leave it empty. Any non-empty value is
+                refused with ``NOT_SCRIPTABLE`` and nothing is sent: a
+                cross-sheet connector has no ``Side`` member, and the
+                write stopped Altium's script engine live (2026-10-12),
+                which kills the bridge until a manual restart. Set the
+                direction in Altium's Properties panel after placing.
 
         Returns:
-            Dict with success, x, y, net.
+            Dict with success, x, y, net; or the NOT_SCRIPTABLE refusal.
         """
+        if side and side.strip():
+            return {
+                "success": False,
+                "error": "NOT_SCRIPTABLE",
+                "reason": (
+                    "side is not supported: a cross-sheet connector has no "
+                    "Side member, and writing one stops the Altium script "
+                    "engine (live 2026-10-12), so nothing was sent or "
+                    "placed."),
+                "instead": (
+                    "Call again without side, then set the connector's "
+                    "direction in Altium's Properties panel."),
+                "requested": {"x": x, "y": y, "net": net, "side": side},
+            }
         bridge = get_bridge()
         params: dict[str, Any] = {"x": str(x), "y": str(y)}
         if net:
             params["net"] = net
-        if side:
-            params["side"] = side
         return await bridge.send_command_async(
             "generic.place_cross_sheet_connector", params
         )
