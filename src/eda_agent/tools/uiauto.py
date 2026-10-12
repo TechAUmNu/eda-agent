@@ -826,9 +826,15 @@ def register_uiauto_tools(mcp):
                 needs a real menu click and steals focus, so it is off
                 by default.
 
+        ONLY EDGE-TAB PANELS ARE LISTED (``enumerates``:
+        ``edge_tabs_only``). A panel docked open in a pane group (SCH
+        Library or Projects on the left, tab in the pane's bottom strip)
+        is not found yet, so its absence here does not mean it is closed.
+
         Returns:
             ``{"ok": true, "panels": [{name, rect, holder_class}],
-            "count": N}``, plus ``offered`` when asked for.
+            "count": N, "enumerates", "note"}``, plus ``offered`` when
+            asked for.
         """
         from ..ui import panels
 
@@ -843,7 +849,10 @@ def register_uiauto_tools(mcp):
             "ok": True,
             "count": len(open_now),
             "panels": [{"name": p["name"], "rect": p["rect"],
-                        "holder_class": p["holder_class"]} for p in open_now],
+                        "holder_class": p.get("holder_class", "")}
+                       for p in open_now],
+            "enumerates": panels.ENUMERATES,
+            "note": panels._ENUMERATES_NOTE,
         }
         if offered_too:
             out["offered"] = panels.offered(pid)
@@ -861,7 +870,9 @@ def register_uiauto_tools(mcp):
         A panel that is already open is reported as such and NOT clicked.
         Those menu entries are toggles, so clicking one you already have
         would close it, and asking for a panel is not a request to lose
-        it.
+        it. EXCEPT a panel docked open in a pane group: it is not seen as
+        open (only edge tabs are), so the click CLOSES it. Do not ask for
+        a panel a screenshot shows docked open.
 
         Args:
             name: the panel's name as View > Panels spells it, e.g.
@@ -885,7 +896,10 @@ def register_uiauto_tools(mcp):
 
         Takes no focus and moves nothing, so it is safe while a user is
         working. The panel must already be open: use ``app_open_panel``
-        first, or ``app_list_panels`` to see what is there.
+        first, or ``app_list_panels`` to see what is there. Only edge-tab
+        panels are found: a panel docked open in a pane group answers
+        ``ok: false`` with ``enumerates: edge_tabs_only`` although it is
+        open.
 
         Reads the WHOLE panel. It is not fast: Altium materialises its
         accessible tree lazily, so the first touch of a node costs about

@@ -57,6 +57,29 @@ _PANEL_BUTTON = "tpopuppanelbutton"
 _PANEL_CONTENT = ("tdxtreelist", "tdxdbgrid", "tlistview", "ttreeview",
                   "tpanelframesection")
 
+#: WHAT THIS LAYER CANNOT SEE YET (live 2026-10-12, finding D-TOOL-2):
+#: a panel DOCKED OPEN in a pane group. ``app_read_panel "SCH Library"``
+#: answered "no panel named" while SCH Library was open and docked on the
+#: left (its tab in the strip at the bottom of the pane, beside Projects,
+#: Navigator and SCHLIB Filter); what was offered instead were the
+#: right-edge tabs (Comments, Manufacturer Part Search, Properties). Only a
+#: panel shown as an EDGE TAB has a TPopupPanelButton. The class that names
+#: a docked pane's tabs and caption has not been measured, so it is not
+#: guessed here: the replies say what is enumerated instead of implying a
+#: panel is closed.
+#:
+#: The same gap means ``open_panel`` cannot tell a docked-open panel from a
+#: closed one, and View > Panels entries are toggles, so asking to open a
+#: panel that is docked open CLOSES it (the reply then says it may have
+#: been open). Measure the docked tab class before relying on either.
+ENUMERATES = "edge_tabs_only"
+_ENUMERATES_NOTE = (
+    "Only panels shown as edge tabs (TPopupPanelButton, e.g. the right-hand "
+    "Properties / Comments tabs) are enumerated. A panel docked open in a "
+    "pane group (e.g. SCH Library or Projects docked on the left, with its "
+    "tab in the strip at the bottom of the pane) is NOT found by this layer "
+    "yet, so a miss here does not mean the panel is closed.")
+
 #: The View submenu that lists panels. Altium groups them under
 #: View > Panels, and the group is stable across editors even though the
 #: panels offered are not.
@@ -98,6 +121,7 @@ def list_open(pid: int) -> list:
         seen[control.text] = {
             "name": control.text,
             "button_hwnd": control.hwnd,
+            "holder_class": control.class_name,
             "rect": [x, y, width, height],
             "content": _content_for(every, control),
         }
@@ -160,6 +184,8 @@ def open_panel(pid: int, name: str, settle: float = 1.2) -> dict:
     if existing is not None:
         return {"ok": True, "name": existing["name"], "opened": False,
                 "note": "already open", "rect": existing["rect"]}
+    # NOT FOUND does not mean closed: a panel docked open in a pane group
+    # is invisible to find() (ENUMERATES), and the click below toggles it.
 
     result = menu.click_path(pid, f"{_PANELS_MENU}|{name}", settle=settle)
     if not result.get("ok"):
@@ -172,7 +198,8 @@ def open_panel(pid: int, name: str, settle: float = 1.2) -> dict:
         return {"ok": False, "name": name, "opened": False, "reason": (
             "the menu entry was clicked and no panel by that name is on "
             "screen afterwards. Altium's panel entries are toggles, so it "
-            "may have been open and is now closed")}
+            "may have been open and is now closed"),
+            "enumerates": ENUMERATES, "note": _ENUMERATES_NOTE}
     return {"ok": True, "name": panel["name"], "opened": True,
             "rect": panel["rect"]}
 
@@ -200,8 +227,11 @@ def read_panel(pid: int, name: str) -> dict:
     panel = find(pid, name)
     if panel is None:
         return {"ok": False, "reason": (
-            f"no panel named {name!r}. app_list_panels shows what is on "
-            f"screen, and app_open_panel opens one"),
+            f"no panel named {name!r} among the panels this layer can see "
+            f"(edge tabs only). If it is docked open in a pane group it is "
+            f"there and simply not enumerated yet: read it from a "
+            f"screenshot. app_list_panels shows what is enumerated"),
+            "enumerates": ENUMERATES, "note": _ENUMERATES_NOTE,
             "offered": [p["name"] for p in list_open(pid)]}
 
     grids = []
