@@ -190,7 +190,13 @@ RESERVED_AS_NAME = {"Label", "Type", "Class", "Object", "Record", "Array",
                     # Var block failed Altium's compile with "Error in
                     # declaration block". Delphi reads index as a property
                     # directive.
-                    "Index"}
+                    "Index",
+                    # Measured 2026-10-12: `Path, ..., Stored : String;` in
+                    # Lib_UninstallLibrary compiled to "Unknown identifier:
+                    # Stored" at its first use (`Stored := ...`), so the
+                    # polling loop never started. Delphi reads stored as a
+                    # property directive, the same family as index.
+                    "Stored"}
 _RESERVED_ALT = "|".join(sorted(RESERVED_AS_NAME))
 RULE_RESERVED_IDENT = LineRule(
     name="reserved-word-as-identifier",

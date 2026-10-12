@@ -12372,7 +12372,7 @@ End;
 
 Function Lib_UninstallLibrary(Params : String; RequestId : String) : String;
 Var
-    Path, Before, After, Removed, Reason, Stored : String;
+    Path, Before, After, Removed, Reason, InstalledAs : String;
     Asked, Raised : Boolean;
 Begin
     Path := ExtractJsonValue(Params, 'library_path');
@@ -12416,11 +12416,11 @@ Begin
                 + 'could not be confirmed'
         Else If Removed = '' Then
         Begin
-            Stored := InstalledPathWithName(After, Path);
+            InstalledAs := InstalledPathWithName(After, Path);
             Reason := 'the installed list did not change: Altium accepted the '
                 + 'call but removed no entry';
-            If Stored <> '' Then
-                Reason := Reason + '. It is installed as "' + Stored + '": '
+            If InstalledAs <> '' Then
+                Reason := Reason + '. It is installed as "' + InstalledAs + '": '
                     + 'pass that exact path';
         End;
     End;
