@@ -54,6 +54,9 @@ NOT_TOOLS: dict[str, str] = {
     "kicad_local": "a part provider id, listed in the provider table",
     "part_count": "a parameter of lib_create_symbol",
     "pcb_only": "a reply field of the schematic/PCB comparison",
+    "sch_post_process": "a reply field of app_exit_active_command",
+    "sch_server_loaded": ("a reply field of app_exit_active_command and "
+                          "app_get_preferences"),
     "sch_only": "a reply field of the schematic/PCB comparison",
     # The namespace PREFIXES, which the readme names when explaining
     # that a tool's prefix tells you which document it acts on. They
