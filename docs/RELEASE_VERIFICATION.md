@@ -2,10 +2,10 @@
 
 **2026.10.12.03 = the previous release (.12.02) plus the fixes from its live run on 2026-10-12** (section 39, "Results 2026-10-12 (the .12.02 build)"):
 
-* **D-F2-1, the P8 halt.** In a freshly restarted Altium with nothing created or selected through the bridge, `lib_add_symbol_lines` with no `component_name` halted the engine ("Undeclared identifier: CurrentPartID", Library.pas `OwnerPartIdOf`) and the loop died. Cause, read from the source: the four held-symbol globals (`LastCreatedLibComponent` and its name, document and path) were never assigned when the pump started. In DelphiScript an unassigned global is Empty, and Empty does NOT compare equal to Nil, so every `= Nil` guard let it through and the member read ran on Empty. `StartMCPPump` now assigns them (through `ForgetRememberedLibComponent`: `:= Nil` / `:= ''`) and EVERY other global the request path reads (`RefreshingLib`, `LastCompiledProject`, `LastCompileTick`, the save-pass counters, `DocNameMemberKeys`, the status form's in-flight fields, the next-step and property-diagnostic buffers). `tests/test_live_fresh_pump_globals.py` executes `StartMCPPump` on a fixture whose globals start Empty-not-Nil, and fails if any global a unit `StartMCPPump` can see declares is left unassigned. The same mechanism explains the 2026-10-11 P8 halt (Library.pas:122) that was blamed on the editor's `CurrentSchComponent`; that diagnosis is now UNPROVEN (the reads of it stay removed: harmless and conservative).
-* **D-TOOL-1.** `last_fault.when` is now the FIRST sighting (`first_seen`); later failed keep-alives move `last_seen` only. `found_by` says how it was found, and a dead loop found by its box carries "script_fatal box seen" with guidance for that case (note the line, press OK, Stop, rerun StartMCPServer) instead of the generic "probably not running".
+* **D-F2-1, the P8 halt.** In a freshly restarted Altium with nothing created or selected through the bridge, `lib_add_symbol_lines` with no `component_name` halted the engine ("Undeclared identifier: CurrentPartID", Library.pas `OwnerPartIdOf`) and the loop died. Cause, read from the source (session A below is its live proof): the four held-symbol globals (`LastCreatedLibComponent` and its name, document and path) were never assigned when the pump started. In DelphiScript an unassigned global is Empty, and Empty does NOT compare equal to Nil, so every `= Nil` guard let it through and the member read ran on Empty. A new `ResetSessionGlobals` (StatusForm.pas), called by `StartMCPPump` before anything reads state and by `RunSelfTest` (which runs handlers without the pump), assigns them (through `ForgetRememberedLibComponent`: `:= Nil` / `:= ''`) and EVERY other global the request path reads (`RefreshingLib`, `LastCompiledProject`, `LastCompileTick`, the save-pass counters, `DocNameMemberKeys`, the next-step and property-diagnostic buffers, the status form's in-flight fields and flags, and the four perf lists, which were Nil-tested by `EnsureStatusBuffers` - a test that does nothing on Empty - and created only inside `ShowStatusForm`'s Try), each as a top-level statement. `tests/test_live_fresh_pump_globals.py` executes `StartMCPPump` on a fixture whose globals start Empty-not-Nil, and its guard WALKS `StartMCPPump` in execution order (callees inlined, up to the statement that arms the poll timer): a global read before an unconditional assignment, or assigned only under an If, a loop, a Try body or after a conditional Exit (the `If X = Nil Then X := ...` shape included), fails it; negative tests run the guard on those injected shapes. USER-VISIBLE: a symbol held by `lib_create_symbol` / `lib_set_current_component` no longer survives a StartMCPServer re-run (or an Altium restart), so after a recovery the next nameless symbol edit answers `NO_COMPONENT`: pass `component_name` or call `lib_set_current_component` again. The mechanism is consistent with the 2026-10-11 P8 halt (Library.pas:122) that was blamed on the editor's `CurrentSchComponent`, to be confirmed by session A (P8 on 2026.10.12.03); the editor's-selection diagnosis is now UNPROVEN (the reads of it stay removed: harmless and conservative).
+* **D-TOOL-1.** `last_fault.when` is now the FIRST sighting (`first_seen`); later failed keep-alives move `last_seen` only. `found_by` says how it was found, and a dead loop found by its box carries "script_fatal box seen" with guidance for that case (note the line, press OK, Stop, rerun StartMCPServer) instead of the generic "probably not running". A sighting in a NEW pump session (a newer `_session_start` row in `activity.log`, stored as `session`) starts a new record, so a loop that dies again on the first call after a recovery does not inherit the old incident's time and box guidance.
 * **D-TOOL-2.** `app_read_panel` / `app_list_panels` enumerate EDGE-TAB panels only (`enumerates: edge_tabs_only` in every reply); a panel docked open in a pane group (SCH Library on the left, F2) is not found yet, and the reply now says so instead of reading as "closed". `app_list_panels` no longer raises KeyError (`holder_class`) when panels are listed.
-* **39.3 item 1.** `app_get_preferences` and `app_exit_active_command` report `sch_server_loaded`; on AD 26.10.1.5 the schematic server is registered at startup, so `sch_post_process` reads true there (item 1 corrected).
+* **39.3 item 1.** `app_get_preferences` and `app_exit_active_command` report `sch_server_loaded`; on AD 26.10.1.5 the schematic server was already registered in a fresh session with no schematic document (when it loads - at startup, through the Projects panel or through the `Altium_API.PrjScr` script project - was not measured), so `sch_post_process` reads true there (item 1 corrected).
 
 `.12.02` was `.12.01` plus one rename: `Lib_UninstallLibrary`'s local `Stored` (refused by the compiler at StartMCPServer; Delphi reads `stored` as a property directive, like `index`) is `InstalledAs`, and `scripts/altium/lint.py` refuses `Stored` and `Index` as declared names. Where a row below says what 2026.10.12.03 does, the change landed in `.12.01` or `.12.02` unless it names one of the items above; it is carried unchanged. NAMING: "the .03 build" below is the third 2026-10-11 build (run live early on 2026-10-12), "the .12.02 build" the previous release; this release is always named in full.
 
@@ -3363,7 +3363,9 @@ the .12.02 build with every read of `CurrentSchComponent` removed. The
 cause found is an UNASSIGNED global: the held symbol was never assigned at
 pump start, an unassigned DelphiScript global is Empty, and Empty is not
 Nil, so the guards passed it and the member read ran on Empty. That
-explains both P8 halts; blaming the editor's selection is UNPROVEN. A
+is read from the source and is CONSISTENT WITH both P8 halts, to be
+confirmed by session A (P8 on 2026.10.12.03); blaming the editor's
+selection is UNPROVEN. A
 member read on an unassigned (Empty) Variant is the same fatal class as a
 member the runtime object does not publish, and 2026.10.12.03 assigns
 every global the request path reads when the pump starts. The .03 build reads no member of that reference anywhere,
@@ -3481,8 +3483,10 @@ Each must answer with no dialog and leave `caught_exceptions` unchanged.
    `sch_post_process: true`, `sch_server_loaded: true`, no dialog.
    CORRECTED after the .12.02 run (F1): this item expected
    `sch_post_process: false` ("no schematic server"). On AD 26.10.1.5 the
-   schematic server is registered at startup with no schematic document
-   open, so `SchServer` is not Nil and its `PostProcess` answers without
+   schematic server was already registered in a fresh session with no
+   schematic document open (WHEN it loads - at startup, through the
+   Projects panel or through the `Altium_API.PrjScr` script project - was
+   not measured), so `SchServer` is not Nil and its `PostProcess` answers without
    raising: expect TRUE. The `SchServer = Nil` branches of both handlers
    are therefore NOT reachable by restarting Altium (they stay as the
    guard for a build that loads the server lazily; executed offline in
@@ -3724,7 +3728,14 @@ decide between them; (c) differs by caption and text.
   saving, and rerun File > Run Script > Altium_API > Dispatcher.pas >
   StartMCPServer (or restart Altium). A `PreProcess` the handler opened
   before the halt is still open; `app_exit_active_command` after the
-  restart unwinds it. Every such box is a defect (a member read the bridge
+  restart unwinds it. OK ALONE IS NOT A RECOVERY: the halted session leaves
+  `Running` True, and `StartMCPPump`'s first statement (`If Running Then
+  Exit`) then makes a StartMCPServer re-run do NOTHING, so press Stop
+  before rerunning it. That Stop resets the script's globals is NOT
+  measured; if StartMCPServer after Stop does not bring the dashboard
+  back, restart Altium. After the relaunch no library symbol is held
+  (`ResetSessionGlobals`): pass `component_name` or call
+  `lib_set_current_component` again. Every such box is a defect (a member read the bridge
   must not make), and the session's remaining probes are lost: this is
   what ended the 2026-10-11 run at P8.
 * **(c) Altium's OWN message box** (e.g. "Warning - File type not
