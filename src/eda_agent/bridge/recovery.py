@@ -22,6 +22,14 @@ STUCK_HANDLER = "stuck_handler"      # heartbeat ticking, handler never returns
 DEAD_LOOP = "dead_loop"              # no heartbeat, no response
 CORRUPT_RESPONSE = "corrupt_response"  # response file present but unparseable
 
+# HOW a fault was found, recorded beside it (``found_by``). The kinds above
+# say what the bridge concluded; this says what it saw. A dead loop found
+# because a script-engine fatal box was ON SCREEN is a different thing to
+# act on than one inferred from silence: the box names the line that
+# halted, and pressing its OK does not resume anything.
+SCRIPT_FATAL_SEEN = "script_fatal box seen"
+NO_REPLY_NO_HEARTBEAT = "no reply and no heartbeat"
+
 _STOP_STEP = (
     "In Altium's Script IDE toolbar press the red Stop button (Run > Stop, "
     "or Ctrl+F3; use Ctrl+Pause/Break if the script is truly hung)."
@@ -67,6 +75,23 @@ _GUIDANCE = {
             _RELAUNCH_STEP,
         ],
     },
+    # DEAD_LOOP as it is found when a script-fatal box is on screen (live
+    # 2026-10-12: "Undeclared identifier: CurrentPartID"). The generic
+    # dead-loop text says "probably not running", which is a guess the box
+    # has already settled.
+    (DEAD_LOOP, SCRIPT_FATAL_SEEN): {
+        "diagnosis": (
+            "A script-engine fatal error box (script_fatal) was seen on "
+            "screen: the engine HALTED on the line the Script IDE shows, and "
+            "the polling loop is dead. Pressing OK does NOT resume it."
+        ),
+        "steps": [
+            "Note the box's text and the unit and line the Script IDE "
+            "opened, then press OK.",
+            _STOP_STEP,
+            _RELAUNCH_STEP,
+        ],
+    },
     CORRUPT_RESPONSE: {
         "diagnosis": (
             "The response file was present but unparseable: Altium likely "
@@ -97,7 +122,8 @@ def _in_flight_phrase(in_flight: Optional[dict]) -> str:
     return command
 
 
-def recovery_guidance(fault: str, in_flight: Optional[dict] = None) -> dict:
+def recovery_guidance(fault: str, in_flight: Optional[dict] = None,
+                      found_by: str = "") -> dict:
     """Structured recovery steps for a fault kind.
 
     Returns ``{fault, diagnosis, steps:[...], docs}``. An unknown fault gets
@@ -107,8 +133,12 @@ def recovery_guidance(fault: str, in_flight: Optional[dict] = None) -> dict:
     heartbeat names it (``{"command", "request_id", ...}``; see
     ``read_in_flight``). When given, a stuck-handler diagnosis names that
     command and the result carries it as ``in_flight``.
+
+    ``found_by`` is how the fault was found (``SCRIPT_FATAL_SEEN``,
+    ``NO_REPLY_NO_HEARTBEAT``). When given the result carries it, and a
+    dead loop found by its script-fatal box gets the guidance for that.
     """
-    entry = _GUIDANCE.get(fault)
+    entry = _GUIDANCE.get((fault, found_by)) or _GUIDANCE.get(fault)
     if entry is None:
         entry = {
             "diagnosis": "The Altium script engine is not responding as expected.",
@@ -131,17 +161,20 @@ def recovery_guidance(fault: str, in_flight: Optional[dict] = None) -> dict:
     }
     if named:
         out["in_flight"] = dict(in_flight)
+    if found_by:
+        out["found_by"] = found_by
     return out
 
 
-def recovery_message(fault: str, in_flight: Optional[dict] = None) -> str:
+def recovery_message(fault: str, in_flight: Optional[dict] = None,
+                     found_by: str = "") -> str:
     """One-line, numbered recovery steps for embedding in an error message.
 
     The MCP layer surfaces ``str(exception)``, not the structured details, so
     the actionable steps must live in the message text too. Same source as
     ``recovery_guidance``, no drift.
     """
-    g = recovery_guidance(fault, in_flight)
+    g = recovery_guidance(fault, in_flight, found_by)
     numbered = " ".join(f"{i}) {s}" for i, s in enumerate(g["steps"], 1))
     named = _in_flight_phrase(in_flight)
     if named and fault == STUCK_HANDLER:

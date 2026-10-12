@@ -48,6 +48,8 @@ from .recovery import (
     STUCK_HANDLER,
     DEAD_LOOP,
     CORRUPT_RESPONSE,
+    SCRIPT_FATAL_SEEN,
+    NO_REPLY_NO_HEARTBEAT,
 )
 from .inflight import read_in_flight, read_last_caught
 
@@ -261,8 +263,12 @@ def _with_envelope_notes(data: Any, response: CommandResponse) -> Any:
 def _last_fault_summary(workspace) -> Optional[dict]:
     """The recorded fault in ``last_fault.json``, flattened, or None.
 
-    ``{fault, diagnosis, steps, when}``. None when no file is there (no
-    fault recorded, or a call has succeeded since) or it cannot be read.
+    ``{fault, diagnosis, steps, when, first_seen, last_seen, found_by}``.
+    ``when`` and ``first_seen`` are the FIRST sighting of this fault,
+    ``last_seen`` the latest (keep-alives that fail after a halt re-sight
+    it), ``found_by`` how it was found (e.g. ``script_fatal box seen``).
+    None when no file is there (no fault recorded, or a call has succeeded
+    since) or it cannot be read.
     """
     from .fault_state import read_fault
     try:
@@ -279,7 +285,13 @@ def _last_fault_summary(workspace) -> Optional[dict]:
         "fault": fault,
         "diagnosis": str(recovery.get("diagnosis") or ""),
         "steps": [str(x) for x in (recovery.get("steps") or [])],
-        "when": str(payload.get("when") or ""),
+        "when": str(payload.get("first_seen") or payload.get("when") or ""),
+        "first_seen": str(payload.get("first_seen") or payload.get("when")
+                          or ""),
+        "last_seen": str(payload.get("last_seen") or payload.get("when")
+                         or ""),
+        "found_by": str(payload.get("found_by")
+                        or recovery.get("found_by") or ""),
     }
     return out
 
@@ -292,18 +304,28 @@ def _loop_note(fault: dict) -> str:
     been busy. ``app_ping`` settles it either way.
     """
     kind = fault.get("fault") or "unknown"
-    when = fault.get("when") or ""
+    when = fault.get("first_seen") or fault.get("when") or ""
+    last = fault.get("last_seen") or ""
     at = f" at {when}" if when else ""
-    if kind == "dead_loop":
-        found = (f"the polling loop was found NOT ANSWERING{at} (no reply "
-                 f"and no heartbeat, or a script-engine fatal error on "
-                 f"screen)")
+    since = (f" (last seen {last})" if last and when and last != when
+             else "")
+    found_by = fault.get("found_by") or ""
+    if kind == "dead_loop" and found_by == SCRIPT_FATAL_SEEN:
+        found = (f"the polling loop was found DEAD{at}{since}: a "
+                 f"script-engine fatal error box (script_fatal) was seen on "
+                 f"screen, so the engine halted and OK will not resume it")
+    elif kind == "dead_loop":
+        how = (f"found by: {found_by}" if found_by else
+               "no reply and no heartbeat, or a script-engine fatal error "
+               "on screen")
+        found = (f"the polling loop was found NOT ANSWERING{at}{since} "
+                 f"({how})")
     elif kind == "stuck_handler":
-        found = (f"a handler was found STUCK{at}: busy past its heartbeat "
+        found = (f"a handler was found STUCK{at}{since}: busy past its heartbeat "
                  f"limit, so the loop may only have been busy, or may have "
                  f"died since")
     else:
-        found = f"a fault ({kind}) was recorded{at}"
+        found = f"a fault ({kind}) was recorded{at}{since}"
     return (f"A fault is recorded ({kind}): " + found + ". 'attached' says nothing "
             "about the loop. Any call that succeeds removes this record, so "
             "it stands until one does; app_ping settles it, and the "
@@ -354,7 +376,8 @@ class AltiumBridge:
         Stamped with the local time it was diagnosed (ISO 8601, seconds), so
         ``app_get_status``'s ``last_fault.when`` says WHEN the loop was found
         down. Both call sites used to pass no time, and ``when`` was always
-        ''.
+        ''. A re-sighting of the same fault keeps the first time and moves
+        ``last_seen`` only (``fault_state.record_fault``).
         """
         from datetime import datetime
         from .fault_state import record_fault
@@ -792,7 +815,9 @@ class AltiumBridge:
                     # branch below.
                     if "script_fatal" in (early.get("kinds") or []):
                         self._note_fault(workspace_dir,
-                                         recovery_guidance(DEAD_LOOP))
+                                         recovery_guidance(
+                                             DEAD_LOOP,
+                                             found_by=SCRIPT_FATAL_SEEN))
                     raise AltiumTimeoutError(
                         f"Altium is showing a modal dialog {waited:.0f}s into "
                         f"this call, so the handler cannot run and waiting for "
@@ -944,9 +969,11 @@ class AltiumBridge:
             # message's recovery text and details["recovery"] alike: the
             # caller's own error reply must not name "stuck in a long
             # operation" while last_fault says dead_loop.
+            found_by = ""
             if probe and "script_fatal" in (probe.get("kinds") or []):
                 fault = DEAD_LOOP
                 fault_flight = None
+                found_by = SCRIPT_FATAL_SEEN
                 state = ("A script-fatal error box is on screen, so the "
                          "script engine HALTED and the polling loop is "
                          "dead. ")
@@ -958,7 +985,7 @@ class AltiumBridge:
                          "loop may be stuck in a long operation OR may "
                          "since have died. Confirm with app_ping before "
                          "choosing a recovery. ")
-            guidance = recovery_guidance(fault, fault_flight)
+            guidance = recovery_guidance(fault, fault_flight, found_by)
             self._note_fault(workspace_dir, guidance)
             # PAST TENSE, because that is all the evidence supports. This
             # message used to say "Altium IS responding to keepalives ...
@@ -977,19 +1004,25 @@ class AltiumBridge:
                 f"extensions ({_MAX_HEARTBEAT_EXTENSIONS * timeout:.0f}s "
                 f"total). "
                 + state
-                + recovery_message(fault, fault_flight)
+                + recovery_message(fault, fault_flight, found_by)
                 + self._dialog_suffix(probe),
                 details={"recovery": guidance,
                          "dialogs": probe},
             )
-        self._note_fault(workspace_dir, recovery_guidance(DEAD_LOOP))
+        # HOW it was found goes on the record: a script-fatal box on screen
+        # at this point is the halt itself, not a guess from silence.
+        found_by = (SCRIPT_FATAL_SEEN
+                    if probe and "script_fatal" in (probe.get("kinds") or [])
+                    else NO_REPLY_NO_HEARTBEAT)
+        guidance = recovery_guidance(DEAD_LOOP, found_by=found_by)
+        self._note_fault(workspace_dir, guidance)
         raise AltiumTimeoutError(
             f"No response within {timeout}s and no progress heartbeat. "
             + ("The Altium polling loop is probably not running. "
                if not probe else "")
-            + recovery_message(DEAD_LOOP)
+            + recovery_message(DEAD_LOOP, found_by=found_by)
             + self._dialog_suffix(probe),
-            details={"recovery": recovery_guidance(DEAD_LOOP),
+            details={"recovery": guidance,
                      "dialogs": probe},
         )
 

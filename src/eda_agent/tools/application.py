@@ -232,8 +232,11 @@ def register_application_tools(mcp):
           ``{where, command, request_id, at}`` from activity.log, or None.
           Each one is a modal dialog that fired in Altium.
         - ``last_fault``: the fault recorded in the workspace's
-          ``last_fault.json`` (``{fault, diagnosis, steps, when}``, e.g.
-          fault ``dead_loop``), or None. It is removed by the next call that
+          ``last_fault.json`` (``{fault, diagnosis, steps, when,
+          first_seen, last_seen, found_by}``, e.g. fault ``dead_loop``
+          found by ``script_fatal box seen``), or None. ``when`` is the
+          FIRST sighting; later failed keep-alives move ``last_seen``
+          only. It is removed by the next call that
           succeeds, so while it is present the polling loop's last known
           state is DOWN, with ``loop_note`` saying so. ``attached: true``
           means only that this server attached; it is not a live loop.
