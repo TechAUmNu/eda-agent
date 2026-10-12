@@ -28,6 +28,30 @@ FAULT_FILE = "last_fault.json"
 _DECISIVE = "script_fatal box seen"
 
 
+def current_pump_session(workspace_dir: Path) -> str:
+    """The stamp of the newest ``_session_start`` row of ``activity.log``.
+
+    StartMCPPump appends ``<stamp>,0,_session_start,version=...`` before it
+    arms the poll timer, so the stamp names the pump session a fault was
+    sighted in. '' when the log is missing or its last 64 KB hold no such
+    row (then the session cannot be told, and nothing is inferred from it).
+    """
+    path = Path(workspace_dir) / "activity.log"
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 65536))
+            tail = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in reversed(tail.splitlines()):
+        parts = line.split(",")
+        if len(parts) >= 3 and parts[2] == "_session_start":
+            return parts[0].strip()
+    return ""
+
+
 def record_fault(workspace_dir: Path, guidance: dict, *, when: str = "") -> None:
     """Write the current fault + recovery guidance to the workspace.
 
@@ -43,17 +67,33 @@ def record_fault(workspace_dir: Path, guidance: dict, *, when: str = "") -> None
     script-fatal box seen on screen is kept, guidance and all, when a later
     sighting of the same fault only found silence: the box is the evidence
     that named the halted line.
+
+    ONE PUMP SESSION PER RECORD. ``session`` is the stamp of the newest
+    ``_session_start`` row in ``activity.log`` when the fault was sighted
+    (``current_pump_session``). A sighting in a DIFFERENT pump session starts
+    a new record even when the kind is the same: the record is removed only
+    by a successful call, so without this, a loop that died, was recovered
+    (OK, Stop, StartMCPServer) and died again on its very first call - the
+    P8 shape - would have kept the OLD incident's ``first_seen``,
+    ``found_by`` and box guidance. When either session is unknown ('') the
+    sightings are taken to be one fault, as before.
     """
     path = Path(workspace_dir) / FAULT_FILE
     found_by = str(guidance.get("found_by") or "")
     first_seen = when
+    session = current_pump_session(workspace_dir)
     previous = read_fault(workspace_dir)
     if isinstance(previous, dict):
         prev_rec = previous.get("recovery")
         prev_rec = prev_rec if isinstance(prev_rec, dict) else {}
-        if prev_rec.get("fault") and prev_rec.get("fault") == guidance.get("fault"):
+        prev_session = str(previous.get("session") or "")
+        same_session = not (session and prev_session
+                            and session != prev_session)
+        if (same_session and prev_rec.get("fault")
+                and prev_rec.get("fault") == guidance.get("fault")):
             first_seen = str(previous.get("first_seen")
                              or previous.get("when") or when)
+            session = session or prev_session
             prev_found = str(previous.get("found_by")
                              or prev_rec.get("found_by") or "")
             if prev_found == _DECISIVE and found_by != _DECISIVE:
@@ -63,7 +103,7 @@ def record_fault(workspace_dir: Path, guidance: dict, *, when: str = "") -> None
                 found_by = prev_found
     payload = {"recovery": guidance, "when": first_seen,
                "first_seen": first_seen, "last_seen": when,
-               "found_by": found_by}
+               "found_by": found_by, "session": session}
     try:
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")

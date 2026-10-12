@@ -147,3 +147,58 @@ def test_a_silent_dead_loop_says_how_it_was_found(tmp_path):
                           time.monotonic(), 0.0005, time.monotonic(), None)
     fault = _status(bridge)["last_fault"]
     assert fault["found_by"] == "no reply and no heartbeat"
+
+
+# ---------------------------------------------------------------------------
+# Review of 2026.10.12.03: one record per PUMP SESSION
+# ---------------------------------------------------------------------------
+
+def _session_start(ws, stamp):
+    with open(ws / "activity.log", "a", encoding="utf-8") as f:
+        f.write(f"{stamp},0,_session_start,version=2026.10.12.03,"
+                f"protocol=2\n")
+
+
+def test_a_dead_loop_in_a_new_pump_session_is_a_new_fault(tmp_path):
+    """The P8 shape twice over: the loop dies (box seen), the owner presses
+    OK, Stop and reruns StartMCPServer (a new ``_session_start``), and the
+    very first call kills it again with no call succeeding in between. The
+    second incident must get its own first_seen and found_by, not inherit
+    the first one's box guidance."""
+    from eda_agent.bridge.recovery import NO_REPLY_NO_HEARTBEAT, SCRIPT_FATAL_SEEN
+    _session_start(tmp_path, "2026-10-12 19:30:00.000")
+    record_fault(tmp_path, recovery_guidance(DEAD_LOOP,
+                                             found_by=SCRIPT_FATAL_SEEN),
+                 when="T1")
+    record_fault(tmp_path, recovery_guidance(DEAD_LOOP,
+                                             found_by=NO_REPLY_NO_HEARTBEAT),
+                 when="T2")
+    same = read_fault(tmp_path)
+    assert (same["first_seen"], same["last_seen"]) == ("T1", "T2")
+    assert same["found_by"] == SCRIPT_FATAL_SEEN
+    assert same["session"] == "2026-10-12 19:30:00.000"
+
+    with open(tmp_path / "activity.log", "a", encoding="utf-8") as f:
+        f.write("2026-10-12 19:31:00.000,12,application.ping,ok\n")
+    _session_start(tmp_path, "2026-10-12 19:40:00.000")
+    record_fault(tmp_path, recovery_guidance(DEAD_LOOP,
+                                             found_by=NO_REPLY_NO_HEARTBEAT),
+                 when="T3")
+    new = read_fault(tmp_path)
+    assert new["first_seen"] == "T3" and new["when"] == "T3"
+    assert new["last_seen"] == "T3"
+    assert new["found_by"] == NO_REPLY_NO_HEARTBEAT
+    assert "probably not running" in new["recovery"]["diagnosis"]
+    assert new["session"] == "2026-10-12 19:40:00.000"
+
+
+def test_an_unknown_session_never_splits_a_fault(tmp_path):
+    """No activity.log (or no session row in its tail): the session cannot
+    be told, so sightings of one kind stay one record, as before."""
+    _session_start(tmp_path, "S1")
+    record_fault(tmp_path, recovery_guidance(DEAD_LOOP), when="T1")
+    (tmp_path / "activity.log").unlink()
+    record_fault(tmp_path, recovery_guidance(DEAD_LOOP), when="T2")
+    payload = read_fault(tmp_path)
+    assert (payload["first_seen"], payload["last_seen"]) == ("T1", "T2")
+    assert payload["session"] == "S1"
