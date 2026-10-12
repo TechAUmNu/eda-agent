@@ -874,8 +874,12 @@ def test_the_pump_starts_each_session_with_nothing_counted():
     i = body.index("InitDefaultConfig(0)")
     j = body.index("LoadMCPConfig(0)")
     window = body[i:j]
-    assert "ResetCaughtExceptions(0)" in window
-    assert re.search(r"CastErrorCount\s*:=\s*0\s*;", window)
+    # Through ResetSessionGlobals since 2026.10.12.03, still before the
+    # config load and before anything can count.
+    assert "ResetSessionGlobals(0)" in window
+    reset = _form()["ResetSessionGlobals"]
+    assert "ResetCaughtExceptions(0)" in reset
+    assert re.search(r"CastErrorCount\s*:=\s*0\s*;", reset)
 
 
 # ---------------------------------------------------------------------------

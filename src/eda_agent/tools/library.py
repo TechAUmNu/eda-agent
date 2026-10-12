@@ -2192,6 +2192,13 @@ def register_library_tools(mcp):
             modify_objects("ePin", scope="active_doc",
                            filter="Location.X=200", set="Orientation=2")
 
+        It also makes that component the HELD symbol that the nameless
+        ``lib_add_*`` symbol edits act on. It is held for the current
+        bridge session only: a StartMCPServer re-run (the recovery after a
+        dead loop) or an Altium restart drops it, and the next nameless
+        edit answers NO_COMPONENT. Call this again after a recovery, or
+        pass ``component_name`` to each edit.
+
         Args:
             component_name: Component name (LibRef) in the active SchLib.
 
@@ -2262,7 +2269,10 @@ def register_library_tools(mcp):
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
                 editor is never used: it is not a fallback, and the
-                bridge never reads it.
+                bridge never reads it. The held symbol does not survive
+                a StartMCPServer re-run or an Altium restart, so after a
+                recovery pass ``component_name`` or call
+                ``lib_set_current_component`` again.
 
         Example, one stage of a dual op-amp (sub-part 1) with shared
         power pins (sub-part 0):
@@ -2349,7 +2359,10 @@ def register_library_tools(mcp):
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
                 editor is never used: it is not a fallback, and the
-                bridge never reads it.
+                bridge never reads it. The held symbol does not survive
+                a StartMCPServer re-run or an Altium restart, so after a
+                recovery pass ``component_name`` or call
+                ``lib_set_current_component`` again.
 
         Returns:
             Dictionary confirming rectangle addition
@@ -2417,7 +2430,10 @@ def register_library_tools(mcp):
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
                 editor is never used: it is not a fallback, and the
-                bridge never reads it.
+                bridge never reads it. The held symbol does not survive
+                a StartMCPServer re-run or an Altium restart, so after a
+                recovery pass ``component_name`` or call
+                ``lib_set_current_component`` again.
 
         Returns:
             Dict with ``added``, ``failed``, ``total`` counts. A text whose
@@ -2529,7 +2545,10 @@ def register_library_tools(mcp):
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
                 editor is never used: it is not a fallback, and the
-                bridge never reads it.
+                bridge never reads it. The held symbol does not survive
+                a StartMCPServer re-run or an Altium restart, so after a
+                recovery pass ``component_name`` or call
+                ``lib_set_current_component`` again.
 
         Returns:
             Dict with ``added``, ``failed``, ``total`` counts.
@@ -3960,7 +3979,8 @@ def register_library_tools(mcp):
                 was last created. Leave empty to target the symbol held
                 from ``lib_create_symbol`` / ``lib_set_current_component``;
                 with none held the reply is NO_COMPONENT (the editor's own
-                selection is never read).
+                selection is never read). The held symbol does not survive
+                a StartMCPServer re-run or an Altium restart.
             footprint_name: Name of the footprint to link
             footprint_library: NOT APPLIED, accepted only so existing
                 callers keep working. The footprint is bound by NAME via
@@ -5889,7 +5909,10 @@ def register_library_tools(mcp):
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
                 editor is never used: it is not a fallback, and the
-                bridge never reads it.
+                bridge never reads it. The held symbol does not survive
+                a StartMCPServer re-run or an Altium restart, so after a
+                recovery pass ``component_name`` or call
+                ``lib_set_current_component`` again.
 
         Returns:
             Dictionary confirming arc addition
@@ -5943,7 +5966,10 @@ def register_library_tools(mcp):
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT. The symbol merely selected in the
                 editor is never used: it is not a fallback, and the
-                bridge never reads it.
+                bridge never reads it. The held symbol does not survive
+                a StartMCPServer re-run or an Altium restart, so after a
+                recovery pass ``component_name`` or call
+                ``lib_set_current_component`` again.
 
         Returns:
             Dictionary confirming polygon addition with vertex count
@@ -6082,6 +6108,8 @@ def register_library_tools(mcp):
                 Empty means the symbol held from ``lib_create_symbol`` /
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT (the editor's own selection is never read).
+                The held symbol does not survive a StartMCPServer re-run
+                or an Altium restart.
             output_path: write the full pin array here as JSON and
                 return the summary. Forces the file path regardless of
                 size.
@@ -6147,6 +6175,8 @@ def register_library_tools(mcp):
                 Empty means the symbol held from ``lib_create_symbol`` /
                 ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT (the editor's own selection is never read).
+                The held symbol does not survive a StartMCPServer re-run
+                or an Altium restart.
 
         Returns:
             Dictionary with "component", "owner_part_id", the
@@ -6794,6 +6824,8 @@ def register_library_tools(mcp):
                 SchLib. Omit for the symbol held from ``lib_create_symbol``
                 / ``lib_set_current_component``; with none held the reply
                 is NO_COMPONENT (the editor's own selection is never used).
+                The held symbol does not survive a StartMCPServer re-run
+                or an Altium restart.
 
         Returns:
             {"pins_processed": N}.

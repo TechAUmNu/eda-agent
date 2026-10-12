@@ -12,9 +12,10 @@ OwnerPartIdOf's ``Component.CurrentPartID`` (Library.pas:146, inside a
 Try) was the script engine's "Undeclared identifier: CurrentPartID" box.
 The loop was dead.
 
-THE MECHANISM, read from the source and matching all three live records
-(the 2026-10-11 Library.pas:122 halt, which was blamed on the editor's
-CurrentSchComponent, has the same shape): the held-symbol globals in
+THE MECHANISM, read from the source and CONSISTENT WITH all three live
+records (the 2026-10-11 Library.pas:122 halt, which was blamed on the
+editor's CurrentSchComponent, has the same shape; session A, P8 on
+2026.10.12.03, is the live proof): the held-symbol globals in
 Main.pas were NEVER assigned at pump start. StartMCPPump reset some forty
 other globals and not these. In DelphiScript every variable is a Variant,
 so an unassigned global is Empty, and Empty does NOT compare equal to Nil:
@@ -34,24 +35,41 @@ Except catches the engine's halt.
   edit (fails on 7af6747 with the field's own CurrentPartID read).
 * A held component from a PREVIOUS pump session (StartMCPServer re-run in
   the same Altium) is dropped too.
-* The GENERAL guard: every global declared in a unit StartMCPPump can see
-  is assigned in StartMCPPump, or in a routine it calls, before the poll
-  timer is enabled. A global of a unit compiled AFTER StatusForm.pas (the
-  SelfTest counters) must be assigned at the top of an entry routine of
-  its own unit instead. Fails on 7af6747 listing exactly the globals
-  that were left unassigned, each with how it is used (compared with
-  Nil, read as a flag, counted, or read).
+* The GENERAL guard (tests/pascal_init_order.py): StartMCPPump is WALKED
+  IN EXECUTION ORDER, every routine it calls inlined at the call, up to
+  the statement that arms the poll timer. Every global declared in a unit
+  StartMCPPump can see must be assigned by an UNCONDITIONAL statement
+  (not under an If, a loop, a Try body or an Except, and not after a
+  conditional Exit) BEFORE anything reads it - an ``= Nil`` test is a
+  read. The first version of this guard counted any ``Name :=`` anywhere
+  in reach, which accepted ``If X = Nil Then X := ...`` (skipped on Empty:
+  the D-F2-1 class itself) and an assignment that came after the first
+  read (the perf lists, Nil-tested by EnsureStatusBuffers before
+  ShowStatusForm's Try created them); the negative tests here run the
+  guard on exactly those injected shapes. Two globals are read first BY
+  DESIGN and are listed, with the reason, in ``_READ_FIRST``. A global of
+  a unit compiled AFTER StatusForm.pas (the SelfTest counters) must be
+  assigned at the top of an entry routine of its own unit instead.
+* RunSelfTest, the other route that runs handlers without the pump, calls
+  the same ResetSessionGlobals before its first test.
+
+Unit order is lint.PAS_FILES (the order build.py concatenates and the
+linter checks) with SelfTest.pas, the one PrjScr-only unit, appended.
 """
 from __future__ import annotations
 
+import importlib.util
 import re
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from tests.pascal_eval import build
-from tests.pascal_source import functions, load, strip_comments
+from tests.pascal_init_order import (
+    InitWalk, routine_texts, unit_code, unit_globals_of)
+from tests.pascal_source import functions, load
 from tests.test_library_popup_free import A, Client, Dead, _held
 from tests.test_live_editor_component_is_never_read import (
     _HANDLERS, _LIB, EditLib, LiveDoc, NComp, _edit_ns)
@@ -109,115 +127,69 @@ class Unassigned:
 
 
 # ---------------------------------------------------------------------------
-# Reading the units: globals, compile order, the pump's reach
+# Reading the units: globals, compile order
 # ---------------------------------------------------------------------------
 
+def _lint():
+    path = _ALTIUM / "lint.py"
+    spec = importlib.util.spec_from_file_location("_altium_lint_fpg", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["_altium_lint_fpg"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _unit_order() -> list[str]:
+    """lint.PAS_FILES (what build.py concatenates and lint checks, in that
+    order) plus SelfTest.pas, the one unit only the PrjScr compiles. The
+    PrjScr must list exactly the same units: the order the guard reasons
+    about is the order the build uses."""
+    order = list(_lint().PAS_FILES) + ["SelfTest.pas"]
     prj = (_ALTIUM / "Altium_API.PrjScr").read_text(encoding="utf-8",
                                                      errors="replace")
-    order = re.findall(r"(?m)^DocumentPath=(\w+\.pas)\s*$", prj)
-    assert "StatusForm.pas" in order and "Main.pas" in order, order
+    listed = re.findall(r"(?m)^DocumentPath=(\w+\.pas)\s*$", prj)
+    assert sorted(listed) == sorted(order), (listed, order)
+    assert order.index("StatusForm.pas") < order.index("Dispatcher.pas")
     return order
 
 
-def _code(unit: str) -> str:
-    return strip_comments((_ALTIUM / unit).read_text(encoding="utf-8-sig",
-                                                     errors="replace"))
+def _sources(order=None) -> dict[str, str]:
+    return {u: (_ALTIUM / u).read_text(encoding="utf-8-sig", errors="replace")
+            for u in (order or _unit_order())}
 
 
-_STOP = re.compile(r"(?mi)^\s*(Function|Procedure|Const|Begin|Var|Type)\b")
+def unit_globals(unit: str, sources=None) -> list[tuple[str, str]]:
+    src = (sources or {}).get(unit)
+    if src is None:
+        src = (_ALTIUM / unit).read_text(encoding="utf-8-sig",
+                                         errors="replace")
+    return unit_globals_of(unit_code(src))
 
 
-def unit_globals(unit: str) -> list[tuple[str, str]]:
-    """``[(name, type)]`` for the unit-level Var blocks of one unit.
-
-    A Var block at column 0 that runs into a ``Begin`` is the local block
-    of a routine with nested routines (PCB.pas, Audit.pas), not a unit
-    block: a unit block runs into the next routine, Const, Type or EOF.
-    """
-    code = _code(unit)
-    out: list[tuple[str, str]] = []
-    for m in re.finditer(r"(?mi)^Var\b", code):
-        rest = code[m.end():]
-        stop = _STOP.search(rest)
-        if stop and stop.group(1).lower() == "begin":
-            continue
-        block = rest[:stop.start()] if stop else rest
-        for decl in re.finditer(r"([\w\s,]+?)\s*:\s*(\w+)\s*;", block):
-            for name in decl.group(1).split(","):
-                out.append((name.strip(), decl.group(2)))
-    return out
+# Read before any assignment ON PURPOSE, each with the reason. Anything
+# else read first is a finding.
+_READ_FIRST = {
+    "Running": "the re-entry flag: 'If Running Then Exit' is StartMCPPump's "
+               "first statement; on a fresh engine Empty reads False and the "
+               "pump starts, and Running := True follows unconditionally",
+    "WorkspaceDir": "EnsureWorkspaceDir's \"If WorkspaceDir = '' Then\" "
+                    "assigns it on Empty (Empty = '' holds; every live "
+                    "session has started this way) and a configured value "
+                    "is kept",
+}
 
 
-def _strip_strings(code: str) -> str:
-    return re.sub(r"'(?:[^']|'')*'", "''", code)
-
-
-def _all_bodies() -> dict[str, str]:
-    bodies: dict[str, str] = {}
-    for unit in _unit_order():
-        for name, body in functions(_code(unit)).items():
-            bodies[name] = _strip_strings(body)
-    return bodies
-
-
-def _body_only(body: str) -> str:
-    """A routine without its header line, so it does not 'call' itself."""
-    return body.split("\n", 1)[1] if "\n" in body else ""
-
-
-def pump_reach(bodies: dict[str, str]) -> dict[str, str]:
-    """StartMCPPump up to the statement that arms the poll timer, plus every
-    routine it calls, transitively. Nothing the request path runs can come
-    before the timer ticks, so that is the window an assignment must sit in.
-    """
-    start = bodies["StartMCPPump"]
-    cut = start.find("tmr_Poll.Enabled")
-    assert cut > 0, "StartMCPPump no longer arms tmr_Poll.Enabled"
-    reach = {"StartMCPPump": start[:cut]}
-    todo = [reach["StartMCPPump"]]
-    names = sorted(bodies, key=len, reverse=True)
-    while todo:
-        text = _body_only(todo.pop())
-        for n in names:
-            if n in reach:
-                continue
-            if re.search(r"\b%s\b" % re.escape(n), text):
-                reach[n] = bodies[n]
-                todo.append(bodies[n])
-    return reach
-
-
-def _assigns(text: str, name: str) -> bool:
-    return bool(re.search(r"(?<![\w.])%s\s*:=" % re.escape(name), text)
-                or re.search(r"\b(?:Inc|Dec)\(\s*%s\b" % re.escape(name), text))
-
-
-def _how_used(name: str, every: str) -> str:
-    n = re.escape(name)
-    kinds = []
-    if re.search(r"\b%s\s*(?:=|<>)\s*Nil\b|\bNil\s*(?:=|<>)\s*%s\b" % (n, n),
-                 every, re.I):
-        kinds.append("compared with Nil")
-    if re.search(r"(?i)\b(?:If|Not|And|Or|While|Until)\s+\(?%s\b"
-                 r"(?!\s*(?::=|=|<>|<|>|\.|\(|\[))" % n, every):
-        kinds.append("read as a flag")
-    if re.search(r"\b(?:Inc|Dec)\(\s*%s\b|(?<![\w.])%s\s*:=\s*%s\s*[+\-]"
-                 % (n, n, n), every):
-        kinds.append("counted/accumulated")
-    return ", ".join(kinds) or "read"
-
-
-def _entry_resets(unit: str, names: set[str]) -> bool:
+def _entry_resets(unit: str, names: set[str], sources=None) -> bool:
     """Some routine of ``unit`` opens with ``Name := <literal>;`` for every
     one of ``names`` before its first other statement (RunSelfTest)."""
-    for body in functions(_code(unit)).values():
+    code = unit_code((sources or _sources())[unit])
+    for body in functions(code).values():
         m = re.search(r"(?i)\bBegin\b(.*)", body, re.S)
         if not m:
             continue
         seen: set[str] = set()
         for stmt in m.group(1).split(";"):
-            a = re.fullmatch(r"\s*(\w+)\s*:=\s*(?:'[^']*'|-?\d+|True|False|Nil)"
+            a = re.fullmatch(r"\s*(\w+)\s*:=\s*(?:''|-?\d+|True|False|Nil)"
                              r"\s*", stmt, re.I)
             if not a:
                 break
@@ -227,43 +199,173 @@ def _entry_resets(unit: str, names: set[str]) -> bool:
     return False
 
 
+def pump_findings(sources: dict[str, str], order: list[str]):
+    """The guard, on any source text (the negative tests inject into it).
+
+    Returns ``(findings, walk)``: every global of a unit up to and
+    including StatusForm.pas that StartMCPPump does not assign
+    unconditionally before its first read, walking up to the statement
+    that arms the poll timer; plus, for the units compiled after
+    StatusForm.pas, any global no entry routine of its own unit resets
+    first."""
+    upto = order[:order.index("StatusForm.pas") + 1]
+    watched = {}
+    for unit in upto:
+        for name, typ in unit_globals(unit, sources):
+            watched[name] = (unit, typ)
+    walk = InitWalk(routine_texts(sources, upto), watched,
+                    exempt=dict(_READ_FIRST))
+    found = [str(f) for f in walk.run("StartMCPPump", cut="tmr_Poll.Enabled",
+                                      gate="Running")]
+    for unit in order[order.index("StatusForm.pas") + 1:]:
+        names = {n for n, _ in unit_globals(unit, sources)}
+        if names and not _entry_resets(unit, names, sources):
+            found += [f"{unit}:{n} (compiled after StatusForm.pas and no "
+                      f"entry routine of {unit} assigns it first)"
+                      for n in sorted(names)]
+    return found, walk
+
+
 # ---------------------------------------------------------------------------
 # 1. The general guard
 # ---------------------------------------------------------------------------
 
 def test_every_global_is_assigned_before_the_pump_serves_a_request():
     order = _unit_order()
-    bodies = _all_bodies()
-    reach = pump_reach(bodies)
-    reached = "\n".join(reach.values())
-    every = "\n".join(bodies.values())
-    after = order[order.index("StatusForm.pas") + 1:]
-
-    found = 0
-    missing = []
-    for unit in order:
-        decls = unit_globals(unit)
-        found += len(decls)
-        if unit in after:
-            names = {n for n, _ in decls}
-            if names and not _entry_resets(unit, names):
-                missing += [f"{unit}:{n} ({_how_used(n, every)}; compiled "
-                            f"after StatusForm.pas and no entry routine of "
-                            f"{unit} assigns it first)" for n in sorted(names)]
-            continue
-        for name, typ in decls:
-            if not _assigns(reached, name):
-                missing.append(f"{unit}:{name} : {typ} "
-                               f"({_how_used(name, every)})")
+    sources = _sources(order)
+    found, walk = pump_findings(sources, order)
     # The parser's floor: a stripper or splitter that stops working must
     # not turn this into a pass over nothing.
-    assert found >= 80, f"only {found} globals parsed"
-    assert not missing, (
-        "these globals are never assigned by StartMCPPump (or a routine it "
-        "calls before arming the poll timer). On a fresh pump they hold "
+    total = sum(len(unit_globals(u, sources)) for u in order)
+    assert total >= 80, f"only {total} globals parsed"
+    assert len(walk.watched) >= 80, len(walk.watched)
+    assert not found, (
+        "these globals are read before StartMCPPump assigns them, or are "
+        "assigned only CONDITIONALLY (under an If, a loop, a Try body, or "
+        "after a conditional Exit), walking StartMCPPump in order up to "
+        "the statement that arms the poll timer. On a fresh pump they hold "
         "Empty, which is NOT Nil, so every '= Nil' guard passes it and the "
-        "first member read halts the engine (D-F2-1):\n  "
-        + "\n  ".join(missing))
+        "first member read halts the engine (D-F2-1). Assign each as a "
+        "top-level statement of ResetSessionGlobals:\n  "
+        + "\n  ".join(found))
+    # And not vacuously: the walk reached the reset routines and set most
+    # globals unconditionally.
+    assert len(walk.state) >= 70, len(walk.state)
+    assert {"ResetSessionGlobals", "ShowStatusForm", "ResetPerfStats",
+            "ForgetRememberedLibComponent"} <= set(walk.order), walk.order
+
+
+def test_the_read_first_exceptions_are_still_read_first():
+    """An exception that no longer applies must leave the list, so the list
+    cannot quietly grow into a place to park new findings."""
+    order = _unit_order()
+    sources = _sources(order)
+    upto = order[:order.index("StatusForm.pas") + 1]
+    watched = {n: (u, t) for u in upto for n, t in unit_globals(u, sources)}
+    walk = InitWalk(routine_texts(sources, upto), watched)
+    found = walk.run("StartMCPPump", cut="tmr_Poll.Enabled", gate="Running")
+    first = {f.name for f in found if "read while still unassigned" in f.why}
+    assert first == set(_READ_FIRST), (first, set(_READ_FIRST))
+
+
+def _inject(sources, unit, old, new, count=1):
+    text = sources[unit]
+    assert text.count(old) == count, (unit, old, text.count(old))
+    out = dict(sources)
+    out[unit] = text.replace(old, new)
+    return out
+
+
+_SF = "StatusForm.pas"
+
+
+def test_guard_catches_a_lazy_nil_test_initialisation():
+    """inj_b: a new global created ONLY by ``If X = Nil Then X := ...``.
+    On Empty the test is False and the global stays Empty; the first guard
+    passed it because an assignment existed in reach."""
+    order = _unit_order()
+    src = _inject(_sources(order), _SF,
+                  "    PerfMaxStrs      : TStringList;",
+                  "    PerfMaxStrs      : TStringList;\n"
+                  "    ProbeList        : TStringList;")
+    src = _inject(src, _SF,
+                  "    If PerfMaxStrs   = Nil Then PerfMaxStrs   := "
+                  "TStringList.Create;",
+                  "    If PerfMaxStrs   = Nil Then PerfMaxStrs   := "
+                  "TStringList.Create;\n"
+                  "    If ProbeList = Nil Then ProbeList := "
+                  "TStringList.Create;")
+    found, _ = pump_findings(src, order)
+    assert any(f.startswith(_SF + ":ProbeList ") and "compared with Nil" in f
+               for f in found), found
+
+
+def test_guard_catches_the_perf_lists_without_the_unconditional_create():
+    """inj_c: the unconditional ResetPerfStats(0) of ResetSessionGlobals
+    removed. The lists are then Nil-tested by EnsureStatusBuffers (skipped
+    on Empty) and created only inside ShowStatusForm's Try body, after
+    statements that may raise. The first guard passed this; on hardware the
+    first PerfNames.IndexOf would halt every request."""
+    order = _unit_order()
+    sources = _sources(order)
+    body = functions(sources[_SF])["ResetSessionGlobals"]
+    assert body.count("ResetPerfStats(0);") == 1
+    src = dict(sources)
+    src[_SF] = sources[_SF].replace(
+        body, body.replace("    ResetPerfStats(0);\n", ""))
+    assert src[_SF] != sources[_SF]
+    found, _ = pump_findings(src, order)
+    names = {f.split(" ")[0] for f in found}
+    assert {_SF + ":PerfNames", _SF + ":PerfCountStrs",
+            _SF + ":PerfTotalStrs", _SF + ":PerfMaxStrs"} <= names, found
+
+
+def test_guard_catches_an_assignment_inside_a_try_or_after_a_guarded_exit():
+    order = _unit_order()
+    sources = _sources(order)
+    src = _inject(sources, _SF, "    RefreshingLib := False;\n",
+                  "    Try RefreshingLib := False; Except End;\n")
+    found, _ = pump_findings(src, order)
+    assert any(f.startswith("Main.pas:RefreshingLib ") and "CONDITIONALLY"
+               in f for f in found), found
+    src = _inject(sources, _SF, "    LastCompileTick := 0;\n",
+                  "    If LastActivityTick > 5 Then Exit;\n"
+                  "    LastCompileTick := 0;\n")
+    found, _ = pump_findings(src, order)
+    assert any(f.startswith("Main.pas:LastCompileTick ") for f in found), found
+
+
+def test_guard_catches_a_read_before_the_assignment():
+    order = _unit_order()
+    src = _inject(_sources(order), _SF,
+                  "    ForgetRememberedLibComponent(0);\n",
+                  "    If LastCompiledProject <> Nil Then StatusLastCommand "
+                  ":= '';\n    ForgetRememberedLibComponent(0);\n")
+    found, _ = pump_findings(src, order)
+    assert any(f.startswith("Main.pas:LastCompiledProject ")
+               and "compared with Nil" in f for f in found), found
+
+
+def test_run_self_test_resets_the_session_globals_first():
+    """RunSelfTest runs handlers (ProcessCommand, Lib_GetComponents,
+    Gen_ModifyObjects, ...) without StartMCPPump, so on a fresh engine
+    every global would still be Empty. Walked in order up to its first
+    test, it must have assigned every global ResetSessionGlobals assigns."""
+    order = _unit_order()
+    sources = _sources(order)
+    upto = order[:order.index("StatusForm.pas") + 1]
+    watched = {n: (u, t) for u in upto for n, t in unit_globals(u, sources)}
+    session = InitWalk(routine_texts(sources, upto), watched)
+    session.run("ResetSessionGlobals")
+    assigned = {n for n, v in session.state.items() if v == "set"}
+    assert len(assigned) >= 60, len(assigned)
+    st = InitWalk(routine_texts(sources, order), watched,
+                  exempt=dict(_READ_FIRST))
+    st.run("RunSelfTest", cut="TestJsonParsing(0)")
+    missing = sorted(assigned - {n for n, v in st.state.items()
+                                 if v == "set"})
+    assert not missing, ("RunSelfTest reaches its first test without "
+                         "assigning: " + ", ".join(missing))
 
 
 def test_the_globals_parser_sees_the_known_globals():
@@ -315,7 +417,10 @@ def _fresh_pump(ns: dict, keep=()) -> dict:
     build(_MAIN, ["InitDefaultConfig", "ResetCaughtExceptions"], ns)
     build(_UTILS, [n for n in ("ResetNextStep", "ResetPropertyDiag")
                    if n in _UTILS], ns)
-    build(_STATUS, ["StartMCPPump"], ns)
+    # ResetSessionGlobals exists from 2026.10.12.03 on; building only what a
+    # tree has lets this fixture run an older tree for the fails-before proof.
+    build(_STATUS, [n for n in ("ResetPerfStats", "ResetSessionGlobals",
+                                "StartMCPPump") if n in _STATUS], ns)
     ns["StartMCPPump"](0)
     assert ns["Running"] is True and ns["tmr_Poll"].Enabled is True
     return ns
@@ -323,6 +428,24 @@ def _fresh_pump(ns: dict, keep=()) -> dict:
 
 def _client():
     return Client({A: LiveDoc()})
+
+
+def test_the_perf_lists_exist_even_when_the_status_form_did_not_create_them():
+    """Review of 2026.10.12.03: the four perf lists were created only by
+    ResetPerfStats inside ShowStatusForm's single Try, after statements that
+    may raise. EnsureStatusBuffers' ``= Nil`` tests do nothing on Empty, so
+    if that Try had raised first, FindOrAddPerf's PerfNames.IndexOf (every
+    request, through AppendLogLine) would have been the engine's halt.
+    The fixture's ShowStatusForm does nothing - the Try that raised before
+    ResetPerfStats - and the first perf row must still be recorded."""
+    lib = EditLib(A)
+    ns = _edit_ns(lib, _client())
+    _fresh_pump(ns)
+    build(_STATUS, ["EnsureStatusBuffers", "FindOrAddPerf"], ns)
+    assert ns["FindOrAddPerf"]("application.ping") == 0
+    assert ns["FindOrAddPerf"]("application.ping") == 0
+    assert list(ns["PerfNames"]) == ["application.ping"]
+    assert list(ns["PerfCountStrs"]) == ["0"]
 
 
 def test_the_fixture_reproduces_the_field_halt():
@@ -387,3 +510,27 @@ def test_a_component_held_by_a_previous_pump_session_is_dropped():
     reply = ns["Lib_AddSymbolLines"]({"lines": "q"}, "r")
     assert reply[:2] == ("ERR", "NO_COMPONENT"), reply
     assert ns["LastCreatedLibComponent"] is None
+
+
+def test_the_tools_say_the_held_symbol_does_not_survive_a_recovery():
+    """User-visible since 2026.10.12.03: StartMCPPump drops the held symbol,
+    so after the DEAD_LOOP recovery the tool itself prescribes (OK, Stop,
+    StartMCPServer) a nameless edit answers NO_COMPONENT. Every docstring
+    that promises the held symbol, and lib_set_current_component, says so,
+    and so does the script_fatal recovery."""
+    import ast
+    from eda_agent.bridge.recovery import (
+        DEAD_LOOP, SCRIPT_FATAL_SEEN, recovery_guidance)
+    src = (_ROOT / "src" / "eda_agent" / "tools" / "library.py").read_text(
+        encoding="utf-8")
+    docs = {n.name: ast.get_docstring(n) or "" for n in ast.walk(ast.parse(src))
+            if isinstance(n, ast.AsyncFunctionDef)}
+    promising = [n for n, d in docs.items()
+                 if "with none held the reply" in d and "NO_COMPONENT" in d]
+    assert len(promising) >= 6, promising
+    silent = [n for n in promising + ["lib_set_current_component"]
+              if "StartMCPServer re-run" not in " ".join(docs[n].split())]
+    assert not silent, silent
+    steps = " ".join(recovery_guidance(DEAD_LOOP,
+                                       found_by=SCRIPT_FATAL_SEEN)["steps"])
+    assert "lib_set_current_component" in steps and "component_name" in steps

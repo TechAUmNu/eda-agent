@@ -421,9 +421,12 @@ def test_only_save_all_ever_arms_the_skip():
                 "'only_modified')) = 'true';") in body, handler
         assert "SaveProjectMembersReport(Project, OnlyModified)" in body, handler
 
-    pump = load(_ALTIUM / "StatusForm.pas", minimum=10)["StartMCPPump"]
-    assert "SaveSkipCleanLibs := False;" in pump
-    assert "SaveSkipCleanSheets := False;" in pump
+    form = load(_ALTIUM / "StatusForm.pas", minimum=10)
+    # Set by ResetSessionGlobals, which StartMCPPump calls (2026.10.12.03).
+    assert "ResetSessionGlobals(0);" in form["StartMCPPump"]
+    reset = form["ResetSessionGlobals"]
+    assert "SaveSkipCleanLibs := False;" in reset
+    assert "SaveSkipCleanSheets := False;" in reset
 
 
 # ---------------------------------------------------------------------------

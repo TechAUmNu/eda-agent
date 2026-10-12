@@ -90,6 +90,9 @@ _GUIDANCE = {
             "opened, then press OK.",
             _STOP_STEP,
             _RELAUNCH_STEP,
+            "After the relaunch no library symbol is held: pass "
+            "component_name to symbol edits, or call "
+            "lib_set_current_component again.",
         ],
     },
     CORRUPT_RESPONSE: {

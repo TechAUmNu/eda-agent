@@ -1502,33 +1502,50 @@ End;
 
 
 {..............................................................................}
-{ Start MCP server: arm the poll timer and RETURN.                             }
-{                                                                              }
-{ The return is the whole point. This used to block for the entire session,    }
-{ holding Altium's single-threaded scripting engine, which is what made        }
-{ closing Altium hang. Now the engine is free between ticks and Altium's       }
-{ close path never waits on a script.                                          }
-{                                                                              }
-{ Stop methods are unchanged: send application.stop_server, drop a 'stop' file }
-{ in the workspace, press Detach, close the dashboard, or wait for             }
-{ auto-shutdown. All tunables still come from mcp_config.json via              }
-{ LoadMCPConfig; PollIntervalActiveMs and PollIntervalIdleMs are now the       }
-{ timer's interval rather than a Sleep length. YieldIterations and             }
-{ YieldEveryNActive no longer apply: they existed to hand time back to Altium  }
-{ from inside a loop that never returned, and a timer yields by construction.  }
-{ They stay in the config so an existing mcp_config.json still loads.          }
-{                                                                              }
-{ Takes a Dummy argument so it stays OUT of the Run Script dialog. The entry   }
-{ the user picks is still StartMCPServer in Dispatcher.pas, which calls this;  }
-{ the dialog lists every PARAMETERLESS procedure, so without the argument the  }
-{ attach step would sprout a second, near-identical entry to choose between.   }
+{ Every global the request path reads, assigned at session start.              }
 {..............................................................................}
 
-Procedure StartMCPPump(Dummy : Integer);
+Procedure ResetSessionGlobals(Dummy : Integer);
 Begin
-    If Running Then Exit;
+    { EVERY GLOBAL THE REQUEST PATH READS, assigned here and never left to  }
+    { what the variable happens to hold (finding D-F2-1, live 2026-10-12,   }
+    { bridge 2026.10.12.02, AD 26.10.1.5).                                  }
+    {                                                                        }
+    { In DelphiScript every variable is a Variant, and a global nobody has  }
+    { assigned holds Empty. Empty does NOT compare equal to Nil. In a fresh }
+    { Altium, with nothing created or selected through the bridge, the held }
+    { symbol below read as non-Nil, so GetTargetLibComponent handed it to   }
+    { OwnerPartIdOf, whose Component.CurrentPartID read was the engine's    }
+    { "Undeclared identifier: CurrentPartID" halt (Library.pas, inside a    }
+    { Try that did nothing) and the loop died. That explanation is read     }
+    { from the source; session A (P8 on 2026.10.12.03) is its live proof.   }
+    { A second StartMCPServer in the same Altium would instead find the     }
+    { LAST session's values here, a held component included, so the held   }
+    { symbol does NOT survive a StartMCPServer re-run: a nameless edit then }
+    { answers NO_COMPONENT until the caller names the symbol again.         }
+    {                                                                        }
+    { RULES, each enforced by tests/test_live_fresh_pump_globals.py, which  }
+    { walks StartMCPPump in execution order with its callees inlined:       }
+    {  * every assignment here is a TOP-LEVEL statement: none under an If,  }
+    {    a loop or a Try, and none of the "If X = Nil Then X := ..." form,  }
+    {    which on Empty skips the very assignment it exists for;            }
+    {  * each global is assigned BEFORE anything reads it (the perf lists   }
+    {    are created here, not by EnsureStatusBuffers' Nil tests and not    }
+    {    only by ShowStatusForm's ResetPerfStats, which sits in a Try body  }
+    {    behind statements that may raise);                                 }
+    {  * each is set the proven way (X := Nil, Name := '', a flag False, a  }
+    {    counter 0, a list TStringList.Create through ResetPerfStats):      }
+    {    never VarIsEmpty or VarIsNull, which have never run live.          }
+    { StartMCPPump calls this before anything else that reads state, and    }
+    { RunSelfTest (SelfTest.pas) calls it too, because it runs handlers     }
+    { without the pump. The pump's own control state (Running, Pump*, the   }
+    { polling config) stays in StartMCPPump.                                }
+    {                                                                        }
+    { The four held-symbol globals are cleared through Library.pas's own    }
+    { ForgetRememberedLibComponent, which makes exactly those assignments   }
+    { (component and document := Nil, name and path := ''): only Library.pas}
+    { touches them (tests/test_popup_free_crossfile.py).                    }
 
-    InitDefaultConfig(0);
     { Nothing counted and nothing in flight at session start; the Altium   }
     { version is re-read on first use (see AltiumMajorVersion).           }
     ResetCaughtExceptions(0);
@@ -1536,24 +1553,6 @@ Begin
     { before/after reading within one session compares like with like.    }
     CastErrorCount := 0;
     AltiumMajorCache := '';
-    EnsureWorkspaceDir(0);
-    LoadMCPConfig(0);
-    { Startup purge: nothing on disk can belong to a live exchange, because no
-      pump was running to serve it. Responses are purged here but NOT in
-      CleanupMCPServer(0) -- on shutdown a client may still be reading one. }
-    CleanupOrphanRequests(0);
-    CleanupOrphanResponses(0);
-    CleanupOrphanProgress(0);
-
-    Running := True;
-    PumpStopPath := WorkspaceDir + 'stop';
-    If FileExists(PumpStopPath) Then DeleteFile(PumpStopPath);
-
-    PumpIdleCount := 0;
-    PumpLastActivityMs := GetTickCount;
-    PumpInTick := False;
-    PumpFinalised := False;
-    PumpQuitting := False;
 
     { Every save pass writes every open document unless App_SaveAll says   }
     { otherwise for its own pass. Set here so an uninitialised global can  }
@@ -1584,27 +1583,6 @@ Begin
     MarkLastFlagRaw := '';
     MarkLastFlagTests := '';
 
-    { EVERY OTHER GLOBAL THE REQUEST PATH READS, assigned here and never    }
-    { left to what the variable happens to hold (finding D-F2-1, live       }
-    { 2026-10-12, bridge 2026.10.12.02, AD 26.10.1.5).                      }
-    {                                                                        }
-    { In DelphiScript every variable is a Variant, and a global nobody has  }
-    { assigned holds Empty. Empty does NOT compare equal to Nil: in a fresh }
-    { Altium, with nothing created or selected through the bridge, the held }
-    { symbol below read as non-Nil, so GetTargetLibComponent handed it to   }
-    { OwnerPartIdOf, whose Component.CurrentPartID read was the engine's    }
-    { "Undeclared identifier: CurrentPartID" halt (Library.pas, inside a    }
-    { Try that did nothing) and the loop died. A second StartMCPServer in   }
-    { the same Altium would instead find the LAST session's values here,    }
-    { a held component included. So each is set the proven way (X := Nil,  }
-    { Name := '', a flag False, a counter 0): never VarIsEmpty or VarIsNull,}
-    { which have never run live. tests/test_live_fresh_pump_globals.py      }
-    { fails if a global any unit StartMCPPump can see declares is not       }
-    { assigned here or in a routine called before the timer is armed.       }
-    { The four held-symbol globals are cleared through Library.pas's own    }
-    { ForgetRememberedLibComponent, which makes exactly those assignments   }
-    { (component and document := Nil, name and path := ''): only Library.pas}
-    { touches them (tests/test_popup_free_crossfile.py).                    }
     ForgetRememberedLibComponent(0);
     RefreshingLib := False;
     LastCompiledProject := Nil;
@@ -1621,10 +1599,83 @@ Begin
     ResetNextStep(0);
     ResetPropertyDiag(0);
 
+    { The status form's own state. ShowStatusForm sets the same values,    }
+    { but inside its Try, after statements that may raise, and it reads    }
+    { some of them (and Nil-tests the perf lists) before setting them.     }
+    { ResetPerfStats is the way the four perf lists have been created in   }
+    { every live session (from ShowStatusForm); it only creates them.      }
+    ResetPerfStats(0);
+    HidePingsFlag := True;
+    OnlySlowFlag := False;
+    AlwaysOnTopFlag := True;
+    PausedFlag := False;
+    RenewRequested := False;
+    InFlightActive := False;
+    SpinnerFrame := 0;
+    FilterText := '';
+    LastPingMs := 0;
+    OpenWebEnabled := False;
+
     StatusStartTick := GetTickCount;
     StatusRequestCount := 0;
     StatusLastCommand := '';
     StatusTotalAltiumMs := 0;
+End;
+
+
+{..............................................................................}
+{ Start MCP server: arm the poll timer and RETURN.                             }
+{                                                                              }
+{ The return is the whole point. This used to block for the entire session,    }
+{ holding Altium's single-threaded scripting engine, which is what made        }
+{ closing Altium hang. Now the engine is free between ticks and Altium's       }
+{ close path never waits on a script.                                          }
+{                                                                              }
+{ Stop methods are unchanged: send application.stop_server, drop a 'stop' file }
+{ in the workspace, press Detach, close the dashboard, or wait for             }
+{ auto-shutdown. All tunables still come from mcp_config.json via              }
+{ LoadMCPConfig; PollIntervalActiveMs and PollIntervalIdleMs are now the       }
+{ timer's interval rather than a Sleep length. YieldIterations and             }
+{ YieldEveryNActive no longer apply: they existed to hand time back to Altium  }
+{ from inside a loop that never returned, and a timer yields by construction.  }
+{ They stay in the config so an existing mcp_config.json still loads.          }
+{                                                                              }
+{ Takes a Dummy argument so it stays OUT of the Run Script dialog. The entry   }
+{ the user picks is still StartMCPServer in Dispatcher.pas, which calls this;  }
+{ the dialog lists every PARAMETERLESS procedure, so without the argument the  }
+{ attach step would sprout a second, near-identical entry to choose between.   }
+{..............................................................................}
+
+Procedure StartMCPPump(Dummy : Integer);
+Begin
+    { The re-entry gate. On a fresh engine Running is Empty, which reads   }
+    { False, and the pump starts. A Running that SURVIVES as True - the    }
+    { engine halted inside a tick and the Script IDE's Stop was not        }
+    { pressed - makes this return here and StartMCPServer do NOTHING, so   }
+    { OK on a fatal box is not a recovery (RELEASE_VERIFICATION 39.5 (b)). }
+    If Running Then Exit;
+
+    InitDefaultConfig(0);
+    { Every global the request path reads, before anything reads one.     }
+    ResetSessionGlobals(0);
+    EnsureWorkspaceDir(0);
+    LoadMCPConfig(0);
+    { Startup purge: nothing on disk can belong to a live exchange, because no
+      pump was running to serve it. Responses are purged here but NOT in
+      CleanupMCPServer(0) -- on shutdown a client may still be reading one. }
+    CleanupOrphanRequests(0);
+    CleanupOrphanResponses(0);
+    CleanupOrphanProgress(0);
+
+    Running := True;
+    PumpStopPath := WorkspaceDir + 'stop';
+    If FileExists(PumpStopPath) Then DeleteFile(PumpStopPath);
+
+    PumpIdleCount := 0;
+    PumpLastActivityMs := GetTickCount;
+    PumpInTick := False;
+    PumpFinalised := False;
+    PumpQuitting := False;
 
     { The timer only ticks while the form is visible, so this is not just  }
     { cosmetic: showing the dashboard is what starts the pump running.     }

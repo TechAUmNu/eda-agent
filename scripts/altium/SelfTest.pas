@@ -714,6 +714,10 @@ Begin
     SelfTest_Failed := 0;
     SelfTest_Log := '';
 
+    { The handlers below run WITHOUT the pump, so StartMCPPump never     }
+    { assigned the globals they read: on a fresh engine each holds Empty, }
+    { which is not Nil (finding D-F2-1). Same reset as a pump session.    }
+    ResetSessionGlobals(0);
     EnsureWorkspaceDir(0);
 
     // Pure logic tests (no Altium document APIs needed)

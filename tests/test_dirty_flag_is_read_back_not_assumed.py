@@ -378,8 +378,12 @@ def test_save_all_reports_what_it_wrote_from_the_record():
 
 
 def test_the_record_starts_empty_and_a_close_lets_go():
-    pump = load(_ALTIUM / "StatusForm.pas", minimum=10)["StartMCPPump"]
-    assert "BridgeEditedPaths := '';" in pump
+    form = load(_ALTIUM / "StatusForm.pas", minimum=10)
+    # The session reset moved into ResetSessionGlobals (2026.10.12.03),
+    # which StartMCPPump calls; tests/test_live_fresh_pump_globals.py walks
+    # that the assignment is unconditional and comes before any read.
+    assert "ResetSessionGlobals(0);" in form["StartMCPPump"]
+    assert "BridgeEditedPaths := '';" in form["ResetSessionGlobals"]
     close = strip_comments(_application()["App_CloseDocument"])
     assert "ForgetBridgeEdit(FilePath);" in close
     assert _at(close, "Client.CloseDocument(ServerDoc);") < \
