@@ -7,6 +7,7 @@ component placement, trace lengths, layer stackup, board outline, etc.
 """
 
 import json
+import re
 from typing import Any, Optional, Union
 
 from pydantic import ValidationError
@@ -26,6 +27,7 @@ from ..placement import (
 from .bulk_hints import BulkHintTracker
 from .datasheet_hints import tag_response
 from ..bridge.payload import non_finite, payload_safe
+from ..units import MILS_PER_MM, format_length, length_in, normalise_units
 
 
 def _build_objective_report(
@@ -332,6 +334,107 @@ _BOARD_3D_ALIGN = ("center", "none")
 _non_finite = non_finite
 
 
+# ---------------------------------------------------------------------------
+# Rule scope queries.
+#
+# A scope reaches Altium as Scope1Expression / Scope2Expression, assigned
+# as a property: it is never written into script text, so there is nothing
+# to escape. Altium's own query engine compiles it. Its precedence puts
+# And, Or, Xor and Not ABOVE the comparisons (Query Language Reference
+# TR0110, "Brackets and Order of Precedence"), so "IsPad AND HoleSize > 3"
+# reads as "(IsPad AND HoleSize) > 3". Reported: that scope raised
+# "; expected at Line:2, Char:76. Continue execution?" on every call, the
+# rule was created anyway, and the Rules editor later said some rules had
+# incorrect definitions. && and || bind after the comparisons.
+# ---------------------------------------------------------------------------
+
+_SCOPE_TOKEN = re.compile(
+    r"'(?:''|[^'])*'|&&|\|\||<>|<=|>=|[=<>()]|[A-Za-z_][A-Za-z0-9_.]*|\S")
+_SCOPE_LOGIC = {"and", "or", "xor", "not"}
+_SCOPE_COMPARE = {"=", "<>", "<", ">", "<=", ">=", "like"}
+
+
+def _scope_wraps(expr: str) -> list[tuple[int, int]]:
+    """Spans of comparisons sharing a bracket level with And/Or/Xor/Not.
+
+    Each span is one operand of the logical operator at that level, as
+    ``(start, end)`` offsets into ``expr``. The And of ``Between a And b``
+    is read as a logical And too, which changes nothing: neither side of
+    it holds a comparison.
+    """
+    def level():
+        return {"logic": False, "segments": [],
+                "current": {"compare": False, "start": None, "end": None}}
+
+    def extend(lev, start, end):
+        seg = lev["current"]
+        if seg["start"] is None:
+            seg["start"] = start
+        seg["end"] = end
+
+    wraps: list[tuple[int, int]] = []
+
+    def close(lev):
+        segments = lev["segments"] + [lev["current"]]
+        if lev["logic"] and any(s["compare"] for s in segments):
+            wraps.extend((s["start"], s["end"]) for s in segments
+                         if s["compare"] and s["start"] is not None)
+
+    stack = [level()]
+    for m in _SCOPE_TOKEN.finditer(expr):
+        tok, start, end = m.group(0), m.start(), m.end()
+        low = tok.lower()
+        lev = stack[-1]
+        if tok == "(":
+            extend(lev, start, end)
+            stack.append(level())
+        elif tok == ")":
+            if len(stack) > 1:
+                close(stack.pop())
+            extend(stack[-1], start, end)
+        elif low in _SCOPE_LOGIC:
+            lev["logic"] = True
+            lev["segments"].append(lev["current"])
+            lev["current"] = {"compare": False, "start": None, "end": None}
+        else:
+            if low in _SCOPE_COMPARE:
+                lev["current"]["compare"] = True
+            extend(lev, start, end)
+    while stack:
+        close(stack.pop())
+    return wraps
+
+
+def scope_problem(expr: str) -> tuple[str, str]:
+    """``(reason, bracketed form)`` when Altium would misread a scope, else ('', '')."""
+    text = str(expr or "")
+    wraps = _scope_wraps(text)
+    if not wraps:
+        return "", ""
+    inserts = sorted([(s, "(") for s, _ in wraps] + [(e, ")") for _, e in wraps],
+                     key=lambda p: p[0], reverse=True)
+    fixed = text
+    for pos, ch in inserts:
+        fixed = fixed[:pos] + ch + fixed[pos:]
+    return (
+        f"The scope {text!r} has a comparison next to And, Or, Xor or Not "
+        f"at the same bracket level. Altium's query language binds And, "
+        f"Or, Xor and Not tighter than =, <>, <, >, <= and >=, so it reads "
+        f"the comparison against the result of the And rather than as "
+        f"written, and the engine raises a script error dialog that stops "
+        f"the bridge. Write it as {fixed!r}, or join the terms with && or "
+        f"||, which bind after comparisons. Nothing was sent."), fixed
+
+
+def _scope_refusal(expr: str, **extra: Any) -> Optional[dict[str, Any]]:
+    """The reply for a scope Altium would misread, or None to go ahead."""
+    reason, fixed = scope_problem(expr)
+    if not reason:
+        return None
+    return {"success": False, "error": "BAD_SCOPE", "reason": reason,
+            "suggested_scope": fixed, **extra}
+
+
 def register_pcb_tools(mcp):
     """Register PCB tools with the MCP server."""
 
@@ -436,21 +539,28 @@ def register_pcb_tools(mcp):
         )
 
     @mcp.tool()
-    async def pcb_get_net_classes() -> dict[str, Any]:
-        """Get all net classes from the active PCB.
+    async def pcb_get_net_classes(members: bool = True) -> dict[str, Any]:
+        """Get all net classes on the active PCB, with the nets in each.
 
-        Only returns class metadata, IPCB_ObjectClass.MemberCount and
-        MemberName[] are not exposed in Altium's DelphiScript host, so
-        per-member enumeration has to be done by iterating eNetObject and
-        grouping by each net's parent class.
+        Altium's script host does not expose a class's member list, so
+        each class is asked about every net in turn. That is one call per
+        class and net, so on a big board ``members=False`` is quicker when
+        only the names are needed.
+
+        Args:
+            members: Read each class's nets (default). False returns the
+                class names only.
 
         Returns:
-            Dictionary with "net_classes" array (each with name, super_class)
-            and "count"
+            Dictionary with "net_classes" (each with name, super_class and,
+            when members are read, "nets", "member_count" and
+            "probe_errors"), "count" and "members_read". A class with
+            probe_errors above 0 may have more nets than listed.
         """
         bridge = get_bridge()
-        result = await bridge.send_command_async("pcb.get_net_classes", {})
-        return result
+        params = {} if members else {"members": False}
+        return await bridge.send_command_async(
+            "pcb.get_net_classes", params, timeout=90.0)
 
     @mcp.tool()
     async def pcb_create_net_class(
@@ -632,10 +742,18 @@ def register_pcb_tools(mcp):
         ``descriptor`` instead: Altium composes it for display, so it
         names the kind and carries the constraint values.
 
+        A CLEARANCE-FAMILY RULE ALSO CARRIES ``gap_mm``, read from the
+        rule itself. Trust it over the descriptor for Board Outline
+        Clearance, whose descriptor says ``Gap=0mil`` whatever the rule
+        holds (measured on AD 26.10: 0.254 mm and 3 mm both described as
+        0). That rule's per-object table is not exposed to scripts, so a
+        value set only in the table is visible in Design > Rules alone.
+
         Returns:
             Dictionary with "rules" array (each with name, rule_kind,
-            enabled, priority, scope_1, scope_2, comment, descriptor)
-            and "count".
+            enabled, priority, scope_1, scope_2, comment, descriptor, and
+            gap_mm for clearance, component, hole-to-hole and board
+            outline clearance rules) and "count".
         """
         bridge = get_bridge()
         result = await bridge.send_command_async("pcb.get_design_rules", {})
@@ -704,6 +822,8 @@ def register_pcb_tools(mcp):
     @mcp.tool()
     async def pcb_get_clearance_violations(
         net: str = "",
+        offset: int = 0,
+        limit: int = 200,
     ) -> dict[str, Any]:
         """Read the violations ALREADY on the board, optionally filtered
         to one net. Does NOT run DRC.
@@ -740,13 +860,22 @@ def register_pcb_tools(mcp):
         Args:
             net: Net name to filter by (substring match). Empty string
                 returns ALL stored violations.
+            offset: How many matching violations to skip, for paging.
+            limit: How many to return, 200 by default.
 
         Returns:
-            Dict with ``{violation_count, drc_triggered, note,
-            violations}``. Capped at 200.
+            Dict with ``{violation_count, offset, limit, returned,
+            has_more, drc_triggered, note, violations}``.
+            ``violation_count`` is every violation that matched; when
+            ``has_more`` is true, call again with ``offset`` raised by
+            ``returned``.
         """
         bridge = get_bridge()
-        params = {"net": net} if net else {}
+        params: dict[str, Any] = {"net": net} if net else {}
+        if offset:
+            params["offset"] = max(0, int(offset))
+        if limit != 200:
+            params["limit"] = max(1, int(limit))
         return await bridge.send_command_async(
             "pcb.get_clearance_violations", params, timeout=90.0)
 
@@ -780,6 +909,12 @@ def register_pcb_tools(mcp):
         to 100 violations with full location data, so the agent can
         jump straight to the offending spot instead of guessing from
         the description.
+
+        ``drc_confirmed`` is true only when Altium rewrote the .DRC
+        report during this call. A cancelled dialog leaves the old
+        report untouched, so its count, 0 included, belongs to an
+        earlier run. It also stays false when the checker's Create
+        Report File option is off.
 
         Per-violation shape:
           - ``name``, ``description``, ``rule``: text from Altium
@@ -989,20 +1124,59 @@ def register_pcb_tools(mcp):
         return await bridge.send_command_async("pcb.teardrops", {})
 
     @mcp.tool()
-    async def pcb_autoplace_silkscreen() -> dict[str, Any]:
-        """Reposition component designators to clear pads and other silk.
+    async def pcb_autoplace_silkscreen(
+        silk_clearance_mils: float | None = None,
+        mask_clearance_mils: float | None = None,
+        mask_expansion_mils: float = 4,
+        designators: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Move designators that break silk clearance to a clear position.
 
-        For every visible designator, tries a ring of auto-position anchors and
-        keeps the first that overlaps no pad or other silk text; otherwise
-        leaves the designator where it was. First-fit, not a global optimum;
-        pair with the silk audits and `design_visual_review` to check the
-        result.
+        A visible designator that is closer than the silk clearance to
+        anything else on its overlay layer (component outlines, texts,
+        fills), closer than the mask clearance to a pad's mask opening on
+        its side, or off the board, is tried at a ring of auto-position
+        anchors and left on the first that clears. A designator that is
+        already clear is not touched, and one no anchor clears goes back
+        where it was and is listed in ``unplaced_designators`` for a
+        person. First-fit on bounding rectangles, so it errs towards
+        "blocked"; run DRC after.
+
+        Args:
+            silk_clearance_mils: Silk to silk clearance. ``None`` reads the
+                board's Silk To Silk rule.
+            mask_clearance_mils: Silk to solder mask clearance. ``None``
+                reads the board's Silk To Solder Mask rule.
+            mask_expansion_mils: How far a pad's mask opening extends past
+                its copper (default 4, Altium's default).
+            designators: Only these components. ``None`` means all.
+
+        Refused with NO_CLEARANCE, moving nothing, when a clearance is
+        neither given nor readable from an enabled rule.
 
         Returns:
-            {"placed": N, "skipped": M, "total": T}.
+            ``placed``, ``already_clear``, ``unplaced``, ``hidden``,
+            ``total``, the placed and unplaced designators, and each
+            clearance used with its source (``argument`` or the rule's
+            name). ``skipped`` is ``unplaced + hidden``.
         """
+        params: dict[str, str] = {"mask_expansion_mils": str(float(mask_expansion_mils))}
+        for name, val in (("silk_clearance_mils", silk_clearance_mils),
+                          ("mask_clearance_mils", mask_clearance_mils)):
+            if val is not None:
+                if val < 0:
+                    return {"ok": False, "reason": f"{name} cannot be negative"}
+                params[name] = str(float(val))
+        if mask_expansion_mils < 0:
+            return {"ok": False, "reason": "mask_expansion_mils cannot be negative"}
+        if designators:
+            bad = [d for d in designators if "|" in str(d)]
+            if bad:
+                return {"ok": False,
+                        "reason": f"a designator cannot contain |: {bad[0]}"}
+            params["designators"] = "|".join(str(d) for d in designators)
         bridge = get_bridge()
-        return await bridge.send_command_async("pcb.autoplace_silkscreen", {})
+        return await bridge.send_command_async("pcb.autoplace_silkscreen", params)
 
     @mcp.tool()
     async def pcb_tune_length(
@@ -1150,30 +1324,118 @@ def register_pcb_tools(mcp):
         )
 
     @mcp.tool()
-    async def pcb_normalize_vias() -> dict[str, Any]:
-        """Snap every via to its dominant routing-via-style rule.
+    async def pcb_normalize_vias(
+        size_mils: float | None = None,
+        hole_mils: float | None = None,
+        net: str = "",
+        from_size_mils: float | None = None,
+        from_hole_mils: float | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Set free vias to their Routing Via rule's sizes, or to given ones.
 
-        Sets each FREE via's diameter and hole to the rule's preferred values,
-        so a board with mixed/hand-edited via sizes conforms to the design
-        rules. Vias inside components, polygons or dimensions are left alone.
+        Without ``size_mils``/``hole_mils``, each FREE via takes its dominant
+        Routing Via rule's preferred diameter and hole. Vias inside
+        components, polygons or dimensions are left alone.
 
         The preferred values are parsed from each rule's ``descriptor``
         (``PreferedWidth=`` / ``PreferedHoleWidth=``, mil or mm), because no
         constraint member can be read safely off a rule from the script. A
-        descriptor that carries no numbers (the "Templates Used To Check
-        Via" form) yields none: ``via_rule_values`` is then 0, every free via
-        counts in ``no_rule_values``, and nothing changes. A value past a
-        physical ceiling (10000 mil / 254 mm) is not a value. The board is
-        marked modified only when ``changed`` is above 0.
+        value past a physical ceiling (10000 mil / 254 mm) is not a value.
+        A rule in template mode ("Templates Used To Check Via") is refused
+        for its vias: its size fields are not what it checks, and reading
+        them once set nearly every via on a board to a pad no larger than
+        its hole. Use ``pcb_apply_via_template`` for a template rule. Any
+        target without an annular ring is refused. Refused vias are left as
+        they were. The board is marked modified only when a via was
+        written (``changed`` or ``failed`` above 0, and not a dry run).
+
+        Args:
+            size_mils, hole_mils: An explicit diameter and hole, together.
+            net: Only vias on this net.
+            from_size_mils, from_hole_mils: Only vias at this size now
+                (within 0.05 mil), e.g. to fix one group.
+            dry_run: Report what would change and change nothing.
 
         Returns:
-            {"checked": vias seen, "changed": M, "free": free vias,
-             "no_rule_values": free vias left alone because their dominant
-             rule gave no values, "via_rule_values": rules whose descriptor
-             gave both values}.
+            ``checked`` (vias seen), ``changed``, ``free`` (free vias),
+            ``no_rule_values`` (matched vias left alone because their
+            dominant rule gave no values, template rules included),
+            ``via_rule_values`` (rules whose descriptor gave both values),
+            ``matched``, ``unchanged``, ``failed`` (did not read back), the
+            refusal counts, and ``before``/``after``: vias counted by
+            "diameter/hole" in mils. ``success`` is false when any via was
+            refused or failed.
         """
+        if (size_mils is None) != (hole_mils is None):
+            return {"ok": False,
+                    "reason": "give size_mils and hole_mils together, or neither"}
+        params: dict[str, str] = {"dry_run": "true" if dry_run else "false"}
+        for key, val in (("size_mils", size_mils), ("hole_mils", hole_mils),
+                         ("from_size_mils", from_size_mils),
+                         ("from_hole_mils", from_hole_mils)):
+            if val is not None:
+                if not val > 0:
+                    return {"ok": False, "reason": f"{key} must be above zero"}
+                params[key] = str(float(val))
+        if size_mils is not None and not size_mils > hole_mils:
+            return {"ok": False,
+                    "reason": "size_mils must be larger than hole_mils (annular ring)"}
+        if net:
+            params["net"] = net
         bridge = get_bridge()
-        return await bridge.send_command_async("pcb.normalize_vias", {})
+        return await bridge.send_command_async("pcb.normalize_vias", params)
+
+    @mcp.tool()
+    async def pcb_apply_via_template(
+        source_x: float,
+        source_y: float,
+        net: str = "",
+        from_size_mils: float | None = None,
+        from_hole_mils: float | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Make free vias match a source via: its via template, hole and diameter.
+
+        Point at a via that already uses the template you want (set one in
+        Altium's Properties panel if none does), and every other free via,
+        or those matching the filters, takes its template link, mode, hole
+        and diameter. This is how to bring a board in line with a Routing
+        Via rule in template mode. Altium Designer 22 or later.
+
+        The template link is copied the way Altium's own FormatCopy
+        script does it. Diameter and hole are read back; the link has no
+        member to read back, so check one via's template in the Properties
+        panel afterwards. Growing vias can create clearance violations:
+        run DRC with the rules enabled.
+
+        Args:
+            source_x, source_y: A point on the source via, in mils.
+            net: Only vias on this net.
+            from_size_mils, from_hole_mils: Only vias at this size now.
+            dry_run: Report what would change and change nothing.
+
+        Returns:
+            ``source`` (position, size, hole, net), ``changed``, ``failed``,
+            ``before``/``after`` counted by "diameter/hole" in mils.
+            Refused with LOCAL_STACK for a source with a per-layer stack
+            and NO_ANNULAR_RING for a source without a ring.
+        """
+        params: dict[str, str] = {
+            "source_x": str(float(source_x)),
+            "source_y": str(float(source_y)),
+            "dry_run": "true" if dry_run else "false",
+        }
+        for key, val in (("from_size_mils", from_size_mils),
+                         ("from_hole_mils", from_hole_mils)):
+            if val is not None:
+                if not val > 0:
+                    return {"ok": False, "reason": f"{key} must be above zero"}
+                params[key] = str(float(val))
+        if net:
+            params["net"] = net
+        bridge = get_bridge()
+        return await bridge.send_command_async("pcb.apply_via_template", params)
 
     @mcp.tool()
     async def pcb_copy_designators_to_mech(layer: str = "Mechanical1") -> dict[str, Any]:
@@ -3729,6 +3991,64 @@ def register_pcb_tools(mcp):
         )
 
     @mcp.tool()
+    async def pcb_set_text_style(
+        height_mils: float | None = None,
+        stroke_mils: float | None = None,
+        designators: list[str] | None = None,
+        which: str = "designator",
+    ) -> dict[str, Any]:
+        """Set the height and stroke width of component designators or comments.
+
+        Silkscreen text size is usually a fabrication requirement (for
+        example 0.8 mm high with a 0.1 mm stroke: ``height_mils=31.5,
+        stroke_mils=3.94``). Altium's stroke text has a height and a
+        stroke width and no separate character width: the characters
+        scale with the height.
+
+        For free texts use ``obj_modify`` on ``eTextObject`` with
+        ``Height`` and ``StrokeWidth`` (filter ``IsDesignator=false``).
+
+        Args:
+            height_mils: Text height in mils. ``None`` leaves it.
+            stroke_mils: Stroke width in mils. ``None`` leaves it.
+            designators: Only these components (e.g. ``["U1", "R5"]``).
+                ``None`` applies to every component.
+            which: ``"designator"`` (default), ``"comment"`` or ``"both"``.
+
+        At least one of ``height_mils`` / ``stroke_mils`` must be given.
+
+        Returns:
+            Dict with ``matched`` components, ``changed`` and ``failed``
+            texts, ``not_found`` designators, and ``texts``: each one's
+            height and stroke as read back after the write. ``success``
+            is false when any text did not take or a designator was not
+            found.
+        """
+        if height_mils is None and stroke_mils is None:
+            return {"ok": False,
+                    "reason": "give height_mils, stroke_mils or both"}
+        if which not in ("designator", "comment", "both"):
+            return {"ok": False,
+                    "reason": 'which is "designator", "comment" or "both"'}
+        for name, val in (("height_mils", height_mils),
+                          ("stroke_mils", stroke_mils)):
+            if val is not None and not val > 0:
+                return {"ok": False, "reason": f"{name} must be above zero"}
+        bad = [d for d in designators or [] if "|" in str(d)]
+        if bad:
+            return {"ok": False,
+                    "reason": f"a designator cannot contain |: {bad[0]}"}
+        bridge = get_bridge()
+        params: dict[str, str] = {"which": which}
+        if height_mils is not None:
+            params["height_mils"] = str(float(height_mils))
+        if stroke_mils is not None:
+            params["stroke_mils"] = str(float(stroke_mils))
+        if designators:
+            params["designators"] = "|".join(str(d) for d in designators)
+        return await bridge.send_command_async("pcb.set_text_style", params)
+
+    @mcp.tool()
     async def pcb_check_placement_collision(
         designator: str,
         x: int,
@@ -3987,16 +4307,15 @@ def register_pcb_tools(mcp):
         not have is refused with ``UNKNOWN_LAYER`` rather than silently
         retargeting another layer.
 
-        THIS BUILD CANNOT TIE THE NET YET. The layer object's ``Net``
-        member is not part of the script binding (it faulted live as an
-        undeclared identifier, which Altium shows as a modal error
-        dialog), so the bridge no longer touches it. After the checks
-        above the call always answers ``success: false`` with ``applied:
-        false``, an empty ``net_readback`` and a note pointing at the
-        Layer Stack Manager (the plane row's Net Name column); nothing is
-        written and the board is NOT saved. The refusals above
-        (``NOT_A_PLANE``, ``UNKNOWN_LAYER``, ``NET_NOT_FOUND``) still
-        tell you whether the request itself was valid.
+        The net is written to the board's InternalPlaneNetName for that
+        layer and READ BACK before reporting (recorded working on AD
+        26.10.1.6). When it does not read back the net the call answers
+        ``success: false`` with ``applied: false`` and a note pointing at
+        the Layer Stack Manager (the plane row's Net Name column), and the
+        board is NOT marked changed. The layer object's ``Net`` member is
+        never touched: it is not part of the script binding (it faulted
+        live as an undeclared identifier, which Altium shows as a modal
+        error dialog), so there is no second route.
 
         Args:
             layer: Internal plane layer, e.g. "InternalPlane1" or the name
@@ -4005,7 +4324,8 @@ def register_pcb_tools(mcp):
 
         Returns:
             Dictionary with "success", "layer" (the RESOLVED layer),
-            "layer_name", "net", "net_readback", "applied" and "note".
+            "layer_name", "net", "net_readback", "applied", "route" (which
+            write took) and "note".
         """
         bridge = get_bridge()
         result = await bridge.send_command_async(
@@ -4080,13 +4400,17 @@ def register_pcb_tools(mcp):
 
     @mcp.tool()
     async def pcb_repour_polygons() -> dict[str, Any]:
-        """Repour all polygon pours on the active PCB.
+        """Repour every poured polygon on the open PCB, in pour order.
 
-        Triggers a full repour of all polygon copper pours, which
-        recalculates thermal reliefs and clearances.
+        Each polygon is rebuilt through the API, so a changed clearance
+        or board-edge rule takes effect. Shelved polygons stay shelved.
+        ``repoured`` is true only when at least one polygon was rebuilt
+        and none failed; each item reports its copper pieces and poured
+        area before and after, so a repour that changed nothing shows.
 
         Returns:
-            Dictionary confirming repour completed
+            ``repoured``, counts of ``polygons``, ``rebuilt``,
+            ``shelved`` and ``failed``, and per-polygon ``items``
         """
         bridge = get_bridge()
         result = await bridge.send_command_async("pcb.repour_polygons", {})
@@ -4220,15 +4544,22 @@ def register_pcb_tools(mcp):
 
     @mcp.tool()
     async def pcb_place_via(
-        x: int,
-        y: int,
+        x: float,
+        y: float,
         net: str = "",
-        size: int = 50,
-        hole_size: int = 28,
+        size: float = 50,
+        hole_size: float = 28,
         low_layer: str = "TopLayer",
         high_layer: str = "BottomLayer",
+        size_mm: float | None = None,
+        hole_size_mm: float | None = None,
     ) -> dict[str, Any]:
         """Place a via at specific coordinates on the active PCB.
+
+        Sizes take fractions of a mil, or millimetres through ``size_mm``
+        and ``hole_size_mm``, so a 1.2/0.6 mm via is exactly that and
+        matches a metric Routing Via rule. Whole mils made it
+        1.194/0.610 mm. A hole as wide as the pad is refused.
 
         Args:
             x: Via X position in mils
@@ -4238,16 +4569,23 @@ def register_pcb_tools(mcp):
             hole_size: Drill hole diameter in mils (default 28)
             low_layer: Start layer (default "TopLayer")
             high_layer: End layer (default "BottomLayer")
+            size_mm: pad diameter in mm, used instead of ``size``
+            hole_size_mm: hole diameter in mm, used instead of
+                ``hole_size``
 
         Returns:
-            Dictionary with placed via position and size
+            Dictionary with placed via position and size (mils)
         """
+        if size_mm is not None:
+            size = float(size_mm) * MILS_PER_MM
+        if hole_size_mm is not None:
+            hole_size = float(hole_size_mm) * MILS_PER_MM
         bridge = get_bridge()
         params: dict[str, Any] = {
-            "x": str(x),
-            "y": str(y),
-            "size": str(size),
-            "hole_size": str(hole_size),
+            "x": _mils(x),
+            "y": _mils(y),
+            "size": _mils(size),
+            "hole_size": _mils(hole_size),
             "low_layer": low_layer,
             "high_layer": high_layer,
         }
@@ -4383,8 +4721,9 @@ def register_pcb_tools(mcp):
         x: int,
         y: int,
         layer: str = "TopOverlay",
-        height: int = 60,
+        height: float = 60,
         rotation: float = 0,
+        stroke: float = 0,
     ) -> dict[str, Any]:
         """Place a text string on the active PCB.
 
@@ -4395,11 +4734,14 @@ def register_pcb_tools(mcp):
             layer: PCB layer name (default "TopOverlay"). Common choices:
                 "TopOverlay", "BottomOverlay", "TopLayer", "BottomLayer",
                 "Mechanical1"-"Mechanical16"
-            height: Text height in mils (default 60)
+            height: Text height in mils (default 60), decimals allowed
             rotation: Rotation angle in degrees (default 0)
+            stroke: Stroke width in mils; 0 keeps Altium's default.
+                To resize existing designators use ``pcb_set_text_style``.
 
         Returns:
-            Dictionary with placed text properties
+            Dictionary with placed text properties, height and stroke as
+            read back from the placed text
         """
         bridge = get_bridge()
         params: dict[str, Any] = {
@@ -4410,6 +4752,8 @@ def register_pcb_tools(mcp):
             "height": str(height),
             "rotation": str(rotation),
         }
+        if stroke:
+            params["stroke"] = str(stroke)
         result = await bridge.send_command_async("pcb.place_text", params)
         return result
 
@@ -4536,6 +4880,11 @@ def register_pcb_tools(mcp):
                     or ``"All"``.
                 Mixing predicates across kinds (e.g., ``InNet`` on a
                 differential_pairs rule) creates a rule that never matches.
+                Bracket a comparison joined by And/Or/Xor/Not:
+                ``"IsPad And (HoleSize > 3)"``, or use ``&&``/``||``.
+                Altium binds And tighter than ``>``, and an unbracketed
+                ``"IsPad And HoleSize > 3"`` is refused before anything
+                is sent, with the bracketed form in ``suggested_scope``.
             net_scope: Which nets the rule applies between. Options:
                 ``"different_nets"`` (default) for Clearance rules;
                 ``"any_net"`` for all-pairs; ``"same_net"`` for same-net
@@ -4558,6 +4907,10 @@ def register_pcb_tools(mcp):
         ``pcb_set_rule_properties`` (gap_mils field), which dispatches
         through Rule.RuleKind without needing the symbol.
         """
+        if scope:
+            refusal = _scope_refusal(scope, created=False)
+            if refusal:
+                return refusal
         bridge = get_bridge()
         params: dict[str, Any] = {
             "name": name,
@@ -4772,58 +5125,45 @@ def register_pcb_tools(mcp):
 
     @mcp.tool()
     async def pcb_set_via_soldermask_relief(
-        expansion_mils: int = 4,
+        expansion_mils: float = 4,
         net: str = "",
     ) -> dict[str, Any]:
-        """REFUSED on this Altium build: the write crashes the engine.
+        """Open the solder mask round each via's barrel, measured from the
+        hole edge, on both sides.
 
-        Setting a via's soldermask expansion from script raises an access
-        violation inside ScriptingSystem.DLL on AD 26.10.1.6, measured
-        twice on a scratch board with three vias and nothing else, once
-        through BeginModify and once through SendMessageToRobots. The
-        engine shows a modal before any handler guard can run, so the
-        polling loop stops and the session needs a manual restart. The
-        handler refuses rather than attempt it: every caller who tried
-        lost their session and changed nothing on the board.
+        Every via, or those on ``net``, gets its mask expansion set as a
+        manual value with "from hole edge" on, so the opening is the hole
+        plus ``expansion_mils`` all round. Both sides are written: a via
+        stores a bottom value even while its sides are linked, and that
+        value takes effect if they are ever unlinked. Each via is read
+        back, and ``vias_verified`` counts those holding the value.
 
-        TENT VIAS WITH A RULE INSTEAD. Altium's own route is a Solder
-        Mask Expansion rule, which covers every via at once and survives
-        a repour, where a per-via write would not. Create it with
+        WRITTEN THROUGH THE VIA'S PAD CACHE. Assigning the expansion
+        straight onto a via crashes Altium's scripting engine (an access
+        violation in ScriptingSystem.DLL, measured on AD 26.10); the same
+        value written into the cache a via shares with pads takes and
+        reads back, so the handler only ever uses that route.
+
+        A Solder Mask Expansion rule scoped ``IsVia`` is the alternative
+        that also covers vias placed later:
         ``pcb_create_design_rule(rule_type="solder_mask_expansion",
-        scope="IsVia", value=<negative mils>)``. A negative expansion
-        contracts the mask opening; the rule is also editable by hand in
-        Design > Rules > Mask.
-
-        REFUSED HERE, NOT AT THE BRIDGE, on purpose. The handler refuses
-        too, but reaching it means sending the command, and a session
-        running a deployed script older than 2026.09.10.3 still has the
-        write in it. Sending would take down exactly the session this
-        exists to protect. Nothing is sent.
+        scope="IsVia", value=<mils>)``.
 
         Args:
-            expansion_mils: accepted and unused.
-            net: accepted and unused.
+            expansion_mils: Mask expansion from the hole edge, in mils.
+                Default 4.
+            net: Only vias on this net. Empty means every via.
 
         Returns:
-            An error dict with `NOT_SCRIPTABLE` and the rule route.
+            ``vias_matched``, ``vias_verified``, ``expansion_mils``,
+            ``net``, ``from_hole_edge``.
         """
-        return {
-            "success": False,
-            "error": "NOT_SCRIPTABLE",
-            "reason": (
-                "Writing a via soldermask expansion crashes the Altium "
-                "scripting engine on this build (access violation in "
-                "ScriptingSystem.DLL), which stops the polling loop and "
-                "needs a manual restart, so nothing was sent."
-            ),
-            "instead": (
-                "Tent vias with a Solder Mask Expansion rule scoped IsVia, "
-                "in Design > Rules > Mask. pcb_create_design_rule cannot "
-                "author that rule kind; app_run_menu opens the dialog and "
-                "app_drive_dialogs fills it in."
-            ),
-            "requested": {"expansion_mils": expansion_mils, "net": net},
-        }
+        params: dict[str, Any] = {"expansion_mils": format_length(expansion_mils)}
+        if net.strip():
+            params["net"] = net.strip()
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.set_via_soldermask_relief", params)
 
     @mcp.tool()
     async def pcb_get_mech_layer_names(
@@ -5040,7 +5380,11 @@ def register_pcb_tools(mcp):
         """Delete a PCB object closest to specific coordinates on a layer.
 
         Finds the nearest matching object within 100 mils of the given
-        coordinates and removes it from the board.
+        coordinates and removes it from the board. Distance is to the
+        object itself: a track by its segment less half its width, an arc
+        by its curve, a via by its centre less its radius, anything else
+        by its bounding rectangle (0 inside it). A point anywhere on a
+        track finds that track.
 
         Args:
             x: Target X position in mils
@@ -5056,11 +5400,13 @@ def register_pcb_tools(mcp):
                 "polygon" - Copper polygon pour
                 "region" - Region / split-plane
                 "component" - Placed component
-                (polygon/region/component/arc are matched by bounding-box
-                centre; for bulk/filter-based deletes use ``obj_delete``)
+                (for bulk/filter-based deletes use ``obj_delete``)
 
         Returns:
-            Dictionary with deleted status, object_type, and distance_mils
+            Dictionary with deleted status, object_type, distance_mils,
+            the deleted object's net and bbox_mils, and others_as_close:
+            how many other objects were exactly as near, so a pick among
+            equals is visible.
         """
         bridge = get_bridge()
         result = await bridge.send_command_async(
@@ -5087,7 +5433,13 @@ def register_pcb_tools(mcp):
         Returns:
             Dictionary with "pads" array (each with name, component, x, y,
             net, layer, shape, top_x_size, top_y_size, hole_size, rotation,
-            is_smd, solder_mask_expansion, paste_mask_expansion) and "count"
+            is_smd, solder_mask_expansion, solder_mask_bottom_expansion,
+            solder_mask_separate, paste_mask_expansion) and "count".
+            solder_mask_expansion is the TOP side when
+            solder_mask_separate is true and both sides when it is false;
+            the bottom value is stored either way and takes effect once
+            the sides are unlinked. Expansions read 0 when the pad follows
+            the board's rule.
         """
         bridge = get_bridge()
         params: dict[str, Any] = {}
@@ -5159,15 +5511,25 @@ def register_pcb_tools(mcp):
           - ``net``: assigned net (often ``GND`` / a power rail)
           - ``layer``: ``TopLayer``, ``InternalPlane1``, etc.
           - ``hatch_style``: ``Solid`` / ``45Degree`` / ``Horizontal`` ...
-          - ``pour_over``, ``remove_dead_copper``: pour-policy flags
-          - ``area_sqmils`` / ``area_mm2``: ACTUAL copper area after
-            the pour has been computed (excludes thermal-relief and
-            clearance cutouts). Use this for current-capacity audits
-            (multiply by copper thickness for cubic copper, then
-            apply IPC-2152 / IPC-2221).
+          - ``pour_over``: pour-policy flag
+          - ``area_sqmils`` / ``area_mm2``: the polygon OUTLINE's area.
+            It does not change when the pour does, and it includes
+            copper a clearance or the board edge has cut away.
+          - ``copper_area_mm2``: the copper actually poured, summed
+            over the polygon's regions with the holes cleared around
+            other nets taken off. Use this for current-capacity audits
+            (multiply by copper thickness for cubic copper, then apply
+            IPC-2152 / IPC-2221). A hatched pour is tracks, so it
+            reports ``copper_pieces`` with a region area of 0.
+          - ``copper_area_exact``: false when a region's holes could not
+            be read, in which case ``copper_area_mm2`` is the regions'
+            outer area and overstates the copper.
+          - ``copper_pieces``: how many pieces the pour is in; 0 on a
+            poured polygon means nothing was poured.
+          - ``poured``: false for a shelved polygon.
           - ``bbox_mm2``: bounding-rectangle area; ratio
-            ``area_mm2 / bbox_mm2`` shows how much of the outline is
-            real copper. Low ratio = pour is fighting with cutouts.
+            ``copper_area_mm2 / bbox_mm2`` shows how much of the
+            outline is real copper.
           - ``vertex_count``: a smooth pour has 4-8 vertices; many
             more usually means hand-editing that may have introduced
             narrow necks.
@@ -5568,15 +5930,16 @@ def register_pcb_tools(mcp):
 
     @mcp.tool()
     async def pcb_place_pad(
-        x: int,
-        y: int,
+        x: float,
+        y: float,
         name: str = "",
         net: str = "",
         shape: str = "round",
-        x_size: int = 60,
-        y_size: int = 60,
-        hole_size: int = 0,
+        x_size: Optional[float] = None,
+        y_size: Optional[float] = None,
+        hole_size: float = 0,
         layer: str = "TopLayer",
+        units: str = "mil",
     ) -> dict[str, Any]:
         """Place a standalone pad on the active PCB.
 
@@ -5588,29 +5951,37 @@ def register_pcb_tools(mcp):
             x, y: Position in mils
             name: Pad designator / label (optional)
             net: Net to connect to (optional)
-            shape: "round" (default) / "rect" / "oct"
-            x_size, y_size: Pad dimensions in mils
-            hole_size: Drill diameter in mils (0 = SMD)
+            shape: "round" (default) / "rect" / "oct", or spelled out as
+                the library tools take them ("rectangular", "octagonal").
+                Any other word is refused; it used to become a round pad.
+            x_size, y_size: Pad dimensions (default 60 mil)
+            hole_size: Drill diameter (0 = SMD)
             layer: Copper layer (default "TopLayer")
+            units: "mil" (default) or "mm", for the position and every
+                size, kept exact rather than rounded to whole mils.
 
         Returns:
             Dictionary confirming pad placement
         """
+        if normalise_units(units) is None:
+            return {"error": f"units must be 'mil' or 'mm', not {units!r}"}
+        params: dict[str, Any] = {
+            "x": format_length(x),
+            "y": format_length(y),
+            "name": name,
+            "net": net,
+            "shape": shape,
+            "x_size": format_length(
+                length_in(units, 60) if x_size is None else x_size),
+            "y_size": format_length(
+                length_in(units, 60) if y_size is None else y_size),
+            "hole_size": format_length(hole_size),
+            "layer": layer,
+        }
+        if normalise_units(units) == "mm":
+            params["units"] = "mm"
         bridge = get_bridge()
-        result = await bridge.send_command_async(
-            "pcb.place_pad",
-            {
-                "x": str(x),
-                "y": str(y),
-                "name": name,
-                "net": net,
-                "shape": shape,
-                "x_size": str(x_size),
-                "y_size": str(y_size),
-                "hole_size": str(hole_size),
-                "layer": layer,
-            },
-        )
+        result = await bridge.send_command_async("pcb.place_pad", params)
         return result
 
     @mcp.tool()
@@ -5832,11 +6203,16 @@ def register_pcb_tools(mcp):
         not do it: it dispatches through the base reference and reports
         a match while changing nothing.
 
+        A clearance-family rule also returns ``gap_mm``, read from the
+        rule itself; for Board Outline Clearance the descriptor says
+        ``Gap=0mil`` whatever the rule holds, so read ``gap_mm``.
+
         Args:
             name: Design rule name (e.g., "Clearance", "Width", "RoutingVias").
 
         Returns:
-            Dict with name, rule_kind, enabled, priority, descriptor.
+            Dict with name, rule_kind, enabled, priority, descriptor, and
+            gap_mm for a clearance-family rule.
         """
         bridge = get_bridge()
         return await bridge.send_command_async(
@@ -5857,6 +6233,12 @@ def register_pcb_tools(mcp):
         favored_width_mils: int | None = None,
         min_hole_size_mils: int | None = None,
         max_hole_size_mils: int | None = None,
+        min_via_size_mils: float | None = None,
+        max_via_size_mils: float | None = None,
+        preferred_via_size_mils: float | None = None,
+        min_via_hole_mils: float | None = None,
+        max_via_hole_mils: float | None = None,
+        preferred_via_hole_mils: float | None = None,
     ) -> dict[str, Any]:
         """Update metadata AND constraint values of a named PCB design rule.
 
@@ -5871,6 +6253,13 @@ def register_pcb_tools(mcp):
         - Width (kind 2): ``min_width_mils`` / ``max_width_mils`` /
           ``favored_width_mils`` (applied to every layer).
         - HoleSize (kind 42): ``min_hole_size_mils`` / ``max_hole_size_mils``.
+        - Routing Via: ``min_via_size_mils`` / ``max_via_size_mils`` /
+          ``preferred_via_size_mils`` and the three ``*_via_hole_mils``.
+          Checked as a set first (minimum <= preferred <= maximum, every
+          diameter larger than its hole) and each read back; the reply
+          carries ``via_sizes_mils`` and ``via_sizes_written``. A rule in
+          template mode keeps checking its templates, and ``via_note``
+          says so; this cannot switch a rule between modes.
 
         THE GAP WRITE IS READ BACK, not assumed. A rule kind that does
         not really carry Gap can accept the assignment and keep its old
@@ -5897,7 +6286,10 @@ def register_pcb_tools(mcp):
         Args:
             name: Rule name to update.
             enabled: Whether DRC enforces the rule.
-            scope1 / scope2: Rule scope query expressions.
+            scope1 / scope2: Rule scope query expressions. A comparison
+                joined by And/Or/Xor/Not must be bracketed
+                (``"IsPad And (HoleSize > 3)"``) or joined with ``&&``;
+                an unbracketed one is refused before anything is sent.
             comment: Free-form comment.
             gap_mils: Clearance gap. Applies to Clearance,
                 ComponentClearance, and HoleToHoleClearance rules.
@@ -5909,6 +6301,10 @@ def register_pcb_tools(mcp):
         Returns:
             Dict with name, rule_kind, and properties_updated count.
         """
+        for given in (scope1, scope2):
+            refusal = _scope_refusal(given, properties_updated=0) if given else None
+            if refusal:
+                return refusal
         params: dict[str, Any] = {"name": name}
         for key, value in [
             ("scope1", scope1),
@@ -5921,6 +6317,12 @@ def register_pcb_tools(mcp):
             ("favored_width_mils", favored_width_mils),
             ("min_hole_size_mils", min_hole_size_mils),
             ("max_hole_size_mils", max_hole_size_mils),
+            ("min_via_size_mils", min_via_size_mils),
+            ("max_via_size_mils", max_via_size_mils),
+            ("preferred_via_size_mils", preferred_via_size_mils),
+            ("min_via_hole_mils", min_via_hole_mils),
+            ("max_via_hole_mils", max_via_hole_mils),
+            ("preferred_via_hole_mils", preferred_via_hole_mils),
         ]:
             if value is not None:
                 params[key] = str(value)

@@ -17,6 +17,7 @@ from ..bench import copy_board
 from ..drc import run_drc
 from ..model import LayoutBoard
 from .router import route_adaptive
+from .stages import finish_report
 
 
 def route_job(params: dict[str, Any]) -> dict[str, Any]:
@@ -27,18 +28,29 @@ def route_job(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("layout_route job requires a 'board' (LayoutBoard or its dict)")
     nets = params.get("nets")
     board, old_pours = _without_old_pours(board)
+    # The live view (design/live.py): the board before, progress while
+    # routing (throttled), the routed board after.
+    from ...design import live
+    live.publish_safe(board, f"Routing {len(nets) if nets else 'all'} nets.", "route")
     t0 = time.perf_counter()
     r = route_adaptive(board, nets=frozenset(nets) if nets else None,
-                       planes=bool(params.get("planes", True)))
+                       planes=bool(params.get("planes", True)),
+                       stages=params.get("stages"),
+                       log=live.progress_logger("route"))
     out = r.apply()
     new_tracks = out.tracks[len(board.tracks):]
     new_vias = out.vias[len(board.vias):]
     drc = run_drc(out)
+    stages = finish_report(r, out)
+    pub = live.publish_safe(out, f"Routed: {len(drc.unrouted)} nets still open, "
+                      f"{len(drc.violations)} clearance violations.", "route")
     rep = r.report
     wanted = set(nets) if nets else None
     unrouted = {n: k for n, k in drc.unrouted.items() if wanted is None or n in wanted}
     return {
         "board": board.name,
+        # pcb_autoroute_apply republishes this version once it is written.
+        "live_version": (pub or {}).get("version"),
         "summary": {
             "completion": round(drc.completion, 4),
             "missing_connections": drc.missing_connections,
@@ -53,16 +65,44 @@ def route_job(params: dict[str, Any]) -> dict[str, Any]:
             "old_pours": old_pours,
             "iterations": rep.iterations,
             "seconds": round(time.perf_counter() - t0, 1),
+            "sharp_bends": stages["sharp_bends"],
+            "unreached_pads": len(stages["unreached"]),
+            "vias_in_pads": len(stages["via_in_pad"]),
         },
         "unrouted": unrouted,
+        # What the planned stages did (see stages.py): every via in a pad,
+        # each pair and bus, and every pad left unreached with its place
+        # and the nets in its way.
+        "via_in_pad": stages["via_in_pad"],
+        "pairs": stages["pairs"],
+        "buses": stages["buses"],
+        "unreached": stages["unreached"],
+        "fanout": stages["fanout"],
+        "pin_lanes": stages["pin_lanes"],
+        "fallback": stages["fallback"],
         "violations": [v.as_dict() for v in drc.violations[:50]],
         "tracks": [{"x1": t.x1, "y1": t.y1, "x2": t.x2, "y2": t.y2, "width": t.width,
                     "layer": t.layer, "net_name": t.net} for t in new_tracks],
         "vias": [{"x": v.x, "y": v.y, "size": v.diameter, "hole_size": v.hole,
                   "low_layer": v.low_layer, "high_layer": v.high_layer, "net": v.net}
                  for v in new_vias],
-        "notes": _notes(r),
+        "notes": _notes(r) + _stage_notes(stages),
     }
+
+
+def _stage_notes(stages: dict) -> list[str]:
+    notes = []
+    if stages["fallback"]:
+        notes.append("The planned stages left connections unmade, so the board was "
+                     + stages["fallback"] + ".")
+    if stages["via_in_pad"]:
+        notes.append(f"{len(stages['via_in_pad'])} vias sit in pads (listed in via_in_pad, "
+                     "each with its kind): the fabrication notes must ask for them filled "
+                     "and capped.")
+    if stages["unreached"]:
+        notes.append(f"{len(stages['unreached'])} pads could not be reached; unreached gives "
+                     "each one's place and the nets in its way.")
+    return notes
 
 
 def _without_old_pours(board: LayoutBoard) -> tuple[LayoutBoard, list[str]]:

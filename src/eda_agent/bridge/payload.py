@@ -324,8 +324,10 @@ def stamp_key_route(key: str) -> str:
     ``Description`` its own description (``ComponentDescription``), all
     properties, never parameters: a ``Description`` key used to create a
     second, visible parameter called Description at the sheet origin.
-    ``Footprint`` is read-only from DelphiScript and is skipped. Any other
-    key is a parameter, modified in place or created.
+    ``Footprint`` repoints the part's footprint model (the handler writes
+    it through ``SetPlacedFootprintName`` and counts it only when the new
+    name reads back; it used to be skipped as read-only). Any other key is
+    a parameter, modified in place or created.
 
     ``Value`` and ``Footprint`` match exactly, as they always have;
     ``Comment`` and ``Description`` match in any case. Mirrors the
@@ -343,7 +345,7 @@ def stamp_key_route(key: str) -> str:
     if lower == "description":
         return "property:ComponentDescription"
     if key == "Footprint":
-        return "skipped:read-only"
+        return "model:Footprint"
     return "parameter"
 
 

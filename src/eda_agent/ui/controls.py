@@ -41,6 +41,7 @@ from ctypes import POINTER, byref, c_long, wintypes
 from typing import Callable, Optional
 
 from . import windows as win
+from .captions import plain
 
 #: comtypes itself, kept apart from _AVAILABLE: the apartment guard below
 #: needs CoInitialize even on a host where oleacc's type library failed.
@@ -402,7 +403,7 @@ def find(window, label: str, role: Optional[str] = None,
     without them the result is exactly the first match, as it always was.
     """
     def flat(text):
-        return str(text or "").replace("&", "").strip().lower()
+        return plain(text).replace("&", "").strip().lower()
 
     def bare(text):
         # Wizard arrows and the ellipsis that marks a dialog-opening
@@ -639,7 +640,7 @@ def select_row(hwnd: int, name: str, settle: float = 0.6) -> dict:
         return {"ok": False, "reason": "that control exposes no rows"}
 
     def flat(text):
-        return str(text or "").strip().lower()
+        return plain(text).strip().lower()
 
     match = next((r for r in rows if flat(r["name"]) == flat(name)), None)
     if match is None:
@@ -815,7 +816,7 @@ def select_item(hwnd: int, name: str, settle: float = 0.6) -> dict:
     nothing is reported rather than believed.
     """
     def flat(text):
-        return str(text or "").replace("&", "").strip().lower()
+        return plain(text).replace("&", "").strip().lower()
 
     choices = list_choices(hwnd)
     if not choices:
@@ -869,7 +870,7 @@ def expand(hwnd: int, name: str, want: bool = True,
     whose contents do not exist as far as a caller is concerned.
     """
     def flat(text):
-        return str(text or "").strip().lower()
+        return plain(text).strip().lower()
 
     rows = list_rows(hwnd)
     if not rows:
@@ -920,7 +921,7 @@ def list_cells(hwnd: int, row_name: str) -> dict:
     is still addressable by where it sits.
     """
     def flat(text):
-        return str(text or "").strip().lower()
+        return plain(text).strip().lower()
 
     rows = list_rows(hwnd)
     match = next((r for r in rows if flat(r["name"]) == flat(row_name)), None)
@@ -1089,7 +1090,7 @@ def list_tabs(window) -> list:
 def select_tab(window, name: str, settle: float = 0.6) -> dict:
     """Switch to a tab page by name, and verify it is the selected one."""
     def flat(text):
-        return str(text or "").replace("&", "").strip().lower()
+        return plain(text).replace("&", "").strip().lower()
 
     tabs = list_tabs(window)
     if not tabs:
@@ -1182,7 +1183,7 @@ def activate_row(hwnd: int, name: str, double: bool = False,
     to do the second.
     """
     def flat(text):
-        return str(text or "").strip().lower()
+        return plain(text).strip().lower()
 
     rows = list_rows(hwnd)
     match = next((r for r in rows if flat(r["name"]) == flat(name)), None)

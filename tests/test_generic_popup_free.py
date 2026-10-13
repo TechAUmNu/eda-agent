@@ -39,7 +39,10 @@ _GENERIC = _ROOT / "scripts" / "altium" / "Generic.pas"
 _HELPERS = ["SchObjectIsPlainShape", "SchObjectLacksVertexArray",
             "SchPropAbsentOn", "SchVertexReadName", "SchObjectLacksIsMirrored",
             "SchObjTypeTag", "SchObjectHasText", "SchObjectHasIsHidden",
-            "SchObjectHasOrientation", "PinEndX", "PinEndY"]
+            "SchObjectHasOrientation", "PinEndX", "PinEndY",
+            # upstream's TextColor guard (2026.10.13 merge): MatchesFilter
+            # and SetSchProperty preflight through these.
+            "SchObjectHasTextColor", "UnsupportedSchProperty"]
 
 
 def _generic():

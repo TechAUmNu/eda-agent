@@ -45,7 +45,7 @@ from tests.test_bridge_record_names_one_file import (
     SCRATCH, SHEET, Listed, ServerDoc, World, _ALTIUM, _key)
 from tests.test_live_editor_component_is_never_read import (
     A, BaseRule, Board, EditLib, GenLib, NComp, _GENERIC, _IList,
-    _StrListClass, _client, _gen_ns, _via)
+    _StrListClass, _client, _gen_ns, _via, normalize_vias_helpers)
 
 _PCB = load(_ALTIUM / "PCB.pas", minimum=40)
 _LIBRARY = load(_ALTIUM / "Library.pas", minimum=40)
@@ -110,6 +110,7 @@ def _vias(board, dominant_halts=False):
         "MMToCoord": lambda mm: round(mm * 10000000 / 25.4),
         "StrToFloatDef": lambda s, d: float(s) if s else d,
     }
+    normalize_vias_helpers(ns)
     build(_PCB, ["ViaRuleValue", "PCB_NormalizeVias"], ns)
     return ns, state, marked, msgs
 
@@ -148,8 +149,13 @@ def test_a_template_descriptor_board_never_makes_the_unproven_call():
                   lambda v: BaseRule("RoutingVias"))
     ns, state, marked, msgs = _vias(board, dominant_halts=True)
     reply = ns["PCB_NormalizeVias"]({}, "r")
-    assert reply[1] == {"checked": 2, "changed": 0, "free": 2,
-                        "no_rule_values": 2, "via_rule_values": 0}
+    # The merged reply (2026.10.13) carries upstream's extra counts and
+    # histograms too; these are the five this test always pinned.
+    assert {k: reply[1][k] for k in ("checked", "changed", "free",
+                                     "no_rule_values", "via_rule_values")} == {
+        "checked": 2, "changed": 0, "free": 2,
+        "no_rule_values": 2, "via_rule_values": 0}
+    assert reply[1]["refused_template_rule"] == 2
     assert state["calls"] == 0 and msgs == []
 
 

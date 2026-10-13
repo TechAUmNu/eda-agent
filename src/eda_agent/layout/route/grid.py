@@ -223,6 +223,43 @@ class RouteGrid:
         else:
             self._merge(layer, win, D, owner)
 
+    def remove_shapes(self, items) -> None:
+        """Take shapes out again, (layer, owner, shape) as added: the
+        fields round them are rebuilt from the shapes that remain."""
+        gone = {id(s) for _, _, s in items}
+        if not gone:
+            return
+        self.shapes = [it for it in self.shapes if id(it[2]) not in gone]
+        by_layer: dict[int, list] = {}
+        for li, _, s in items:
+            by_layer.setdefault(li, []).append(s)
+        reach = self.reach
+        for li, shapes in by_layer.items():
+            x0 = min(s.bbox[0] for s in shapes) - reach
+            y0 = min(s.bbox[1] for s in shapes) - reach
+            x1 = max(s.bbox[2] for s in shapes) + reach
+            y1 = max(s.bbox[3] for s in shapes) + reach
+            i0, j0, i1, j1 = self.spec.window(x0, y0, x1, y1)
+            if i0 >= i1 or j0 >= j1:
+                continue
+            win = (slice(j0, j1), slice(i0, i1))
+            self.fd1[(slice(None), li) + win] = FAR
+            self.fd2[(slice(None), li) + win] = FAR
+            self.fid1[(slice(None), li) + win] = NONE
+            self.fid2[(slice(None), li) + win] = NONE
+            for layer, owner, s in self.shapes:
+                if layer != li or owner == KEEPOUT:
+                    continue
+                bx0, by0, bx1, by1 = s.bbox
+                a0, b0, a1, b1 = self.spec.window(bx0 - reach, by0 - reach, bx1 + reach, by1 + reach)
+                a0, b0, a1, b1 = max(a0, i0), max(b0, j0), min(a1, i1), min(b1, j1)
+                if a0 >= a1 or b0 >= b1:
+                    continue
+                X = self.spec.x(np.arange(a0, a1))[None, :]
+                Y = self.spec.y(np.arange(b0, b1))[:, None]
+                D = shape_distance(s, X, Y).astype(np.float32)
+                self._merge(li, (slice(b0, b1), slice(a0, a1)), D, owner)
+
     def _merge(self, layer, win, D, owner):
         f = self.field_of(owner)
         d1 = self.fd1[f, layer][win]

@@ -181,6 +181,29 @@ def register_design_tools(mcp) -> None:
         ]
         return action
 
+    def _mirror_to_live_view(event, stage, status, text, path, kind, question,
+                             revision, topic) -> None:
+        """The live view's decision log shows the run's journal entries
+        beside the board, so a run that logs to the journal is visible
+        without also calling design_live_note. Never fails the log."""
+        line = {
+            "stage_enter": f"Starting {stage}.",
+            "stage_result": f"{stage}: {status}" + (f". {text}" if text else "."),
+            "plan_revision": f"Plan revision {revision}" + (f": {text}" if text else "."),
+            "artifact": f"Wrote {kind or 'a file'}: {path}",
+            "blocked": f"Blocked: {question}",
+            "resolved": f"Resolved: {text}",
+            "note": text,
+        }.get(event, "")
+        if not line.strip():
+            return
+        section = (topic or "note") if event == "note" else (stage or event)
+        try:
+            from ..design import live
+            live.note(section, line)
+        except Exception:  # noqa: BLE001 - the view never fails the journal
+            pass
+
     def _session_store():
         from ..config import get_config
         from ..design.session import SessionStore
@@ -225,6 +248,8 @@ def register_design_tools(mcp) -> None:
         kind: str = "",
         question: str = "",
         revision: int = 0,
+        topic: str = "",
+        data: Optional[Union[dict, str]] = None,
     ) -> dict[str, Any]:
         """Append one event to a design-session journal.
 
@@ -233,15 +258,34 @@ def register_design_tools(mcp) -> None:
         ``plan_revision`` (``revision``), ``artifact`` (``path``, ``kind``),
         ``blocked`` (``question``), ``resolved`` (``text`` = answer),
         ``note`` (``text``). Returns the updated derived state.
+
+        ``data`` (a dict, or JSON text) goes with a ``stage_result`` or a
+        ``note``. On a stage_result it is the evidence for the exit gate:
+        for placement, routing, pours_tuning and verification, pass the
+        ``pcb_layout_audit`` result (and the ``pcb_calc_length_match`` or
+        ``proj_run_erc`` reply under its own tool name) and the reply
+        carries ``gate``, the verdict on those numbers. A stage logged ok
+        whose numbers fail its gate is sent back by
+        ``design_next_action``. ``topic`` files a note under a section of
+        ``design_session_report``: placement, stackup, critical_routes,
+        power, planes (fan-out and via-in-pad too), silkscreen,
+        verification, simulation, issue, or decision.
         """
         journal = _resolve_journal(session_id)
         if journal is None:
             return {"error": "no active design session; call design_session_start first"}
+        if isinstance(data, str):
+            try:
+                data = json.loads(data) if data.strip() else None
+            except json.JSONDecodeError as exc:
+                return {"error": f"data is not valid JSON: {exc}"}
+        if data is not None and not isinstance(data, dict):
+            return {"error": "data must be a JSON object"}
         try:
             if event == "stage_enter":
                 journal.enter_stage(stage)
             elif event == "stage_result":
-                journal.stage_result(stage, status, verdict=text)
+                journal.stage_result(stage, status, verdict=text, data=data)
             elif event == "plan_revision":
                 journal.plan_revision(revision, summary=text)
             elif event == "artifact":
@@ -251,12 +295,20 @@ def register_design_tools(mcp) -> None:
             elif event == "resolved":
                 journal.resolved(text)
             elif event == "note":
-                journal.note(text)
+                journal.note(text, topic=topic, data=data)
             else:
                 return {"error": f"unknown event kind: {event!r}"}
         except ValueError as e:
             return {"error": str(e)}
-        return {"session_id": journal.session_id, "state": asdict(journal.state())}
+        _mirror_to_live_view(event, stage, status, text, path, kind, question,
+                             revision, topic)
+        out: dict[str, Any] = {"session_id": journal.session_id,
+                               "state": asdict(journal.state())}
+        if event == "stage_result" and data:
+            from ..design.autonomy import MEASURED_GATES, evaluate_gate
+            if stage in MEASURED_GATES:
+                out["gate"] = evaluate_gate(stage, data)
+        return out
 
     @mcp.tool()
     async def design_session_status(session_id: str = "") -> dict[str, Any]:
@@ -281,17 +333,23 @@ def register_design_tools(mcp) -> None:
         journal = _resolve_journal(session_id)
         if journal is None:
             return {"error": "no design sessions found; start one with design_session_start"}
-        state = journal.state()
+        from ..design.autonomy import apply_measured_gates
+        state, gates = apply_measured_gates(journal.state(), journal.events())
         if state.open_question:
             guidance = f"BLOCKED: ask the user: {state.open_question}"
         elif state.complete:
             guidance = "All 13 pipeline stages complete."
         else:
             guidance = f"Next stage: {state.next_stage}"
+            sent_back = gates.get(state.next_stage)
+            if sent_back and sent_back["verdict"] == "fail":
+                guidance += (" (its logged numbers fail the exit gate: "
+                             + "; ".join(sent_back["failed"]) + ")")
         return {
             "session_id": journal.session_id,
             "guidance": guidance,
             "state": asdict(state),
+            "gates": gates,
         }
 
     @mcp.tool()
@@ -308,13 +366,19 @@ def register_design_tools(mcp) -> None:
         the ``exit_gate`` that marks it done, and, on ``blocked``, the
         ``open_question`` to put to the user. Bounded retries: a stage that
         fails repeatedly escalates to ``blocked`` instead of looping forever.
+
+        The layout stages (placement, routing, pours_tuning, verification)
+        have measured gates: the reply also carries ``gate``, the numbers
+        and the values that pass, and ``last_gate``, the verdict on numbers
+        already logged for the stage. A stage logged ok whose logged numbers
+        fail its gate comes back as ``retry``, with the failing numbers in
+        ``guidance``. A stage logged with no numbers is taken as logged.
         """
         journal = _resolve_journal(session_id)
         if journal is None:
             return {"error": "no design sessions found; start one with design_session_start"}
-        from ..design.state_machine import next_action as _next_action
-        action = _next_action(journal.state())
-        return _adapt_action(asdict(action))
+        from ..design.autonomy import measured_next_action
+        return _adapt_action(measured_next_action(journal.state(), journal.events()))
 
     @mcp.tool()
     async def design_autonomy_guide() -> dict[str, Any]:
@@ -328,6 +392,146 @@ def register_design_tools(mcp) -> None:
         """
         from ..design.autonomy import autonomy_guide
         return autonomy_guide()
+
+    @mcp.tool()
+    async def design_session_report(session_id: str = "",
+                                    output_path: str = "") -> dict[str, Any]:
+        """Write up a design run from its session journal, as markdown.
+
+        Assembled only from what the run recorded: the requirement, each
+        stage's outcome with the gate numbers logged for it, decisions,
+        audit results, simulations and open issues. The body sections come
+        in a fixed order: placement strategy, stack-up and impedance,
+        critical routes (lengths, skews, layer changes, return vias,
+        exceptions), power paths, planes and fan-out (where via-in-pad was
+        used and why), silkscreen policy, verification results, simulations,
+        open issues. A section nothing was logged for says so in one line.
+        Notes reach a section through their ``topic`` (see
+        ``design_session_log``).
+
+        Args:
+            session_id: the session to report; blank uses the most recently
+                active one.
+            output_path: also write the markdown to this file. Its folder
+                must exist, and a path inside the installed eda_agent
+                package is refused. Blank writes nothing.
+
+        Returns:
+            ``{"session_id", "markdown", "path"}`` (``path`` is "" when
+            nothing was written), or ``{"error": ...}``.
+        """
+        journal = _resolve_journal(session_id)
+        if journal is None:
+            return {"error": "no design sessions found; start one with design_session_start"}
+        if session_id and not journal.path.exists():
+            return {"error": f"no design session {session_id!r}"}
+        from ..design.report import build_report
+        markdown = build_report(journal)
+        out: dict[str, Any] = {"session_id": journal.session_id,
+                               "markdown": markdown, "path": ""}
+        if not output_path:
+            return out
+        import eda_agent
+        target = Path(output_path).expanduser().resolve()
+        package = Path(eda_agent.__file__).resolve().parent
+        if target == package or package in target.parents:
+            return {"error": f"refusing to write inside the installed package ({package}); "
+                             "choose a path outside it"}
+        if target.is_dir():
+            return {"error": f"{target} is a folder; give a file path"}
+        if not target.parent.is_dir():
+            return {"error": f"the folder {target.parent} does not exist"}
+        target.write_text(markdown, encoding="utf-8")
+        out["path"] = str(target)
+        return out
+
+    @mcp.tool()
+    async def pcb_layout_audit(
+        checks: Optional[list[str]] = None,
+        expect_file: str = "",
+        board_json_path: str = "",
+        nets: Optional[list[str]] = None,
+        max_distance_mils: float = 40.0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Measure a board for the layout stages' exit gates. Changes nothing.
+
+        Reads the focused board exactly, the way ``pcb_autoroute`` does
+        (``pcb.get_layout_model``), or a saved LayoutBoard JSON, and runs the
+        in-house checks over it. Every check returns counts and itemised
+        findings with coordinates in mils:
+
+        - ``placement_audit``: overlapping bodies on one side, pads of
+          different nets closer than the clearance rule, parts on keepouts
+          or mounting holes, parts off the board.
+        - ``connectivity_summary``: nets routed / partly routed / not
+          started, and every unreached pad.
+        - ``drc``: the exact clearance check.
+        - ``corner_audit``: track junctions bending sharper than 45 degrees.
+        - ``return_via_audit``: signal vias with no ground or plane via
+          within ``max_distance_mils``.
+        - ``plane_region_audit``: pour and plane copper broken into islands.
+
+        Log the result as ``data`` on the stage_result
+        (``design_session_log``); ``design_next_action`` checks the numbers
+        against the stage's gate.
+
+        Args:
+            checks: names from the list above; None runs them all.
+            expect_file: full path of the focused board, for a live read.
+                The read refuses on the first reply if another board is
+                focused.
+            board_json_path: a saved LayoutBoard (.json or .json.gz) to audit
+                offline instead; nothing is read from the editor.
+            nets: the signal nets ``return_via_audit`` checks. None checks
+                differential-pair and high-speed-class nets, or every signal
+                via when the board names neither.
+            max_distance_mils: how near a return via must be (centre to
+                centre). Default 40.
+            limit: findings listed per kind; counts are never cut.
+
+        Returns:
+            ``{"board", "pass", "summary": {check: {pass, counts...}},
+            "checks": {check: full result}, "source": "live"|"file"}``, or
+            ``{"error": ...}``.
+        """
+        import asyncio
+
+        from ..layout.audit import CHECKS, run_audits
+
+        names = list(checks) if checks else None
+        unknown = [n for n in names or [] if n not in CHECKS]
+        if unknown:
+            return {"error": f"unknown check(s) {unknown}; known: {list(CHECKS)}"}
+        if board_json_path:
+            from ..layout.model import LayoutBoard
+            source_path = Path(board_json_path)
+            if not source_path.is_file():
+                return {"error": f"no such file: {board_json_path}"}
+            try:
+                board = await asyncio.to_thread(LayoutBoard.load, source_path)
+            except Exception as exc:  # noqa: BLE001 - reported to the caller
+                return {"error": f"could not load {board_json_path}: {exc}"}
+            source = "file"
+        elif expect_file:
+            from ..layout.read_altium import WrongBoard, read_live_board
+            try:
+                board = await asyncio.to_thread(read_live_board, expect_file)
+            except WrongBoard as exc:
+                return {"error": str(exc)}
+            except Exception as exc:  # noqa: BLE001 - reported to the caller
+                return {"error": f"board read failed: {exc}"}
+            source = "live"
+        else:
+            return {"error": "pass expect_file (the focused board's full path) to read "
+                             "it live, or board_json_path to audit a saved LayoutBoard"}
+        result = await asyncio.to_thread(
+            run_audits, board, names, nets=nets,
+            max_distance_mils=float(max_distance_mils), limit=max(1, int(limit)))
+        result["source"] = source
+        result["next_step"] = ("log this result as data on the stage_result "
+                               "(design_session_log event='stage_result', data=...)")
+        return result
 
     # Register the MCP prompt only on a real FastMCP; test harnesses that
     # register tools with a minimal fake mcp (``.tool()`` only, no
@@ -1633,7 +1837,10 @@ def register_design_tools(mcp) -> None:
 
         Returns ``{file, line_count, part_count, lines}`` where each line is
         ``{quantity, designators, mpn, manufacturer, value, lib_reference,
-        datasheet}``: or ``{"error": ...}`` if disabled or unreadable.
+        datasheet}``: or ``{"error": ...}`` if disabled or unreadable
+        (missing file, a suffix other than .SchDoc/.PrjPcb, or a project
+        whose sheets cannot be resolved). A design read with zero parts
+        adds a ``warning``: an empty BOM is not proof of an empty design.
         """
         from ..fileio.review import (
             HEADLESS_DISABLED_MESSAGE,
@@ -1646,12 +1853,16 @@ def register_design_tools(mcp) -> None:
             lines = bom_from_file(path)
         except (ValueError, OSError) as e:
             return {"error": f"cannot read {path}: {e}"}
-        return {
+        result: dict[str, Any] = {
             "file": str(path),
             "line_count": len(lines),
             "part_count": sum(ln["quantity"] for ln in lines),
             "lines": lines,
         }
+        if not lines:
+            from ..fileio.bom import EMPTY_BOM_WARNING
+            result["warning"] = EMPTY_BOM_WARNING
+        return result
 
     @mcp.tool()
     async def design_review_plan(
@@ -2250,6 +2461,12 @@ def register_design_tools(mcp) -> None:
         magnitude exceeds every stated power input (a boost / inverting
         stage the user must confirm). Pure Python, no Altium.
 
+        ``board_intent`` (stackup, impedance targets, peak currents,
+        fastest edge, enclosure, assembly, finish, test strategy) is all
+        optional and never fails validation. Where the rest of the
+        requirement makes one of them matter and it is missing, ``notes``
+        carries a suggested question to ask the user.
+
         Args:
             requirement: DesignRequirement as a JSON object/dict. Units are
                 SI with the unit in the field name (``voltage_v``,
@@ -2257,9 +2474,9 @@ def register_design_tools(mcp) -> None:
                 MILLIMETRES (``board_size_mm``, ``height_max_mm``).
 
         Returns:
-            ``{"ok": True, "issues": [], "summary": "..."}`` when the
-            requirement is planning-ready (``summary`` is the labelled-line
-            block to embed in ``DesignPlan.summary``), or
+            ``{"ok": True, "issues": [], "notes": [...], "summary": "..."}``
+            when the requirement is planning-ready (``summary`` is the
+            labelled-line block to embed in ``DesignPlan.summary``), or
             ``{"ok": False, "issues": [...]}`` / ``{"ok": False,
             "errors": [...]}`` (schema problems) listing what to resolve.
         """

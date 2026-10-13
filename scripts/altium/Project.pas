@@ -1121,6 +1121,10 @@ End;
 {..............................................................................}
 { Get net-to-pin connectivity from compiled project                           }
 { Params: project_path, component, net_name, limit                            }
+{ limit_hit says the list stopped at limit with more pins left, and          }
+{ skipped_nil counts documents, components and pins the model returned as   }
+{ Nil, so a short list is not mistaken for the whole design. Proj_GetBOM    }
+{ reports the same two.                                                      }
 {..............................................................................}
 
 Function Proj_GetNets(Params : String; RequestId : String) : String;
@@ -1131,8 +1135,8 @@ Var
     Doc : IDocument;
     Comp : IComponent;
     Pin : IPin;
-    I, J, K, Count, Limit, DocCount : Integer;
-    UsePhysical : Boolean;
+    I, J, K, Count, Limit, DocCount, Skipped : Integer;
+    UsePhysical, LimitHit : Boolean;
     Data, CompDesig, NetName : String;
     First : Boolean;
 Begin
@@ -1167,31 +1171,37 @@ Begin
     Data := '[';
     First := True;
     Count := 0;
+    Skipped := 0;
+    LimitHit := False;
 
     GetCompiledDocs(Project, DocCount, UsePhysical);
     For I := 0 To DocCount - 1 Do
     Begin
-        If Count >= Limit Then Break;
+        If LimitHit Then Break;
         Doc := GetCompiledDoc(Project, I, UsePhysical);
-        If Doc = Nil Then Continue;
+        If Doc = Nil Then Begin Inc(Skipped); Continue; End;
 
         For J := 0 To Doc.DM_ComponentCount - 1 Do
         Begin
-            If Count >= Limit Then Break;
+            If LimitHit Then Break;
             Comp := Doc.DM_Components(J);
-            If Comp = Nil Then Continue;
+            If Comp = Nil Then Begin Inc(Skipped); Continue; End;
 
             CompDesig := Comp.DM_PhysicalDesignator;
             If (FilterComp <> '') And (CompDesig <> FilterComp) Then Continue;
 
             For K := 0 To Comp.DM_PinCount - 1 Do
             Begin
-                If Count >= Limit Then Break;
                 Pin := Comp.DM_Pins(K);
-                If Pin = Nil Then Continue;
+                If Pin = Nil Then Begin Inc(Skipped); Continue; End;
 
                 NetName := Pin.DM_FlattenedNetName;
                 If (FilterNet <> '') And (NetName <> FilterNet) Then Continue;
+                If Count >= Limit Then
+                Begin
+                    LimitHit := True;
+                    Break;
+                End;
 
                 If Not First Then Data := Data + ',';
                 First := False;
@@ -1206,7 +1216,11 @@ Begin
     End;
 
     Data := Data + ']';
-    Result := BuildSuccessResponse(RequestId, '{"pins":' + Data + ',"count":' + IntToStr(Count) + '}');
+    Result := BuildSuccessResponse(RequestId, '{"pins":' + Data
+        + ',"count":' + IntToStr(Count)
+        + ',"limit":' + IntToStr(Limit)
+        + ',"limit_hit":' + BoolToJsonStr(LimitHit)
+        + ',"skipped_nil":' + IntToStr(Skipped) + '}');
 End;
 
 {..............................................................................}
@@ -1221,8 +1235,8 @@ Var
     Doc : IDocument;
     Comp : IComponent;
     Pin : IPin;
-    I, J, K, Count, Limit, DocCount : Integer;
-    UsePhysical : Boolean;
+    I, J, K, Count, Limit, DocCount, Skipped : Integer;
+    UsePhysical, LimitHit : Boolean;
     Data, CompDesig, CompComment, CompFP, CompLib, PinList : String;
     First, FirstPin : Boolean;
 Begin
@@ -1241,20 +1255,27 @@ Begin
     Data := '[';
     First := True;
     Count := 0;
+    Skipped := 0;
+    LimitHit := False;
 
     GetCompiledDocs(Project, DocCount, UsePhysical);
     For I := 0 To DocCount - 1 Do
     Begin
-        If Count >= Limit Then Break;
+        If LimitHit Then Break;
         Doc := GetCompiledDoc(Project, I, UsePhysical);
-        If Doc = Nil Then Continue;
+        If Doc = Nil Then Begin Inc(Skipped); Continue; End;
 
         For J := 0 To Doc.DM_ComponentCount - 1 Do
         Begin
-            If Count >= Limit Then Break;
+            If LimitHit Then Break;
             Comp := Doc.DM_Components(J);
-            If Comp = Nil Then Continue;
+            If Comp = Nil Then Begin Inc(Skipped); Continue; End;
 
+            If Count >= Limit Then
+            Begin
+                LimitHit := True;
+                Break;
+            End;
             CompDesig := Comp.DM_PhysicalDesignator;
             CompComment := Comp.DM_Comment;
             CompFP := Comp.DM_Footprint;
@@ -1266,7 +1287,7 @@ Begin
             For K := 0 To Comp.DM_PinCount - 1 Do
             Begin
                 Pin := Comp.DM_Pins(K);
-                If Pin = Nil Then Continue;
+                If Pin = Nil Then Begin Inc(Skipped); Continue; End;
                 If Not FirstPin Then PinList := PinList + ',';
                 FirstPin := False;
                 PinList := PinList + '{"pin":"' + EscapeJsonString(Pin.DM_PinNumber) +
@@ -1286,7 +1307,11 @@ Begin
     End;
 
     Data := Data + ']';
-    Result := BuildSuccessResponse(RequestId, '{"components":' + Data + ',"count":' + IntToStr(Count) + '}');
+    Result := BuildSuccessResponse(RequestId, '{"components":' + Data
+        + ',"count":' + IntToStr(Count)
+        + ',"limit":' + IntToStr(Limit)
+        + ',"limit_hit":' + BoolToJsonStr(LimitHit)
+        + ',"skipped_nil":' + IntToStr(Skipped) + '}');
 End;
 
 {..............................................................................}
@@ -2409,9 +2434,9 @@ Begin
                 Finally
                     SchDoc.SchIterator_Destroy(Iterator);
                 End;
-                SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
-                SchDoc.GraphicallyInvalidate;
-                MarkDocDirtyByPath(FilePath);
+                { The sheet is in TouchedDocs, so the outer Finally closes it:
+                  PostProcess, redraw and mark dirty. Closing it here as well
+                  ran PostProcess twice for one PreProcess. }
                 Continue;
             End;
 
@@ -2673,18 +2698,57 @@ End;
 Function Proj_ExportSTEP(Params : String; RequestId : String) : String;
 Var
     OutputPath : String;
+    Board : IPCB_Board;
+    AgeBefore, AgeAfter : Integer;
 Begin
     OutputPath := ExtractJsonValue(Params, 'output_path');
+
+    { RunProcess acts on the FOCUSED view, and the board lookup puts the  }
+    { user's previous view back, so an export from a schematic tab went   }
+    { nowhere. ResolvePCBBoard leaves the board focused.                  }
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is open');
+        Exit;
+    End;
+    Board := ResolvePCBBoard(Board.FileName);
+
+    AgeBefore := -1;
+    If OutputPath <> '' Then
+        Try If FileExists(OutputPath) Then AgeBefore := FileAge(OutputPath); Except End;
 
     ResetParameters;
     If OutputPath <> '' Then
         AddStringParameter('FileName', OutputPath);
     RunProcess('PCB:ExportSTEP3D');
 
-    If OutputPath <> '' Then
-        Result := BuildSuccessResponse(RequestId, '{"success":true,"output_path":"' + EscapeJsonString(OutputPath) + '"}')
+    { success:true used to come back whatever happened, and a reported    }
+    { run that wrote nothing was indistinguishable from one that did.     }
+    If OutputPath = '' Then
+    Begin
+        Result := BuildSuccessResponse(RequestId,
+            '{"generated":false,"dispatched":true'
+            + ',"reason":"the export was launched with no output_path, so '
+            + 'there is nothing to check; pass output_path, or run an OutJob '
+            + 'with an ExportSTEP output through proj_run_outjob"}');
+        Exit;
+    End;
+
+    AgeAfter := -1;
+    Try If FileExists(OutputPath) Then AgeAfter := FileAge(OutputPath); Except End;
+    If (AgeAfter <> -1) And (AgeAfter <> AgeBefore) Then
+        Result := BuildSuccessResponse(RequestId,
+            '{"generated":true,"success":true,"output_path":"'
+            + EscapeJsonString(OutputPath) + '"}')
     Else
-        Result := BuildSuccessResponse(RequestId, '{"success":true}');
+        Result := BuildSuccessResponse(RequestId,
+            '{"generated":false,"dispatched":true,"output_path":"'
+            + EscapeJsonString(OutputPath) + '"'
+            + ',"reason":"the export was launched but no new file is at '
+            + 'output_path. PCB:ExportSTEP3D is not documented to take a file '
+            + 'name; run an OutJob with an ExportSTEP output through '
+            + 'proj_run_outjob for a result that can be confirmed"}');
 End;
 
 {..............................................................................}
@@ -4473,33 +4537,17 @@ Begin
     Else Project := Workspace.DM_FocusedProject;
     If Project = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project found'); Exit; End;
 
-    { REFUSE while a schematic is focused. MEASURED 2026-08-17: with a
+    { FOCUS DECIDES WHAT THE COMPARE DOES. MEASURED 2026-08-17: with a
       child sheet focused, WorkspaceManager:Compare raised a modal reading
       "Cannot compare a source document against its owner project SCH"
-      and changed nothing, while this handler went on to report success
-      and components_in_sync. Catching it here turns a blocked editor
-      plus a false clean into a reason the caller can act on.
+      and changed nothing, while this handler went on to report success.
+      So the project's PCB is focused before the compare below and the
+      focus is checked, rather than refusing a schematic and leaving the
+      caller to pick a document.
 
       NOT applied to Proj_UpdateSchematic, which is the opposite
       direction and whose correct focus has not been measured. Guessing
       symmetry here would be inventing a precondition. }
-    FocusedKind := '';
-    Try
-        FocusedDoc := Workspace.DM_FocusedDocument;
-        If FocusedDoc <> Nil Then FocusedKind := FocusedDoc.DM_DocumentKind;
-    Except
-        FocusedKind := '';
-    End;
-    If FocusedKind = 'SCH' Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'WRONG_FOCUS',
-            'A schematic is focused, and Altium refuses to compare a '
-            + 'source document against its owner project: it raises a '
-            + 'modal error and changes nothing. Focus the PCB document '
-            + 'first with app_set_active_document, then call this again.');
-        Exit;
-    End;
-
     SmartCompile(Project);
     Ok := ComputeECODifferences(Project, MatchedBefore, ExtraSchBefore, ExtraPcbBefore, PcbPath);
     If Not Ok Then
@@ -4510,21 +4558,43 @@ Begin
 
     { Fire the real ECO via the WorkspaceManager comparator. This is the
       ONLY evidenced scriptable launcher (ref: reference MultiPCBProject.pas,
-      Petar Perisin): WorkspaceManager:Compare with ObjectKind=Project +
-      Action=UpdateOther performs Design > Update PCB Document (schematic ->
-      PCB). The previous 'PCB:UpdatePCBFromProject' was NOT a real process id
-      (RunProcess silently ignores unknown ids -> the handler no-opped), and
-      DisableDialog/Silent/NoConfirm/AutoApply are invented flags that appear
-      in no Altium docs.
+      Petar Perisin). The previous 'PCB:UpdatePCBFromProject' was NOT a real
+      process id (RunProcess silently ignores unknown ids -> the handler
+      no-opped), and DisableDialog/Silent/NoConfirm/AutoApply are invented
+      flags that appear in no Altium docs.
+      DIRECTION. With the PCB focused, the reference spells the two actions
+      out: Action=UpdateOther is PCB -> Update Schematic, and Action=UpdateMe
+      is PCB -> Import Changes From the schematic. This handler sent
+      UpdateOther while requiring the PCB in focus, so it back-annotated:
+      an ECO opened with the SchDoc as the affected document, and executing
+      it reverted a footprint and a comment on the schematic. The PCB is
+      focused here, checked, and asked to import.
       DIALOG IS UNAVOIDABLE: Altium's Engineering Change Order dialog is
       non-suppressible BY DESIGN (altium.com .../keeping-synchronized). This
       process raises that modal and BLOCKS the polling loop until a human
       clicks "Execute Changes" (or closes it). There is no documented silent
-      variant. Direction note: Action=UpdateOther is sch->PCB when driven with
-      the project/schematic in focus; it back-annotates if a PCB is focused. }
+      variant. }
+    ResolvePCBBoard(PcbPath);
+    FocusedKind := '';
+    Try
+        FocusedDoc := Workspace.DM_FocusedDocument;
+        If FocusedDoc <> Nil Then FocusedKind := FocusedDoc.DM_DocumentKind;
+    Except
+        FocusedKind := '';
+    End;
+    If FocusedKind <> 'PCB' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'WRONG_FOCUS',
+            'The project''s PCB could not be focused (the focused document is '
+            + FocusedKind + '), and the update direction depends on it: with '
+            + 'anything else focused the same request can update the '
+            + 'schematic from the board. Focus ' + PcbPath
+            + ' with app_set_active_document, then call this again.');
+        Exit;
+    End;
     ResetParameters;
     AddStringParameter('ObjectKind', 'Project');
-    AddStringParameter('Action', 'UpdateOther');
+    AddStringParameter('Action', 'UpdateMe');
     RunProcess('WorkspaceManager:Compare');
 
     { Recompile and recompute to report actual changes }
@@ -5310,4 +5380,11 @@ Begin
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_ACTION', 'Unknown project action: ' + Action);
     End;
+End;
+
+{ UnitStamp_Project - which build of Project.pas Altium compiled; 'dev' here. }
+{ install-scripts writes the hash of this file into the deployed copy. }
+Function UnitStamp_Project(Dummy : Integer) : String;
+Begin
+    Result := 'dev';
 End;

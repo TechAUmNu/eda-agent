@@ -574,7 +574,10 @@ def _ping(**state):
                  SCRIPT_VERSION="S", PROTOCOL_VERSION=2, CastErrorCount=1,
                  CaughtExceptionCount=0, LastCaughtStamp="",
                  LastCaughtWhere="", LastCaughtCommand="",
-                 LastCaughtRequestId="")
+                 LastCaughtRequestId="",
+                 # App_Ping lists the open script projects (no workspace
+                 # here, so the field is empty and nothing is caught).
+                 GetWorkspace=None)
     ns.update(state)
     build(_app(), ["App_Ping"], ns)
     return json.loads(ns["App_Ping"]("rid"))
@@ -715,12 +718,18 @@ class _CreateClient:
     def __init__(self, dirs):
         self.dirs = set(dirs)
         self.disk: set = set()
+        self.focused = ""
 
     def OpenNewDocument(self, kind, path, name, reuse):
         return _NewDoc(self)
 
+    # upstream's focus-on-create (2026.10.13 merge): the saved document is
+    # shown, then the focus is read back by path.
+    def ShowDocument(self, doc):
+        self.focused = doc.file
 
-def _create(params, dirs):
+
+def _create(params, dirs, seen=None):
     client = _CreateClient(dirs)
     ran: list = []
 
@@ -735,22 +744,34 @@ def _create(params, dirs):
                  ExtractFilePath=_extract_file_path, Trim=_delphi_trim,
                  ResetParameters=lambda: None,
                  AddStringParameter=lambda k, v: None,
-                 RunProcess=run_process)
+                 RunProcess=run_process,
+                 CurrentFocusedDocPath=lambda dummy: client.focused)
     build(_utils(), ["TargetDirExists"], ns)
     build(_app(), ["App_CreateDocument"], ns)
+    if seen is not None:
+        seen.update(ns=ns, client=client)
     return json.loads(ns["App_CreateDocument"](json.dumps(params), "rid"))
 
 
 def test_create_document_into_a_missing_folder_reports_unsaved_without_saving():
+    # Since the 2026.10.13 merge (upstream "NOT SAVED IS NOT CREATED") an
+    # unsaved document is an error, not success with saved:false. The
+    # popup-free property is unchanged: neither save is attempted in a
+    # folder that does not exist, so no modal and no caught exception.
+    seen: dict = {}
     got = _create({"kind": "SCH", "file_path": r"C:\no_such_dir\x.SchDoc",
-                   "add_to_project": "false"}, dirs={r"C:\p" + "\\"})
-    assert got["success"] is True and got["saved"] is False
+                   "add_to_project": "false"}, dirs={r"C:\p" + "\\"}, seen=seen)
+    assert got["error"] == "NOT_SAVED"
+    assert "folder does not exist" in got["message"]
+    assert seen["ns"]["_rec"].calls == [], "a save was attempted and caught"
+    assert seen["client"].disk == set()
 
 
 def test_create_document_into_a_real_folder_still_saves():
     got = _create({"kind": "SCH", "file_path": r"C:\p\x.SchDoc",
                    "add_to_project": "false"}, dirs={r"C:\p" + "\\"})
     assert got["saved"] is True
+    assert got["focused"] is True
 
 
 # ---------------------------------------------------------------------------

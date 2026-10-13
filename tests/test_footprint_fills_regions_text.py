@@ -187,7 +187,16 @@ def test_geometry_is_parsed_and_converted_as_decimals(handler):
         f"{handler} parses with StrToIntDef, which cannot read a decimal")
     assert "MilsToCoord(" not in body, (
         f"{handler} converts through the integer MilsToCoord")
-    assert "MilsToCoordF(" in body
+    # Since upstream's mm units (2026.10.13 merge) a handler converts
+    # through CoordFromUnits, which is MilsToCoordF for mils and MMToCoord
+    # for mm: both take a Double. Either spelling keeps the decimal.
+    assert "MilsToCoordF(" in body or "CoordFromUnits(" in body
+    if "CoordFromUnits(" in body:
+        utils = strip_comments((ROOT / "scripts" / "altium" / "Utils.pas")
+                               .read_text(encoding="utf-8", errors="replace"))
+        utils = utils[utils.index("Function CoordFromUnits"):]
+        utils = utils[:utils.index("End;")]
+        assert "MilsToCoordF(" in utils and "MilsToCoord(" not in utils
 
 
 # ---------------------------------------------------------------------------

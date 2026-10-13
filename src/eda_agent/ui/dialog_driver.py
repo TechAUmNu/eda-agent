@@ -42,11 +42,17 @@ from . import windows as win
 #: Captions are matched loosely (case and punctuation are ignored, and
 #: a caption need only CONTAIN the phrase) because Altium writes
 #: "Accept Changes (Create ECO)" and "&Report Changes...".
+#:
+#: Spanish captions are listed beside the English: on a Spanish Altium
+#: "Aceptar" had no role at all, so a press that left its dialog open
+#: was never judged, and "Aplicar" slipped past the irreversible gate.
 _ROLES = {
-    "validate": ("validate changes", "validate"),
-    "commit": ("execute changes", "accept changes", "apply"),
-    "advance": ("next", "continue", "yes", "finish", "ok"),
-    "dismiss": ("close", "cancel", "no"),
+    "validate": ("validate changes", "validate", "validar cambios", "validar"),
+    "commit": ("execute changes", "accept changes", "apply",
+               "ejecutar cambios", "aceptar cambios", "aplicar"),
+    "advance": ("next", "continue", "yes", "finish", "ok",
+                "siguiente", "continuar", "finalizar", "aceptar"),
+    "dismiss": ("close", "cancel", "no", "cerrar"),
     "report": ("report changes", "report"),
 }
 

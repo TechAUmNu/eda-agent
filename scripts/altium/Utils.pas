@@ -35,6 +35,41 @@ Begin
     Result := Coord * 25.4 / 10000000;
 End;
 
+{ Lengths in the caller's unit: 'mil' (also empty, the default) or 'mm'.    }
+{ Authoring took whole mils only, so 1.625 mm arrived as 64 mil and read    }
+{ back as 1.6256 mm, off a metric grid on every pad. The mil path is        }
+{ MilsToCoordF, which equals MilsToCoord for whole mils, so a caller that   }
+{ never passes units places exactly what it did before.                     }
+Function UnitsAreMM(Units : String) : Boolean;
+Begin
+    Result := LowerCase(Trim(Units)) = 'mm';
+End;
+
+{ '' when the unit is one of the two, else the refusal to send.             }
+Function UnitsProblem(Units : String) : String;
+Var
+    U : String;
+Begin
+    Result := '';
+    U := LowerCase(Trim(Units));
+    If (U <> '') And (U <> 'mil') And (U <> 'mils') And (U <> 'mm') Then
+        Result := 'Unknown units: ' + Units + '. Use mil or mm.';
+End;
+
+Function CoordFromUnits(Value : Double; Units : String) : TCoord;
+Begin
+    If UnitsAreMM(Units) Then Result := MMToCoord(Value)
+    Else Result := MilsToCoordF(Value);
+End;
+
+{ A default written in mils, in the caller's unit. A bare default of 60 is  }
+{ 60 mils; read as millimetres it would be a 60 mm pad.                     }
+Function MilsInUnits(Mils : Double; Units : String) : Double;
+Begin
+    If UnitsAreMM(Units) Then Result := Mils * 0.0254
+    Else Result := Mils;
+End;
+
 {..............................................................................}
 { ResolveSchLibForLoad - any library path in, a loadable .SchLib path out.     }
 {                                                                              }
@@ -239,6 +274,68 @@ Begin
     Else Result := 'false';
 End;
 
+{ The first condition in a filter that is not Name=Value, or '' when every }
+{ one is. A filter is Name=Value pairs joined by |, nothing else. A bare     }
+{ name (IsDesignator) or an Altium query (OnLayer('TopLayer') Or ...) used   }
+{ to be skipped, which emptied the filter and matched every object: an       }
+{ obj_delete given one removed every track on the board and reported         }
+{ success. Names are letters, digits, '_' and '.' (Designator.Text).        }
+Function FilterProblem(FilterStr : String) : String;
+Var
+    Remaining, Condition, PropName, Ch : String;
+    PipePos, EqPos, I : Integer;
+    Ok : Boolean;
+Begin
+    Result := '';
+    Remaining := FilterStr;
+    While Remaining <> '' Do
+    Begin
+        PipePos := Pos('|', Remaining);
+        If PipePos > 0 Then
+        Begin
+            Condition := Copy(Remaining, 1, PipePos - 1);
+            Remaining := Copy(Remaining, PipePos + 1, Length(Remaining));
+        End
+        Else
+        Begin
+            Condition := Remaining;
+            Remaining := '';
+        End;
+        If Trim(Condition) = '' Then Continue;
+        EqPos := Pos('=', Condition);
+        Ok := EqPos > 1;
+        If Ok Then
+        Begin
+            PropName := Copy(Condition, 1, EqPos - 1);
+            For I := 1 To Length(PropName) Do
+            Begin
+                Ch := Copy(PropName, I, 1);
+                If Pos(Ch, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.') = 0 Then
+                    Ok := False;
+            End;
+        End;
+        If Not Ok Then
+        Begin
+            Result := Condition;
+            Exit;
+        End;
+    End;
+End;
+
+Function BadFilterMessage(Condition : String) : String;
+Var
+    Hint : String;
+Begin
+    Hint := '';
+    If (Pos('=', Condition) = 0) And (Pos('(', Condition) = 0)
+       And (Pos(' ', Trim(Condition)) = 0) Then
+        Hint := 'For a true/false property write ' + Trim(Condition) + '=true. ';
+    Result := 'Filter condition "' + Condition + '" is not Name=Value. A filter '
+        + 'is Name=Value pairs joined by |, each matched exactly; Altium query '
+        + 'expressions (OnLayer(...), Or, And) and bare names are not understood. '
+        + Hint + 'Nothing was matched or changed.';
+End;
+
 Function FloatToJsonStr(Value : Double) : String;
 Var
     Sep, Ch, Swapped : String;
@@ -257,8 +354,17 @@ Begin
 
       Swapping is complete because FloatToStr emits only digits, a sign, an
       exponent 'E' and the single decimal separator. It never emits a
-      thousands separator, which is FloatToStrF with ffNumber. }
+      thousands separator, which is FloatToStrF with ffNumber.
+
+      NAN AND INF ARE NOT JSON. FloatToStr writes them for a failed
+      computation, and the whole reply then failed to parse, which the
+      bridge could only report as a crash mid-write. They go out as null. }
     Result := FloatToStr(Value);
+    If (Pos('NAN', UpperCase(Result)) > 0) Or (Pos('INF', UpperCase(Result)) > 0) Then
+    Begin
+        Result := 'null';
+        Exit;
+    End;
     Sep := DecimalSeparator;
     If Sep <> '.' Then
     Begin
@@ -1162,6 +1268,55 @@ Begin
         Result := StrToFloat(Work);
     Except
         Result := Default;
+    End;
+End;
+
+{ The first length a rule's Descriptor states, in mils, or -1 when it     }
+{ states none. A descriptor carries the rule's value, as in "Clearance     }
+{ Constraint (Gap=6mil) (All),(All)", in the board's units. The silk rules }
+{ publish no typed member this code has verified, so their clearance is    }
+{ read from here rather than through an interface that could halt the      }
+{ polling loop. Units: mil, mm, in.                                        }
+Function GapMilsFromDescriptor(Desc : String) : Double;
+Var
+    I, J : Integer;
+    Num, Rest, Unt : String;
+    V : Double;
+Begin
+    Result := -1;
+    I := Pos('=', Desc);
+    While I > 0 Do
+    Begin
+        Rest := Copy(Desc, I + 1, Length(Desc));
+        J := 1;
+        Num := '';
+        While (J <= Length(Rest)) And (Pos(Copy(Rest, J, 1), '0123456789.') > 0) Do
+        Begin
+            Num := Num + Copy(Rest, J, 1);
+            J := J + 1;
+        End;
+        If (Num <> '') And IsFloatStr(Num) Then
+        Begin
+            V := StrToFloatDef(Num, -1);
+            Unt := LowerCase(Copy(Rest, J, 3));
+            If Unt = 'mil' Then
+            Begin
+                Result := V;
+                Exit;
+            End;
+            If Copy(Unt, 1, 2) = 'mm' Then
+            Begin
+                Result := V / 0.0254;
+                Exit;
+            End;
+            If Copy(Unt, 1, 2) = 'in' Then
+            Begin
+                Result := V * 1000.0;
+                Exit;
+            End;
+        End;
+        Desc := Copy(Desc, I + 1, Length(Desc));
+        I := Pos('=', Desc);
     End;
 End;
 
@@ -2224,4 +2379,11 @@ Begin
             + 'does not write, properties.failed lists writes that threw."'
     Else
         Result := Result + ',"success":true';
+End;
+
+{ UnitStamp_Utils - which build of Utils.pas Altium compiled; 'dev' here. }
+{ install-scripts writes the hash of this file into the deployed copy. }
+Function UnitStamp_Utils(Dummy : Integer) : String;
+Begin
+    Result := 'dev';
 End;

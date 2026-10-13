@@ -15,8 +15,9 @@ from typing import Any
 from ..bench import copy_board, hpwl, overlaps, strip_routing
 from ..drc import run_drc
 from ..model import LayoutBoard
-from .placer import Placer
+from .placer import DEFAULT_STRATEGY, Placer
 from .transform import set_pose
+from ...units import MILS_PER_MM
 
 
 def place_job(params: dict[str, Any]) -> dict[str, Any]:
@@ -29,7 +30,14 @@ def place_job(params: dict[str, Any]) -> dict[str, Any]:
     t0 = time.perf_counter()
     placer = Placer(copy_board(board), movable=set(parts) if parts else None,
                     decap_pull=float(params.get("decap_pull") or 0.0),
-                    spread_density=float(params.get("spread_density") or 0.0))
+                    spread_density=float(params.get("spread_density") or 0.0),
+                    strategy=params.get("strategy") or DEFAULT_STRATEGY,
+                    grid=float(params["grid_mm"]) * MILS_PER_MM if params.get("grid_mm") else None)
+    # The live view (design/live.py) shows the board before and after.
+    from ...design import live
+    fixed = sorted(p.ref for p in placer.parts if p.fixed)
+    live.publish_safe(board, f"Placing {len(placer.parts) - len(fixed)} parts; "
+                      f"{len(fixed)} stay where they are.", "place", {"fixed": fixed})
     rep = placer.run()
     out = copy_board(board)
     before = {c.ref: c for c in board.components}
@@ -48,10 +56,21 @@ def place_job(params: dict[str, Any]) -> dict[str, Any]:
     # parts, and its tracks would be counted against the new places.
     placed = strip_routing(out)
     drc = run_drc(placed)
+    pub = live.publish_safe(out, f"Placed: {len(moves)} parts moved, {len(rep['failed'])} found "
+                      f"no free spot, {len(drc.violations)} clearance violations before "
+                      "routing.", "place", {"fixed": fixed, "blocks": rep.get("blocks") or []})
     moved = {m["designator"] for m in moves}
+    blocks = {k: rep[k] for k in ("blocks", "legaliser_moves", "flagged_moves",
+                                  "floorplan_packed", "floorplan_overflow", "fallback") if k in rep}
+    strategy = rep.get("strategy", placer.strategy)
     return {
         "board": board.name,
+        "strategy": strategy,
+        # pcb_autoplace_apply republishes this version once it is written.
+        "live_version": (pub or {}).get("version"),
+        **blocks,
         "summary": {
+            "strategy": strategy,
             "parts_moved": len(moves),
             "parts_fixed": sum(1 for p in placer.parts if p.fixed),
             "failed": rep["failed"],
@@ -91,4 +110,14 @@ def _notes(board: LayoutBoard, moves, rep) -> list[str]:
         notes.append("These parts fit only with their bodies over another part's body, "
                      "their copper clear: " + ", ".join(rep["body_overlaps"])
                      + ". Check the heights.")
+    if rep.get("fallback"):
+        f = rep["fallback"]
+        notes.append(f"The blocks did not fit this board: {f['flagged_moves']} parts would have "
+                     f"stood far from their blocks ({f['flagged_share']:.0%}), so it was placed "
+                     "by the analytic strategy instead.")
+    if rep.get("flagged_moves"):
+        from .floorplan import FLAG_AT
+        notes.append("The floorplan left no room for these parts where their block put "
+                     f"them; each was moved further than {FLAG_AT:g} mil: "
+                     + ", ".join(m["designator"] for m in rep["flagged_moves"]) + ".")
     return notes

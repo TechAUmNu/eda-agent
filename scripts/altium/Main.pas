@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.10.12.03';
+    SCRIPT_VERSION = '2026.10.13.01';
 
     // How far a linked 3D body's box may sit from its footprint's pads (or
     // origin, with no pads) before lib_link_3d_model reports placement_ok
@@ -64,6 +64,13 @@ Const
     // (track width, hole size, annular ring) are orders of magnitude
     // below it.
     MAX_INT = 1000000000;
+
+    // TLibIdentifierKind in declaration order: 0 Any, 1 NameNoType,
+    // 2 NameWithType, 3 FullPath, 4 VaultName (System API constants).
+    // VaultName is how SchServer.LoadComponent addresses a part in a
+    // Workspace. Written as a number so no enum name has to exist in
+    // this host; an unknown identifier stops the script.
+    LIB_IDENT_KIND_VAULT_NAME = 4;
 
 Var
     WorkspaceDir : String;
@@ -399,8 +406,8 @@ End;
 { unambiguous even when a single operation's property list contains '|'.       }
 {                                                                               }
 { Defined in Main.pas so Library.pas and Generic.pas can both use them,       }
-{ the Altium project compiles files in DesignN order (Main â†’ ... â†’ Library â†’  }
-{ ... â†’ Generic) and a callee must come earlier than its caller.               }
+{ the Altium project compiles files in DesignN order (Main, ..., Library,     }
+{ ..., Generic) and a callee must come earlier than its caller.               }
 {..............................................................................}
 
 Function NextBatchOp(Var Remaining : String) : String;
@@ -1556,6 +1563,58 @@ Begin
     Result := UpperCase(Doc.DM_DocumentKind) = UpperCase(Kind);
 End;
 
+{ LoadTextFile - upstream's sharing-safe reader (moved up here by the     }
+{ 2026.10.13 merge so FileLooksLoadable, below, can use it: DelphiScript    }
+{ has no forward declarations). Every file read goes through it.           }
+Function LoadTextFile(SL : TStringList; FilePath : String) : Boolean;
+Var
+    Stream : THandleStream;
+    Attempt : Integer;
+    Handle : Integer;
+    Ok : Boolean;
+Begin
+    { Read every file through here, never SL.LoadFromFile. A sharing          }
+    { violation inside LoadFromFile's TFileStream arrived as a modal          }
+    { EFOpenError on Altium Designer 26.10.1.5 before the surrounding         }
+    { Try/Except ran, stalling the polling loop. FileOpen returns -1 on a     }
+    { sharing violation instead of raising, and once the handle is held       }
+    { LoadFromStream has no open left to fail. The lock is usually brief (a   }
+    { scanner touching a freshly written file), so retry for about 180 ms.    }
+    { False when the file is missing or stayed locked; SL is then empty.      }
+    Ok := False;
+    SL.Text := '';
+    If FileExists(FilePath) Then
+    Begin
+        Attempt := 0;
+        While Attempt < 12 Do
+        Begin
+            Inc(Attempt);
+            Handle := FileOpen(FilePath, fmOpenRead Or fmShareDenyNone);
+            If Handle <> -1 Then
+            Begin
+                Try
+                    Stream := THandleStream.Create(Handle);
+                    Try
+                        Try
+                            SL.LoadFromStream(Stream);
+                            Ok := True;
+                        Except
+                            Ok := False;
+                        End;
+                    Finally
+                        Stream.Free;
+                    End;
+                Finally
+                    FileClose(Handle);
+                End;
+            End;
+            If Ok Then Break;
+            Sleep(15);
+        End;
+    End;
+    Result := Ok;
+End;
+
 { DOES THIS FILE LOOK LIKE SOMETHING Client.OpenDocument CAN LOAD? For a     }
 { document that is NOT open only (UnopenedFileUnloadable asks that first: an }
 { open document is answered from memory and its file is never read).        }
@@ -1569,11 +1628,12 @@ End;
 { decodes); and, for a .PcbDoc or .SchDoc, a head that is neither an OLE     }
 { compound file nor the ASCII record form. Every other type (.Pcb, .OutJob)  }
 { is judged on "readable and not empty" only.                                }
-{ THE READ is ReadFileContent's, construct for construct (that function sits }
-{ after the callers of this one in the unit): TStringList.LoadFromFile goes  }
-{ through a TFileStream, so a locked or vanished file raises an ordinary    }
-{ EFOpenError the Except takes, retried for a transient lock (Defender). NOT }
-{ AssignFile / Reset: the RTL's EInOutError is a modal BEFORE the Except.    }
+{ THE READ is ReadFileContent's: LoadTextFile (above), which opens with     }
+{ FileOpen(fmShareDenyNone) and retries a transient lock (Defender). NOT    }
+{ SL.LoadFromFile: upstream measured its TFileStream's EFOpenError on a     }
+{ sharing violation as a MODAL before the Except on AD 26.10.1.5 (the note }
+{ inside LoadTextFile). NOT AssignFile / Reset: the RTL's EInOutError is a }
+{ modal BEFORE the Except too.                                             }
 { THE HEAD is text decoded through the ANSI code page, so the OLE magic      }
 { D0 CF 11 E0 A1 B1 1A E1 is not compared byte for byte (D0 CF decodes to one }
 { or two characters, depending on the code page). Its third byte, 0x11, is   }
@@ -1604,7 +1664,6 @@ Function FileLooksLoadable(Path : String) : Boolean;
 Var
     SL : TStringList;
     Content, Head, Ext : String;
-    Attempt : Integer;
     Ok, Looks : Boolean;
 Begin
     Result := False;
@@ -1613,23 +1672,16 @@ Begin
     If Not FileExists(Path) Then Exit;
     Content := '';
     Ok := False;
-    Attempt := 0;
-    While (Attempt < 12) And (Not Ok) Do
-    Begin
-        Inc(Attempt);
-        SL := TStringList.Create;
+    SL := TStringList.Create;
+    Try
         Try
-            Try
-                SL.LoadFromFile(Path);
-                Content := SL.Text;
-                Ok := True;
-            Except
-                Ok := False;
-            End;
-        Finally
-            SL.Free;
+            Ok := LoadTextFile(SL, Path);
+            If Ok Then Content := SL.Text;
+        Except
+            Ok := False;
         End;
-        If Not Ok Then Sleep(15);
+    Finally
+        SL.Free;
     End;
     Head := Copy(Content, 1, 8);
     If Ok And (Head <> '') Then
@@ -3017,49 +3069,24 @@ End;
 { JSON Helper Functions                                                        }
 {..............................................................................}
 
+
 Function ReadFileContent(FilePath : String) : String;
 Var
     SL : TStringList;
     Content : String;
-    Attempt : Integer;
-    Ok : Boolean;
 Begin
-    { Read via TStringList.LoadFromFile, NOT TextFile Reset/ReadLn. The RTL    }
-    { Reset raises a low-level EInOutError on a sharing violation (I/O error   }
-    { 32) which the Altium script engine intercepts with a modal BEFORE the    }
-    { surrounding Try/Except can swallow it, stalling the polling loop.        }
-    { LoadFromFile opens through a TFileStream and raises an ordinary VCL      }
-    { EFOpenError that Try/Except catches cleanly -- no engine modal. The      }
-    { lock is transient (Defender scanning the freshly renamed request file,   }
-    { or a collision with Python's atomic replace), so retry briefly.          }
     { NOTE: stash the content in a LOCAL string and assign Result from it as }
     { the LAST statement. Assigning Result directly from SL.Text (an object  }
     { property) and then Exit-ing triggers the DelphiScript return-clobber    }
     { bug: the caller receives the FilePath argument instead of the file      }
     { content, so the dispatcher reads the request path as the command and    }
     { silently processes nothing. See delphiscript_result_clobber.            }
-    Result := '';
-    If Not FileExists(FilePath) Then Exit;
     Content := '';
-    Attempt := 0;
-    While Attempt < 12 Do
-    Begin
-        Inc(Attempt);
-        Ok := False;
-        SL := TStringList.Create;
-        Try
-            Try
-                SL.LoadFromFile(FilePath);
-                Content := SL.Text;
-                Ok := True;
-            Except
-                Ok := False;
-            End;
-        Finally
-            SL.Free;
-        End;
-        If Ok Then Break;
-        Sleep(15);
+    SL := TStringList.Create;
+    Try
+        If LoadTextFile(SL, FilePath) Then Content := SL.Text;
+    Finally
+        SL.Free;
     End;
     Result := Content;
 End;
@@ -3077,8 +3104,8 @@ Begin
     { SaveToFile goes through a TFileStream and raises an ordinary VCL         }
     { exception that Try/Except catches cleanly -- no engine modal. The lock   }
     { is transient (Defender scan, or Python reading the response mid-write),  }
-    { so retry briefly. Mirrors ReadFileContent and the proven sibling-MCP     }
-    { idiom (OutputLines.Text := json; SaveToFile).                           }
+    { so retry briefly. Same idiom as the proven sibling MCP                  }
+    { (OutputLines.Text := json; SaveToFile).                                 }
     { CLEAR THE DESTINATION FIRST, with calls that cannot raise.
 
       MEASURED: EFCreateError, "Cannot create file ... because it is
@@ -3913,3 +3940,10 @@ End;
 { Request dispatch and the poll timer are in StatusForm.pas (the pump's     }
 { handler must live in the form's own unit); the StartMCPServer entry point }
 { stays in Dispatcher.pas, which compiles last.                             }
+
+{ UnitStamp_Main - which build of Main.pas Altium compiled; 'dev' here. }
+{ install-scripts writes the hash of this file into the deployed copy. }
+Function UnitStamp_Main(Dummy : Integer) : String;
+Begin
+    Result := 'dev';
+End;

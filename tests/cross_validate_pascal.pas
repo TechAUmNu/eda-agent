@@ -208,8 +208,17 @@ Begin
 
       Swapping is complete because FloatToStr emits only digits, a sign, an
       exponent 'E' and the single decimal separator. It never emits a
-      thousands separator, which is FloatToStrF with ffNumber. }
+      thousands separator, which is FloatToStrF with ffNumber.
+
+      NAN AND INF ARE NOT JSON. FloatToStr writes them for a failed
+      computation, and the whole reply then failed to parse, which the
+      bridge could only report as a crash mid-write. They go out as null. }
     Result := FloatToStr(Value);
+    If (Pos('NAN', UpperCase(Result)) > 0) Or (Pos('INF', UpperCase(Result)) > 0) Then
+    Begin
+        Result := 'null';
+        Exit;
+    End;
     Sep := DecimalSeparator;
     If Sep <> '.' Then
     Begin

@@ -896,6 +896,10 @@ def _process_doc_by_path(w, doc_path, mode="modify"):
               RenderPropertyDiagJson=lambda d: "{}", ModifyOutcomeJson=lambda d: "")
     main = load(_ALTIUM / "Main.pas", minimum=20)
     build(main, [n for n in ["SchDocMarkPath"] if n in main], ns)
+    # upstream's filter refusal (2026.10.13 merge): ProcessDocByPath refuses
+    # a filter that is not Name=Value pairs through Utils.FilterProblem.
+    utils = load(_ALTIUM / "Utils.pas", minimum=20)
+    build(utils, [n for n in ["FilterProblem"] if n in utils], ns)
     build(load(_ALTIUM / "Generic.pas", minimum=100), ["ProcessDocByPath"], ns)
     return ns["ProcessDocByPath"](doc_path, 1, "", "", "", mode, "1", 0), edited
 

@@ -681,6 +681,79 @@ which is why they are written down rather than left to the checker.
    creates it. For right angles there is no rule at all: the nearest
    check fires below 90 degrees, so a board full of right-angle corners
    passes DRC silently. Look at it, or read back what you placed.
+
+## Board layout method
+
+A board is finished when it is correct, verified against the
+datasheets, and organised: blocks recognisable, parts in aligned rows
+and columns, signal flow readable. A board with every net connected and
+parts strewn about is not finished. People judge a layout by its
+organisation first, and function and routability follow from the same
+discipline.
+
+1. **Floorplan before placement.** In this order: the fixed skeleton
+   (outline, mounting holes and their keep-outs on both sides,
+   connectors at their mechanical positions, modules, and any part a
+   datasheet pins down); the corridors of critical routes (high-speed
+   pairs, high current), run along region edges and never through a
+   region that must stay contiguous, such as an analog section; the
+   sections (analog, power, digital, IO), each one contiguous area
+   sized from about twice its parts' area; then one rectangle per
+   sub-block, in signal-flow order (connector, protection,
+   conditioning, processing), next to the blocks it shares nets with.
+   The plan's functional blocks are these sub-blocks, so the same names
+   drive the schematic and the board. Moving a corridor is cheap now
+   and expensive after routing.
+
+2. **Lay each block out to a pattern.** An IC at the centre, turned so
+   its pads face what they connect to, and each part on a pin in a
+   column on that pin's side: decoupling caps closest, then the other
+   parts on the pin, then the parts chained to them. Caps on a shared
+   rail are spread over its ICs, one each first. A pull-up sits by its
+   signal pin, not its rail pin. Passive-only blocks go in rows, same
+   orientation, uniform pitch. Repeated channels are identical tiles
+   on a grid.
+
+3. **Read the legaliser's moves.** A part pushed more than about 2 mm
+   to clear a collision means the floorplan is wrong there: fix the
+   floorplan, not the part. If a placement looks scattered, the method
+   is wrong, and tuning a cost-driven placer's weights will not fix it.
+
+4. **Route in stages, critical first.** Differential pairs (coupled,
+   45 degree corners, skew matched with bumps on the shorter track),
+   sense lines, power paths as copper areas, plane fan-out (a dog-bone
+   from each plane pad to a via beside it; a via in a pad only on an
+   exposed or thermal pad, or a BGA ball with no room, and each one
+   listed as a fab note), buses planned as a whole (one lane per net at
+   a fixed pitch, taken outside-in so lanes nest), then the rest by
+   class, then leftovers. Copper from an earlier stage is fixed for the
+   later ones. When earlier copper blocks a bus, rip it up and re-plan
+   it with the bus instead of detouring round it. A pin that cannot be
+   reached is a placement problem at that pin: fix the placement there
+   rather than re-running the router.
+
+5. **Silkscreen on a dense board.** Keep designators on the assembly
+   drawing (`pcb_copy_designators_to_mech`, then
+   `pcb_set_text_visibility`) and keep only what a person handling the
+   board needs: board name and revision, connector functions, LED and
+   test-point labels, pin-1 marks. Where designators stay, size them to
+   the fabricator's minimum with `pcb_set_text_style`.
+
+6. **Small steps, each one checked.** Open `design_live_view` at the
+   start so the person can watch the board change. Make one change,
+   look at the result (the live view, `pcb_render_svg`,
+   `design_visual_review`), fix what you see, then make the next.
+   Record each decision with its reason before acting on it
+   (`design_live_note`), so the person following the run can see why
+   the board looks the way it does. A long unchecked run that ends in
+   one big reveal is how a broken board gets delivered.
+
+7. **Every phase ends with numbers.** Overlaps, pad gaps, parts on
+   keep-outs, routed nets out of the total, corners sharper than 45
+   degrees, return vias, plane regions in one piece, DRC: all from
+   `pcb_layout_audit`. A phase is done when its numbers say so, not
+   when it looks done. At the end, `design_session_report` assembles
+   the design report from what the run recorded.
 """
 
 

@@ -55,6 +55,7 @@ from ctypes import POINTER, byref, c_long, wintypes
 
 from . import controls
 from . import windows as win
+from .captions import plain
 
 try:                                            # pragma: no cover - platform
     import comtypes
@@ -145,9 +146,25 @@ def _same(a: str, b: str) -> bool:
     the menu shows "Rules".
     """
     def flat(text):
-        return (str(text or "").replace("&", "").strip()
+        return (plain(text).replace("&", "").strip()
                 .rstrip(".").strip().lower())
     return flat(a) == flat(b)
+
+
+def _name_at(x: int, y: int) -> str:
+    """The accessible name of whatever is under screen point (x, y), or ''.
+
+    '' also means it could not be read, so a caller may only refuse on a
+    name that is present and different, never on an empty one.
+    """
+    try:
+        ptr = POINTER(IAccessible)()
+        child = VARIANT()
+        ctypes.oledll.oleacc.AccessibleObjectFromPoint(
+            wintypes.POINT(int(x), int(y)), byref(ptr), byref(child))
+        return (ptr.accName(child) or "").strip()
+    except Exception:                            # pragma: no cover - guard
+        return ""
 
 
 def _visible_rect(node):
@@ -184,8 +201,21 @@ def _tap(pid: int, vk: int) -> None:
     _u().keybd_event(vk, 0, _KEYUP, 0)
 
 
-def _click(pid: int, x: int, y: int, after: float = 0.3) -> None:
+def _click(pid: int, x: int, y: int, after: float = 0.3, expect: str = "",
+           until=None, wait: float = 1.0) -> str:
     """A real click, with the pointer returned to where the user left it.
+
+    Returns '' when the click went in, else why it did not. With
+    ``expect``, the item under the pointer must carry that name before
+    the press; a different name refuses.
+
+    THE POINTER STAYS PUT UNTIL THE CLICK HAS TAKEN. The release is
+    queued input, delivered where the pointer is when Windows gets to
+    it. Put back at once, the release could land on whatever item lay
+    under the user's pointer, and a menu path ran a neighbouring command
+    while reporting the one asked for. The pointer now waits on
+    ``until`` (the menu opening, or closing) or, without one, a short
+    floor, and only then goes back.
 
     THE THREE SLEEPS HERE WERE 0.58s OF EVERY CLICK, and a menu path pays
     one per level. Two of them are now waits on the thing they were
@@ -217,6 +247,11 @@ def _click(pid: int, x: int, y: int, after: float = 0.3) -> None:
         return abs(here.x - x) <= 2 and abs(here.y - y) <= 2
 
     win.wait_until(_arrived, 0.2)
+    if expect:
+        under = _name_at(x, y)
+        if under and not _same(under, expect):
+            user32.SetCursorPos(*origin)
+            return f"the pointer is over {under!r}, not {expect!r}"
     # Re-checked after the pointer move: moving the cursor over another
     # application can raise it, and the press below would then land
     # there. The cursor is restored in the finally so a refusal here
@@ -229,9 +264,12 @@ def _click(pid: int, x: int, y: int, after: float = 0.3) -> None:
     except win.ForegroundLost:
         user32.SetCursorPos(*origin)
         raise
-    if after > 0:
-        time.sleep(after)
+    if until is not None:
+        win.wait_until(until, wait)
+    else:
+        time.sleep(max(after, 0.15))
     user32.SetCursorPos(*origin)
+    return ""
 
 
 def _click_node(pid: int, node, after: float = 0.3) -> bool:
@@ -241,6 +279,19 @@ def _click_node(pid: int, node, after: float = 0.3) -> bool:
     x, y, width, height = rect
     _click(pid, x + width // 2, y + height // 2, after=after)
     return True
+
+
+def _press(pid: int, node, wanted: str, until) -> str:
+    """Click a menu entry checked to be ``wanted``: '' or why not.
+
+    The rectangle is read twice and must agree, so an entry still being
+    laid out is not clicked at a position it is leaving."""
+    rect = _visible_rect(node)
+    if rect is None or not win.wait_until(lambda: _visible_rect(node) == rect, 0.3):
+        return f"{wanted!r} has no settled clickable rectangle"
+    x, y, width, height = rect
+    return _click(pid, x + width // 2, y + height // 2, expect=wanted,
+                  until=until, wait=1.0)
 
 
 def frame(pid: int):
@@ -398,7 +449,12 @@ def _open_items(pid: int, timeout: float = 6.0) -> list:
             interval = min(0.25, interval * 2)
 
 
-def click_path(pid: int, path: str, settle: float = 1.2) -> dict:
+def _flat_title(text: str) -> str:
+    return "".join(ch for ch in str(text or "").lower() if ch.isalnum())
+
+
+def click_path(pid: int, path: str, settle: float = 1.2, expect_dialog: str = "",
+               expect_timeout: float = 10.0) -> dict:
     """Invoke a menu command by path, e.g. ``Design|Rules...``.
 
     Each level is matched by NAME against what is actually on screen and
@@ -412,11 +468,16 @@ def click_path(pid: int, path: str, settle: float = 1.2) -> dict:
             trailing ellipsis are ignored, so "Design|Rules" and
             "&Design|Rules..." both work.
         settle: pause after each click for the next level to be built.
+        expect_dialog: part of the title of the dialog the command opens.
+            The reply is ok only when such a dialog appears within
+            ``expect_timeout``; another dialog, or none, is a failure
+            that names what did open.
 
     Returns:
-        Dict with ``ok``; on failure ``reason`` and ``offered``, which
-        lists what that level actually contained. That list is what
-        turns a wrong caption into a one-line correction.
+        Dict with ``ok`` and ``opened``, the titles of dialogs that
+        appeared; on failure ``reason`` and ``offered``, which lists
+        what that level actually contained. That list is what turns a
+        wrong caption into a one-line correction.
     """
     if not available():
         return {"ok": False, "reason": (
@@ -430,7 +491,25 @@ def click_path(pid: int, path: str, settle: float = 1.2) -> dict:
     # every executor entry shares (the batch dialog driver had none and
     # read a form full of options as having none).
     with controls.com_apartment():
-        return _click_path(pid, path, settle)
+        before = {d.hwnd for d in win.dialogs(pid)}
+        out = _click_path_read_twice(pid, path, settle)
+        if not out.get("ok"):
+            return out
+
+        def fresh() -> list:
+            return [d.title for d in win.dialogs(pid) if d.hwnd not in before]
+
+        if expect_dialog:
+            want = _flat_title(expect_dialog)
+            win.wait_until(lambda: any(want in _flat_title(t) for t in fresh()),
+                           expect_timeout)
+        out["opened"] = fresh()
+        if expect_dialog and not any(_flat_title(expect_dialog) in _flat_title(t)
+                                     for t in out["opened"]):
+            out.update(ok=False, opened_instead=out["opened"], reason=(
+                f"clicked {out['path']!r}, but {out['opened'] or 'no dialog'} "
+                f"opened instead of {expect_dialog!r}"))
+        return out
 
 
 def bring_to_front(pid: int) -> bool:
@@ -485,6 +564,34 @@ def bring_to_front(pid: int) -> bool:
     return True
 
 
+def _click_path_read_twice(pid: int, path, settle: float) -> dict:
+    """``_click_path``, walked once more when a level's items read wrong.
+
+    MEASURED on AD 26.10.1.6: the first read of Tools came back "a menu
+    opened but exposed no items" one time in six. Reported on AD 25:
+    asked for Tools, the items read were the Design menu's about one time
+    in four, and the same call worked straight after. Nothing here can
+    tell which menu a popup belongs to, so "not found" is retried too.
+
+    Both failures happen before the last entry is pressed, so no command
+    has run and the walk can be made again. Once only, and when both
+    reads fail the reply carries both.
+    """
+    first = _click_path(pid, path, settle)
+    if first.get("ok") or not first.pop("_read_failed", False):
+        return first
+    close_open_menu(pid)
+    second = _click_path(pid, path, settle)
+    second.pop("_read_failed", None)
+    second["retried"] = True
+    second["first_read"] = {"reason": first.get("reason"),
+                            "offered": first.get("offered", [])}
+    if not second.get("ok"):
+        second["reason"] = (f"{second.get('reason')}. Read twice; the first "
+                            f"read said: {first.get('reason')}")
+    return second
+
+
 def _click_path(pid: int, path, settle: float) -> dict:
     levels = _levels(path)
     if not levels:
@@ -507,41 +614,65 @@ def _click_path(pid: int, path, settle: float) -> dict:
                            f"bar is per editor, so the matching document "
                            f"kind has to be focused first"),
                 "offered": sorted(top)}
-    # after=0 and no settle: _open_items below polls for up to six
-    # seconds, so a fixed pause here only postpones its first look. The
-    # patience is unchanged, the waiting is not paid when the menu is
-    # already up.
-    if not _click_node(pid, match, after=0.0):
-        return {"ok": False,
-                "reason": f"{levels[0]!r} has no clickable rectangle"}
+
+    def _opened(before: set):
+        return lambda: any(w.hwnd not in before and _items_of(w.hwnd)
+                           for w in _submenus(pid))
+
+    def _closed():
+        return not _submenus(pid)
+
+    before = {w.hwnd for w in _submenus(pid)}
+    why = _press(pid, match, levels[0],
+                 _opened(before) if len(levels) > 1 else _closed)
+    if why:
+        close_open_menu(pid)
+        return {"ok": False, "reason": why}
 
     for depth, wanted in enumerate(levels[1:], start=1):
-        entries = _open_items(pid)
+        # Only the popup this level opened is searched. Every open popup
+        # used to be read together, the parent's entries included, and
+        # the first name match was taken.
+        popup = _newest_popup(pid, before)
+        entries = _items_of(popup) if popup else []
         if not entries:
             close_open_menu(pid)
             return {"ok": False, "reason": (
                 f"a menu opened but exposed no items, so {wanted!r} could "
                 f"not be looked for. The accessible layer returned "
                 f"nothing, which usually means COM is not initialised on "
-                f"this thread"), "offered": []}
+                f"this thread"), "offered": [], "_read_failed": True}
 
-        hit = next((e for e in entries if _same(_name(e), wanted)), None)
-        if hit is None:
+        hits = [e for e in entries if _same(_name(e), wanted)]
+        if not hits:
             offered = [_name(e) for e in entries]
             close_open_menu(pid)
             return {"ok": False,
                     "reason": f"{wanted!r} is not in {levels[depth - 1]!r}",
-                    "offered": [o for o in offered if o]}
-        if not _click_node(pid, hit, after=0.0):
+                    "offered": [o for o in offered if o],
+                    "_read_failed": True}
+        if len({_visible_rect(h) for h in hits}) > 1:
             close_open_menu(pid)
-            return {"ok": False,
-                    "reason": f"{wanted!r} has no clickable rectangle"}
-        # Either the next level opens, or on the final level the menu
-        # closes because the command ran. Both are observable, and both
-        # beat pausing for settle regardless of which happened.
-        win.wait_until(lambda: not _submenus(pid) or bool(_open_items(pid, 0.0)),
-                       settle)
+            return {"ok": False, "reason": (
+                f"{levels[depth - 1]!r} has {len(hits)} entries named "
+                f"{wanted!r}, so which one to run is a guess"),
+                "offered": [_name(e) for e in entries if _name(e)]}
+        final = depth == len(levels) - 1
+        before = {w.hwnd for w in _submenus(pid)}
+        why = _press(pid, hits[0], wanted, _closed if final else _opened(before))
+        if why:
+            close_open_menu(pid)
+            return {"ok": False, "reason": why}
 
+    # A command runs when its entry is clicked and the menu goes away. A
+    # menu still open means the click opened a submenu, or did not land,
+    # and in neither case did a command run.
+    win.wait_until(_closed, settle)
+    if not _closed():
+        close_open_menu(pid)
+        return {"ok": False, "reason": (
+            f"the menu stayed open after {levels[-1]!r} was clicked, so no "
+            f"command ran. A path must end at a command, not a submenu")}
     return {"ok": True, "path": "|".join(levels)}
 
 
@@ -914,7 +1045,7 @@ def click_toolbar(pid: int, name: str, settle: float = 0.8) -> dict:
         return listing
 
     def flat(text):
-        return str(text or "").replace("&", "").strip().lower()
+        return plain(text).replace("&", "").strip().lower()
 
     hit = next((b for b in listing["buttons"]
                 if flat(b["name"]) == flat(name)), None)

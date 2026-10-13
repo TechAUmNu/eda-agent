@@ -202,10 +202,20 @@ def test_set_plane_net_docstring_matches_the_bridge():
         encoding="utf-8")
     start = src.index("async def pcb_set_plane_net")
     doc = src[start:src.index('"""', src.index('"""', start) + 3)]
-    assert "READ BACK" not in doc
-    assert "CANNOT TIE THE NET YET" in doc
     body = strip_comments(_bodies("PCB.pas")["PCB_SetPlaneNet"])
+    # The layer object's Net is never touched (the measured modal), and the
+    # docstring says so whichever route the bridge has.
     assert "LayerObj.Net" not in body
+    assert "``Net``" in doc and "never touched" in doc
+    if "InternalPlaneNetName" in body:
+        # Upstream's route (2026.10.13 merge): written, then READ BACK.
+        assert "Board.InternalPlaneNetName[TargetLayer] :=" in body
+        assert "NetBack := Board.InternalPlaneNetName[TargetLayer]" in body
+        assert "READ BACK" in doc and "InternalPlaneNetName" in doc
+        assert "CANNOT TIE THE NET YET" not in doc
+    else:
+        assert "READ BACK" not in doc
+        assert "CANNOT TIE THE NET YET" in doc
 
 
 def test_label_orientation_is_documented_as_the_ordinal():

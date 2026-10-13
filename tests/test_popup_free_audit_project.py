@@ -379,6 +379,13 @@ def _run_audit(name: str, board: _Board, params: str = "{}"):
                                          E_BOT: "BottomLayer"}.get(layer, "L%d" % layer),
         "PCBPrimitivePos": _pcb_primitive_pos,
         "ILayer": _ILayer(rec),
+        # Audit.pas PadEdgeGapMils (upstream's outline geometry, taken by the
+        # 2026.10.13 merge; its own tests are test_pads_near_a_round_edge.py):
+        # here the fixture's modelled gap, in mils. It types the pad or via
+        # itself, so it is not the base-typed read these tests police.
+        "PadEdgeGapMils": lambda outline, obj: obj.edge_dist / MIL,
+        # Utils.pas FloatToJsonStr: Delphi FloatToStr, '.' separator.
+        "FloatToJsonStr": lambda v: format(float(v), ".15g"),
     })
 
     def base_member(obj, member):

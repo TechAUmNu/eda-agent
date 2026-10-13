@@ -248,7 +248,9 @@ def test_description_and_comment_are_properties_not_parameters(monkeypatch):
         "Description": "property:ComponentDescription",
         "comment": "property:Comment",
         "MPN": "parameter",
-        "Footprint": "skipped:read-only"}
+        # Written through the footprint model since the 2026.10.13 merge
+        # (Gen_SetSchComponentsParameters -> SetPlacedFootprintName).
+        "Footprint": "model:Footprint"}
 
 
 @pytest.mark.parametrize("key,route", [
@@ -258,7 +260,7 @@ def test_description_and_comment_are_properties_not_parameters(monkeypatch):
     ("Comment", "property:Comment"),
     ("Value", "property:Comment"),
     ("value", "parameter"),
-    ("Footprint", "skipped:read-only"),
+    ("Footprint", "model:Footprint"),
     ("Manufacturer", "parameter"),
 ])
 def test_key_routes(key, route):

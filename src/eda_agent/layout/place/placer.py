@@ -25,6 +25,10 @@ Parts keep the side they were on. Nets with very many pins (ground and
 power, which reach every part by a plane or a pour) are left out of the
 wirelength, since pulling every part towards every other is what they
 would do.
+
+That is the "analytic" strategy. The "blocks" strategy (``floorplan``)
+plans the board by sub-circuit instead and uses this class for its parts,
+outlines and rasters.
 """
 
 from __future__ import annotations
@@ -60,6 +64,18 @@ IC_PADS = 8
 #: decoupling.
 DECAP_PULL = 4.0
 TURNS = (0.0, 90.0, 180.0, 270.0)
+#: How a board is placed: "analytic" (the wirelength placement in this
+#: module) or "blocks" (floorplan first, ``floorplan``). The class places
+#: analytically unless told otherwise; the placement job and
+#: ``pcb_autoplace`` use ``DEFAULT_STRATEGY`` when given none.
+#:
+#: Blocks by default: over 153 boards, scrambled, placed and routed by the
+#: engine, blocks with its fallback (``floorplan.FALLBACK_SHARE``) routed
+#: 95.9% mean against 94.5%, 83 boards complete against 74, and it reads
+#: as sub-circuits rather than a scatter. It left 8 more boards with body
+#: overlaps; those show in the result and in the flagged moves.
+STRATEGIES = ("analytic", "blocks")
+DEFAULT_STRATEGY = "blocks"
 
 
 @dataclass
@@ -156,9 +172,21 @@ def _turn(pts, deg, mirror):
 class Placer:
     def __init__(self, board: LayoutBoard, movable: set[str] | None = None,
                  spacing: float = 4.0, cell: float = 2.5, seed: int = 0,
-                 decap_pull: float = 0.0, spread_density: float = 0.0):
+                 decap_pull: float = 0.0, spread_density: float = 0.0,
+                 strategy: str = "analytic", grid: float | None = None,
+                 fallback: float | None = None):
         from ..bench import is_fixed
 
+        if strategy not in STRATEGIES:
+            raise ValueError(f"unknown placement strategy {strategy!r}; one of {', '.join(STRATEGIES)}")
+        self.strategy = strategy
+        # The blocks strategy's lattice, mils (None: its default, 0.25 mm),
+        # and the share of flagged parts past which it hands the board to
+        # the analytic strategy (None: its default; 0: never).
+        self.grid = grid
+        self.fallback = fallback
+        self._args = dict(movable=movable, spacing=spacing, cell=cell, seed=seed,
+                          decap_pull=decap_pull, spread_density=spread_density)
         self.board = board
         from ..rules import RuleSet as _RS
         # Parts sit at least a clearance apart: pads keep out their own
@@ -522,17 +550,11 @@ class Placer:
             return False
         return not (occ[j0:j0 + h, i0:i0 + w] & mask).any()
 
-    def legalize(self, search: float = 800.0) -> list[str]:
-        """Every movable part to a free spot near where global placement
-        put it; returns the parts that fit nowhere.
-
-        Two rasters are kept per side: what every part keeps out, and its
-        copper alone. A part that fits nowhere whole is placed by its
-        copper, its body allowed over other bodies: people do this on
-        dense boards (a 3D body drawn larger than the part, a part under
-        another's overhang), and left where spreading put it, such a part
-        lay on other parts' copper and shorted it. Those parts are listed
-        in ``body_overlaps``."""
+    def _occupancy(self):
+        """What is closed to parts before any movable one is placed, per
+        side: everything a part keeps out, and copper alone. Off the board,
+        within the board-outline rule of its edge, cutouts, pads of no
+        part, and the fixed parts."""
         c = self.cell
         W = int(math.ceil((self.box[2] - self.box[0]) / c)) + 1
         H = int(math.ceil((self.box[3] - self.box[1]) / c)) + 1
@@ -547,8 +569,8 @@ class Placer:
         # found no edge to keep away from.
         dist = distance_transform_edt(np.pad(inside, 1))[1:-1, 1:-1]
         inside &= dist * c > margin
-        self.occ = {s: ~inside for s in ("top", "bottom")}
-        self.occ_cu = {s: ~inside for s in ("top", "bottom")}
+        occ = {s: ~inside for s in ("top", "bottom")}
+        occ_cu = {s: ~inside for s in ("top", "bottom")}
         # Pads that belong to no part (a mounting hole, a test pad placed
         # on its own) stay where they are and keep their room.
         grow = self.spacing / 2 + 0.71 * c
@@ -565,8 +587,8 @@ class Placer:
                 sides = ("top", "bottom") if not pad.is_smd else \
                     ("bottom",) if layer == "BottomLayer" else ("top",)
                 for side in sides:
-                    self._stamp(self.occ[side], j0, i0, m)
-                    self._stamp(self.occ_cu[side], j0, i0, m)
+                    self._stamp(occ[side], j0, i0, m)
+                    self._stamp(occ_cu[side], j0, i0, m)
                 break
         for p in self.parts:
             if p.fixed and p.keep:
@@ -576,12 +598,26 @@ class Placer:
                 j0, i0, m = self._raster(p.keep, p.x, p.y, p.rot, p.side == BOTTOM, grows)
                 cu = [(pl, g) for pl, g, k in zip(p.keep, grows, p.kinds) if k == "copper"]
                 for side in self._sides(p):
-                    self._stamp(self.occ[side], j0, i0, m)
+                    self._stamp(occ[side], j0, i0, m)
                 if cu:
                     j0, i0, m = self._raster([pl for pl, _ in cu], p.x, p.y, p.rot,
                                              p.side == BOTTOM, [g for _, g in cu])
                     for side in self._sides(p):
-                        self._stamp(self.occ_cu[side], j0, i0, m)
+                        self._stamp(occ_cu[side], j0, i0, m)
+        return occ, occ_cu
+
+    def legalize(self, search: float = 800.0) -> list[str]:
+        """Every movable part to a free spot near where global placement
+        put it; returns the parts that fit nowhere.
+
+        Two rasters are kept per side: what every part keeps out, and its
+        copper alone. A part that fits nowhere whole is placed by its
+        copper, its body allowed over other bodies: people do this on
+        dense boards (a 3D body drawn larger than the part, a part under
+        another's overhang), and left where spreading put it, such a part
+        lay on other parts' copper and shorted it. Those parts are listed
+        in ``body_overlaps``."""
+        self.occ, self.occ_cu = self._occupancy()
         failed = []
         self.body_overlaps = []
         order = sorted((p for p in self.parts if not p.fixed), key=lambda p: -p.area)
@@ -823,9 +859,34 @@ class Placer:
 
     def run(self) -> dict:
         import time
+        if self.strategy == "blocks":
+            from .floorplan import FALLBACK_SHARE, GRID, place_blocks
+            rep = place_blocks(self, grid=self.grid or GRID)
+            share = FALLBACK_SHARE if self.fallback is None else self.fallback
+            movable = sum(1 for p in self.parts if not p.fixed)
+            if share and movable and len(rep["flagged_moves"]) > share * movable:
+                return self._fall_back(rep, len(rep["flagged_moves"]) / movable)
+            return rep
         t0 = time.perf_counter()
         self.global_place()
         failed = self.legalize()
         self.refine()
         return {"failed": failed, "body_overlaps": list(self.body_overlaps),
                 "seconds": round(time.perf_counter() - t0, 1), "hpwl": round(self.hpwl(), 1)}
+
+    def _fall_back(self, rep: dict, share: float) -> dict:
+        """The board placed analytically instead, when the floorplan left
+        too many parts far from their blocks (``FALLBACK_SHARE``): its
+        blocks no longer held together, and wirelength placement routed
+        those boards better. Said so in the result."""
+        other = Placer(self.board, strategy="analytic", **self._args)
+        out = other.run()
+        for p in other.parts:
+            if not p.fixed:
+                mine = self.by_ref[p.ref]
+                mine.x, mine.y, mine.rot = p.x, p.y, p.rot
+        out["strategy"] = "analytic"
+        out["fallback"] = {"from": "blocks", "flagged_share": round(share, 3),
+                           "flagged_moves": len(rep["flagged_moves"]), "blocks": len(rep["blocks"])}
+        out["seconds"] = round(rep["seconds"] + out["seconds"], 1)
+        return out

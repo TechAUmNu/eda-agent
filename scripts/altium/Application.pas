@@ -6,7 +6,10 @@
 
 Function App_Ping(RequestId : String) : String;
 Var
-    Ver, Caught : String;
+    Ver, Caught, ScriptProjects : String;
+    Workspace : IWorkspace;
+    Proj : IProject;
+    I : Integer;
 Begin
     // Return the compiled-in SCRIPT_VERSION so Python can detect a stale
     // Altium script cache. cast_errors surfaces the silent-cast counter
@@ -34,6 +37,33 @@ Begin
     Except
         Ver := '';
     End;
+    // Where the script project is open from. Python compares
+    // SCRIPT_VERSION against a Main.pas it can see, and in a working-tree
+    // setup Altium can have the script project open from somewhere else,
+    // so the open Altium_API.PrjScr paths go back for it to compare.
+    // Read only; a failure costs this field and nothing else. Read
+    // before Caught is built, so a catch here is in this same reply.
+    ScriptProjects := '';
+    Try
+        Workspace := GetWorkspace;
+        If Workspace <> Nil Then
+        Begin
+            For I := 0 To Workspace.DM_ProjectCount - 1 Do
+            Begin
+                Proj := Workspace.DM_Projects(I);
+                If Proj = Nil Then Continue;
+                If Pos('ALTIUM_API.PRJSCR', UpperCase(Proj.DM_ProjectFullPath)) > 0 Then
+                Begin
+                    If ScriptProjects <> '' Then ScriptProjects := ScriptProjects + ',';
+                    ScriptProjects := ScriptProjects + '"'
+                        + EscapeJsonString(Proj.DM_ProjectFullPath) + '"';
+                End;
+            End;
+        End;
+    Except
+        RecordCaughtException('App_Ping:ScriptProjects');
+        ScriptProjects := '';
+    End;
     If LastCaughtStamp = '' Then
         Caught := JsonNull('last_caught')
     Else
@@ -48,7 +78,8 @@ Begin
         '","protocol_version":' + IntToStr(PROTOCOL_VERSION) +
         ',"cast_errors":' + IntToStr(CastErrorCount) +
         ',"caught_exceptions":' + IntToStr(CaughtExceptionCount) +
-        ',' + Caught + '}');
+        ',' + Caught +
+        ',"script_projects":[' + ScriptProjects + ']}');
 End;
 
 Function App_GetVersion(RequestId : String) : String;
@@ -673,7 +704,7 @@ Var
     ServerDoc : IServerDocument;
     Workspace : IWorkspace;
     Project : IProject;
-    AddToProject, Saved, Added, DirOk : Boolean;
+    AddToProject, Saved, Added, DirOk, Focused : Boolean;
 Begin
     DocKind := ExtractJsonValue(Params, 'kind');
     FilePath := ExtractJsonValue(Params, 'file_path');
@@ -775,11 +806,122 @@ Begin
         End;
     End;
 
+    { NOT SAVED IS NOT CREATED. It answered success with saved:false, which }
+    { is what a missing folder produces, and the next call went on as if   }
+    { the file were there.                                                 }
+    If Not Saved Then
+    Begin
+        If DirectoryExists(ExtractFilePath(FilePath)) Then
+            Result := BuildErrorResponse(RequestId, 'NOT_SAVED',
+                'The new document could not be saved to ' + FilePath)
+        Else
+            Result := BuildErrorResponse(RequestId, 'NOT_SAVED',
+                'The new document was not saved: the folder does not exist: '
+                + ExtractFilePath(FilePath));
+        Exit;
+    End;
+
+    { FOCUS THE NEW DOCUMENT. It stayed behind whatever was in front, and  }
+    { the library and board tools act on the focused document, so the next }
+    { authoring call wrote into the old one and reported success. Checked  }
+    { by path afterwards, since a request to focus is not a focus.         }
+    Try
+        Client.ShowDocument(ServerDoc);
+    Except
+        RecordCaughtException('App_CreateDocument:ShowDocument');
+    End;
+    Focused := UpperCase(CurrentFocusedDocPath(0)) = UpperCase(FilePath);
+
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"kind":"' + EscapeJsonString(DocKind) + '"' +
         ',"file_path":"' + EscapeJsonString(FilePath) + '"' +
         ',"saved":' + BoolToJsonStr(Saved) +
+        ',"focused":' + BoolToJsonStr(Focused) +
         ',"added_to_project":' + BoolToJsonStr(Added) + '}');
+End;
+
+{..............................................................................}
+{ App_SaveDocument - save ONE open document: file_path, or the focused one.    }
+{                                                                              }
+{ app_save_all writes every open document, so one that cannot be written (a   }
+{ sheet in a read-only folder) stops a save the caller never asked for. This  }
+{ touches only the named document, never focuses anything and never walks the }
+{ workspace. Whether it reached disk is measured by the file's age, because   }
+{ DoFileSave does not raise when the editor declines, and Modified is         }
+{ reported but not trusted, as App_SaveAll records.                           }
+{..............................................................................}
+
+Function App_SaveDocument(Params : String; RequestId : String) : String;
+Var
+    FilePath, Reason, Ext : String;
+    ServerDoc : IServerDocument;
+    WasModified, Saved : Boolean;
+    AgeBefore, AgeAfter : Integer;
+Begin
+    FilePath := ExtractJsonValue(Params, 'file_path');
+    If FilePath = '' Then FilePath := CurrentFocusedDocPath(0);
+    If FilePath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_DOCUMENT',
+            'No file_path given and no document is focused');
+        Exit;
+    End;
+    { NEVER A SCRIPT UNIT, as the save walks (IsScriptUnitDoc). After a    }
+    { script error Altium reopens and can focus a bridge unit (Library.pas),}
+    { and a save with no file_path would then rewrite the running bridge's }
+    { own source. Refused by extension before any lookup.                  }
+    Ext := UpperCase(ExtractFileExt(Trim(FilePath)));
+    If (Ext = '.PAS') Or (Ext = '.BAS') Or (Ext = '.VBS') Or (Ext = '.JS')
+        Or (Ext = '.TCL') Or (Ext = '.DFM') Or (Ext = '.PRJSCR') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'SCRIPT_UNIT',
+            FilePath + ' is a script file; app_save_document writes design '
+            + 'documents only');
+        Exit;
+    End;
+    ServerDoc := Nil;
+    Try ServerDoc := Client.GetDocumentByPath(FilePath); Except End;
+    If ServerDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_OPEN',
+            FilePath + ' is not open in Altium, so it holds no unsaved edits');
+        Exit;
+    End;
+
+    { Through ModifiedFlagOf (Main.pas), never a raw ServerDoc.Modified: on }
+    { AD 26.10.1.5 the raw flag reads neither true nor false after a       }
+    { SetModified(True), so a raw read reported was_modified false for a   }
+    { schematic the bridge had just edited.                                }
+    WasModified := ModifiedFlagOf(ServerDoc);
+    AgeBefore := -1;
+    Try If FileExists(FilePath) Then AgeBefore := FileAge(FilePath); Except End;
+    Try
+        ServerDoc.SetModified(True);
+    Except
+        RecordCaughtException('App_SaveDocument:SetModified');
+    End;
+    Try
+        ServerDoc.DoFileSave('');
+    Except
+        RecordCaughtException('App_SaveDocument:DoFileSave');
+    End;
+    AgeAfter := -1;
+    Try If FileExists(FilePath) Then AgeAfter := FileAge(FilePath); Except End;
+    Saved := (AgeAfter >= 0) And (AgeAfter > AgeBefore);
+
+    Reason := '';
+    If Not Saved Then
+        Reason := 'The file did not get newer. Altium declines a save while a '
+            + 'command is active in the editor, which an abandoned edit can '
+            + 'leave behind with nothing on screen, and a read-only folder '
+            + 'refuses it. File ages tick every two seconds, so a save right '
+            + 'after another can also read as not written: try again.';
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"file_path":"' + EscapeJsonString(FilePath) + '"'
+        + ',"saved":' + BoolToJsonStr(Saved)
+        + ',"was_modified":' + BoolToJsonStr(WasModified)
+        + ',"reason":"' + EscapeJsonString(Reason) + '"}');
 End;
 
 {..............................................................................}
@@ -1168,9 +1310,17 @@ Begin
         'get_clipboard_text':  Result := App_GetClipboardText(RequestId);
         'create_document':     Result := App_CreateDocument(Params, RequestId);
         'save_all':            Result := App_SaveAll(Params, RequestId);
+        'save_document':       Result := App_SaveDocument(Params, RequestId);
         'diag_workspace':      Result := App_DiagWorkspace(Params, RequestId);
         'stop_server':         Begin SaveAllDirty(0); Running := False; Result := BuildSuccessResponse(RequestId, '{"stopped":true}'); End;
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_ACTION', 'Unknown application action: ' + Action);
     End;
+End;
+
+{ UnitStamp_Application - which build of Application.pas Altium compiled; 'dev' here. }
+{ install-scripts writes the hash of this file into the deployed copy. }
+Function UnitStamp_Application(Dummy : Integer) : String;
+Begin
+    Result := 'dev';
 End;

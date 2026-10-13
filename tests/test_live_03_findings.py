@@ -761,6 +761,10 @@ class _World:
                                "PcbLibMayOpen", "PcbLibEnsureDocPath",
                                "PcbLibDocLibrary", "PcbLibNotOpenMessage",
                                "PcbLibNoDocLibraryMessage") if n in bodies]
+        # upstream (2026.10.13 merge) moves a copy onto its own footprint's
+        # origin; these fixtures model where documents open, not geometry,
+        # so the origins are reported as already agreeing (-1).
+        ns.setdefault("AlignCopiedFootprint", lambda src, dest: -1)
         build(bodies, helpers + ["Lib_CopyFootprint", "Lib_MoveFootprints"], ns)
         return ns
 

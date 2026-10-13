@@ -19,6 +19,9 @@ The dashboard tails ``workspace/activity.log`` and surfaces:
 - A per-command performance table you can sort by N / avg / max.
 - A free-text filter that scopes both feed and perf table.
 - Health probes (script version, version match, IPC liveness).
+- A Layout tab that draws the board as the in-house layout engines
+  change it, with the decisions logged before each step
+  (``design/live.py`` publishes, ``/api/live`` serves).
 
 Server-Sent Events stream from ``/events`` give the browser tab a
 sub-second view of every command without polling. Static assets are
@@ -1902,6 +1905,69 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
             "payload_prefix": entry.payload_prefix,
             "trace": trace_lines,
         })
+
+    # -- Layout tab: the live layout view (design/live.py) -------------------
+    # The engines publish into workspace/live; these endpoints only read it,
+    # so a standalone dashboard shows what the MCP server's jobs publish.
+    live_root = workspace_dir / "live"
+    live_cache: dict[str, Any] = {}
+
+    def _live_doc() -> Optional[dict]:
+        """The latest board.json, parsed once per change on disk.
+
+        A read that fails while the file is being replaced serves the last
+        good document rather than blanking the view for a poll.
+        """
+        from ..design import live
+        try:
+            st = (live_root / live.BOARD_FILE).stat()
+        except OSError:
+            return None
+        stamp = (st.st_mtime_ns, st.st_size)
+        if live_cache.get("stamp") != stamp:
+            doc = live.read_board(live_root)
+            if doc is None:
+                return live_cache.get("doc")
+            live_cache.update(stamp=stamp, doc=doc)
+        return live_cache.get("doc")
+
+    @app.route("/api/live")
+    def live_board() -> Response:
+        """The latest layout snapshot, its version and its diff.
+
+        ``since`` is the version the page already has: when it is still
+        the latest, only the header and progress come back, so polling
+        once a second does not resend the board.
+        """
+        from flask import request as _req
+        from ..design import live
+        progress = live.read_progress(live_root)
+        doc = _live_doc()
+        if doc is None:
+            return jsonify({"ok": True, "version": 0, "empty": True,
+                            "progress": progress})
+        head = {k: doc.get(k) for k in ("version", "time", "ts", "note", "kind")}
+        since = _req.args.get("since", type=int)
+        if since is not None and since == doc.get("version"):
+            return jsonify({"ok": True, "unchanged": True, **head,
+                            "progress": progress})
+        return jsonify({"ok": True, **head, "snapshot": doc.get("snapshot"),
+                        "diff": doc.get("diff"), "progress": progress})
+
+    @app.route("/api/live/decisions")
+    def live_decisions() -> Response:
+        """Logged decisions after sequence number ``since``, oldest first.
+
+        ``last`` is the newest sequence number in the log; a value below
+        the page's own means the log was cleared and the page starts over.
+        """
+        from flask import request as _req
+        from ..design import live
+        since = max(0, _req.args.get("since", default=0, type=int) or 0)
+        rows = live.decisions(0, root=live_root, limit=10 ** 9)
+        last = int(rows[-1].get("seq", 0)) if rows else 0
+        newer = [r for r in rows if int(r.get("seq", 0)) > since][-500:]
+        return jsonify({"ok": True, "decisions": newer, "last": last})
 
     @app.route("/events")
     def events() -> Response:

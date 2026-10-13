@@ -347,7 +347,9 @@ def test_set_property_counts_the_catch_of_the_unproven_region_kind_write():
     ns = _get_property_ns(popups)
     ns.update({f"eRegionKind_{k}": k for k in
                ("BoardCutout", "Cutout", "Copper", "NamedRegion", "Cavity")})
-    _run(["SetPCBProperty"], ns)
+    # upstream's decimal-length refusal (2026.10.13 merge): SetPCBProperty
+    # asks IsLengthProperty / IsFloatStr before writing a length.
+    _run(["IsFloatStr", "IsLengthProperty", "SetPCBProperty"], ns)
     rgn = Fx(popups, ["Kind"], ObjectId=OIDS["eRegionObject"])
     assert ns["SetPCBProperty"](rgn, "Kind", "board_cutout") == -1
     assert ns["_caught"] == ["SetPCBProperty:Kind"]
@@ -685,8 +687,20 @@ def test_set_plane_net_never_touches_the_layer_objects_net():
     plane = LAYERS["eInternalPlane1"]
     layer = Fx(popups, ["Net"], Name="GND plane")
     stack = Fx(popups, LayerObject_V7={plane: layer})
+
+    class _PlaneNets:
+        """IPCB_Board.InternalPlaneNetName[layer], upstream's route, kept by
+        the 2026.10.13 merge: here a build whose write does not take, so
+        the read-back stays empty and the call reports applied false."""
+
+        def __getitem__(self, layer_id):
+            return ""
+
+        def __setitem__(self, layer_id, value):
+            pass
+
     board = Fx(popups, LayerStack_V7=stack, I_ObjectAddress="B",
-               FileName="b.PcbDoc")
+               FileName="b.PcbDoc", InternalPlaneNetName=_PlaneNets())
     ns = _ns(popups, GetPCBBoardAnywhere=lambda d: board,
              ResolveLayerId=lambda b, s: plane,
              FindNetByName=lambda b, n: Fx(popups, Name=n),
@@ -857,8 +871,26 @@ class _IList(list):
 
 
 def _vias_build(ns):
+    # The merged PCB_NormalizeVias (2026.10.13) also calls upstream's
+    # filter / histogram helpers: tests/test_live_editor_component_is_never_
+    # read.py normalize_vias_helpers builds or models them.
+    from tests.test_live_editor_component_is_never_read import (
+        normalize_vias_helpers)
+    normalize_vias_helpers(ns)
     _run(["ViaRuleValue", "MilsToCoordF", "MMToCoord", "PCB_NormalizeVias"],
          ns)
+
+
+#: The counts these tests have always pinned. The merged reply also carries
+#: upstream's matched / unchanged / refusal counts and size histograms.
+_NV_KEYS = ("checked", "changed", "free", "no_rule_values", "via_rule_values")
+
+
+def _nv_counts(ns):
+    import json
+    kind, data = ns["PCB_NormalizeVias"]({}, "r")
+    reply = json.loads(data)
+    return kind, {k: reply[k] for k in _NV_KEYS}
 
 
 def _via(popups, n, free=True):
@@ -884,9 +916,7 @@ def test_normalize_vias_reads_no_constraint_member_off_any_rule():
     ns = _vias_ns(popups, vias, lambda v: dominant, msgs,
                   rules=[clear, listed], kinds=kinds)
     _vias_build(ns)
-    assert ns["PCB_NormalizeVias"]({}, "r") == (
-        "OK", '{"checked":3,"changed":3,"free":3,"no_rule_values":0,'
-              '"via_rule_values":1}')
+    assert _nv_counts(ns) == ("OK", {'checked': 3, 'changed': 3, 'free': 3, 'no_rule_values': 0, 'via_rule_values': 1})
     assert popups == [], popups
     assert ns["_caught"] == []
     assert kinds == [11, 11, 11], "the rule kind must be the literal 11"
@@ -905,9 +935,7 @@ def test_normalize_vias_leaves_a_via_whose_rule_gave_no_values():
                   lambda v: other if v.I_ObjectAddress == "V1" else thin,
                   msgs, rules=[listed])
     _vias_build(ns)
-    assert ns["PCB_NormalizeVias"]({}, "r") == (
-        "OK", '{"checked":3,"changed":2,"free":3,"no_rule_values":1,'
-              '"via_rule_values":1}')
+    assert _nv_counts(ns) == ("OK", {'checked': 3, 'changed': 2, 'free': 3, 'no_rule_values': 1, 'via_rule_values': 1})
     assert [(v.Size, v.HoleSize) for v in vias] == [
         (200000, 100000), (1, 1), (200000, 100000)]
     assert msgs == ["Begin", "End", "Begin", "End"]
@@ -927,9 +955,7 @@ def test_normalize_vias_with_a_template_descriptor_changes_nothing_and_says_so()
                            "v30h10m0mx0) (All)")
     ns = _vias_ns(popups, vias, lambda v: dominant, msgs, rules=[listed])
     _vias_build(ns)
-    assert ns["PCB_NormalizeVias"]({}, "r") == (
-        "OK", '{"checked":2,"changed":0,"free":2,"no_rule_values":2,'
-              '"via_rule_values":0}')
+    assert _nv_counts(ns) == ("OK", {'checked': 2, 'changed': 0, 'free': 2, 'no_rule_values': 2, 'via_rule_values': 0})
     assert [(v.Size, v.HoleSize) for v in vias] == [(1, 1), (1, 1)]
     assert msgs == [] and popups == []
 
@@ -944,9 +970,7 @@ def test_normalize_vias_reads_no_rule_on_a_board_without_free_vias():
     poison = Fx(popups, _VIA_MEMBERS + ["Name", "Descriptor"])
     ns = _vias_ns(popups, vias, lambda v: poison, msgs, rules=[poison])
     _vias_build(ns)
-    assert ns["PCB_NormalizeVias"]({}, "r") == (
-        "OK", '{"checked":2,"changed":0,"free":0,"no_rule_values":0,'
-              '"via_rule_values":0}')
+    assert _nv_counts(ns) == ("OK", {'checked': 2, 'changed': 0, 'free': 0, 'no_rule_values': 0, 'via_rule_values': 0})
     assert OIDS["eRuleObject"] not in ns["_walks"]
     assert popups == [] and msgs == []
 

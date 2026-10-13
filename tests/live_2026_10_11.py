@@ -180,4 +180,20 @@ def file_reader(contents=None, default=OLE_HEAD_CP1252, loads=None):
         def Create(self):
             return _SL()
 
-    return {"TStringList": _Factory(), "Sleep": lambda _ms: None, "Chr": chr}
+    def load_text_file(sl, path):
+        """Main.pas LoadTextFile (upstream's sharing-safe reader, used by
+        FileLooksLoadable since the 2026.10.13 merge): FileOpen with
+        fmShareDenyNone returns -1 on a lock instead of raising, retried
+        12 times; True with SL.Text filled, or False with SL empty."""
+        sl.Text = ""
+        for _attempt in range(12):
+            seen.append(path)
+            value = contents.get(str(path).upper(), default)
+            if value is LockedFile:
+                continue                      # FileOpen = -1, no exception
+            sl.Text = value
+            return True
+        return False
+
+    return {"TStringList": _Factory(), "Sleep": lambda _ms: None, "Chr": chr,
+            "LoadTextFile": load_text_file}

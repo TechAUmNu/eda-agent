@@ -665,6 +665,40 @@ def _via(n):
                            Size=1, HoleSize=1)
 
 
+def normalize_vias_helpers(ns):
+    """What the merged PCB_NormalizeVias (2026.10.13: upstream's
+    size/hole/net filters, histograms and refusals over carrier-local's
+    read-only rule pass) calls besides itself, added to ``ns``.
+
+    Built from the real Pascal: ViaPassesFilter and SetViaGeometry (the
+    via writes, whose PCBM_BeginModify / EndModify the tests count).
+    Modelled: ViaParamCoord (its Problem is a Var parameter, outside the
+    evaluator's subset; absent keys answer 0 and leave Problem alone, the
+    only case these fixtures send) and the TStringList Name=Value
+    histogram helpers HistAdd / HistJson / ViaSizeKey (report formatting,
+    no Altium member)."""
+    import json as _json
+    hist: dict = {}
+
+    def hist_add(lst, key):
+        d = hist.setdefault(id(lst), {})
+        d[key] = d.get(key, 0) + 1
+
+    ns.setdefault("Abs", abs)
+    ns.setdefault("BoolToJsonStr", lambda b: "true" if b else "false")
+    ns.setdefault("ExtractJsonValue", lambda params, key: (
+        params.get(key, "") if isinstance(params, dict) else ""))
+    ns.update({
+        "ViaParamCoord": lambda params, key, problem: 0,
+        "HistAdd": hist_add,
+        "HistJson": lambda lst: _json.dumps(hist.get(id(lst), {})),
+        "ViaSizeKey": lambda size, hole: f"{size / 10000:g}/{hole / 10000:g}",
+    })
+    build(_PCB, ["ViaPassesFilter"], ns)
+    build(_bodies("PCBGeneric.pas"), ["SetViaGeometry"], ns)
+    return ns
+
+
 def _vias_run(board):
     msgs: list = []
     caught: list = []
@@ -698,6 +732,7 @@ def _vias_run(board):
         "MMToCoord": lambda mm: round(mm * 10000000 / 25.4),
         "StrToFloatDef": lambda s, d: float(s) if s else d,
     }
+    normalize_vias_helpers(ns)
     build(_PCB, ["ViaRuleValue", "PCB_NormalizeVias"], ns)
     return ns["PCB_NormalizeVias"]({}, "r"), msgs, caught, pre
 

@@ -11,7 +11,9 @@ rasterized back into the obstacle map before the next starts.
 Multi-pin nets grow a tree by sequential closest-pair: route the closest
 terminal pair, then repeatedly route the terminal nearest the tree into
 ANY cell of the tree (steiner-lite -- taps can land mid-segment, which
-is connective copper in Altium).
+is connective copper in Altium). Corner cutting leaves every cell a tap
+lands on in place, and a net is reported routed only if its emitted
+copper joins all of its pads (:func:`net_islands`).
 
 Output tracks are ``{x1, y1, x2, y2, width, layer, net_name}`` and vias
 ``{x, y, net, size, hole_size}`` -- integer mils, key-for-key the
@@ -35,9 +37,12 @@ from eda_agent.route.model import (
     RouteRules,
     RoutingProblem,
     Terminal,
+    dist_point_rect,
     dist_point_seg,
     dist_seg_rect,
     dist_seg_seg,
+    rect_extents,
+    to_rect_frame,
 )
 
 # Lower routes earlier. Unknown classes route with plain signals.
@@ -68,6 +73,9 @@ _DIR_NONE = 4  # start of path / just emerged from a via: next move is free
 #: more than half of the shorter leg, so a short jog keeps its shape.
 _MAX_CHAMFER_CELLS = 4
 _EPS = 1e-6
+
+#: Layer name a violation record gives a via or a through-hole pad.
+_MULTI_LAYER = "MultiLayer"
 
 
 @dataclass
@@ -179,8 +187,18 @@ def validate_solution(problem: RoutingProblem,
     Verifies, for every pair of DIFFERENT nets, that no same-layer
     track/track, track/pad, track/via or via/via spacing falls below
     half-width + half-width + clearance (mils) -- which also catches
-    same-layer crossings (distance 0). Returns ``{"ok": bool,
-    "violations": [...], "checked": n}``.
+    same-layer crossings (distance 0). Each violation names the layer
+    of both objects (``layer``, ``layer_b``; ``MultiLayer`` for a via
+    or a through-hole pad).
+
+    Also verifies that every net the solution reports routed is one
+    piece of copper: its pads, its new tracks and vias, and the copper
+    it already had. Clearance alone passes a net whose track stops
+    short of the rest of it. A net in more than one island is listed in
+    ``unconnected`` with its pad centres grouped by island.
+
+    Returns ``{"ok": bool, "violations": [...], "unconnected": [...],
+    "checked": n}``; ``ok`` is False if either list is non-empty.
     """
     clearance = problem.rules.clearance_mils
     tracks = solution.get("tracks") or []
@@ -190,13 +208,16 @@ def validate_solution(problem: RoutingProblem,
     checked = 0
 
     def _report(kind: str, net_a: str, net_b: Any,
-                dist: float, need: float, where: tuple) -> None:
+                dist: float, need: float, where: tuple,
+                layer: str, layer_b: str) -> None:
         violations.append({
             "kind": kind, "net_a": net_a,
             "net_b": net_b if net_b is not None else "",
             "distance_mils": round(dist, 3),
             "required_mils": round(need, 3),
             "at": [int(round(w)) for w in where],
+            "layer": layer,
+            "layer_b": layer_b,
         })
 
     # Track vs track (same layer, different nets).
@@ -212,7 +233,8 @@ def validate_solution(problem: RoutingProblem,
                              b["x1"], b["y1"], b["x2"], b["y2"])
             if d < need - _EPS:
                 _report("track_track", a["net_name"], b["net_name"],
-                        d, need, (a["x1"], a["y1"]))
+                        d, need, (a["x1"], a["y1"]),
+                        str(a["layer"]), str(b["layer"]))
 
     # Track vs static copper (pads / existing tracks / existing vias).
     for a in tracks:
@@ -227,7 +249,8 @@ def validate_solution(problem: RoutingProblem,
             if g["kind"] == "rect":
                 need = ahw + clearance
                 d = dist_seg_rect(a["x1"], a["y1"], a["x2"], a["y2"],
-                                  g["cx"], g["cy"], g["hw"], g["hh"])
+                                  g["cx"], g["cy"], g["hw"], g["hh"],
+                                  g.get("rot", 0.0))
                 where = (g["cx"], g["cy"])
             elif g["kind"] == "seg":
                 need = ahw + g["hw"] + clearance
@@ -241,7 +264,8 @@ def validate_solution(problem: RoutingProblem,
                 where = (g["x"], g["y"])
             if d < need - _EPS:
                 _report(f"track_{g['kind']}", a["net_name"], g["net"],
-                        d, need, where)
+                        d, need, where,
+                        str(a["layer"]), _geom_layer_name(problem, g))
 
     # Vias span every layer: check against all tracks, pads, and vias.
     for i, v in enumerate(vias):
@@ -255,7 +279,8 @@ def validate_solution(problem: RoutingProblem,
                                a["x1"], a["y1"], a["x2"], a["y2"])
             if d < need - _EPS:
                 _report("via_track", v["net"], a["net_name"],
-                        d, need, (v["x"], v["y"]))
+                        d, need, (v["x"], v["y"]),
+                        _MULTI_LAYER, str(a["layer"]))
         for g in problem.geoms:
             if g["net"] == v["net"]:
                 continue
@@ -263,7 +288,8 @@ def validate_solution(problem: RoutingProblem,
             if g["kind"] == "rect":
                 need = vr + clearance
                 d = dist_point_rect_edge(v["x"], v["y"],
-                                         g["cx"], g["cy"], g["hw"], g["hh"])
+                                         g["cx"], g["cy"], g["hw"], g["hh"],
+                                         g.get("rot", 0.0))
             elif g["kind"] == "seg":
                 need = vr + g["hw"] + clearance
                 d = dist_point_seg(v["x"], v["y"],
@@ -273,7 +299,8 @@ def validate_solution(problem: RoutingProblem,
                 d = math.hypot(v["x"] - g["x"], v["y"] - g["y"])
             if d < need - _EPS:
                 _report(f"via_{g['kind']}", v["net"], g["net"],
-                        d, need, (v["x"], v["y"]))
+                        d, need, (v["x"], v["y"]),
+                        _MULTI_LAYER, _geom_layer_name(problem, g))
         for w in vias[i + 1:]:
             if w["net"] == v["net"]:
                 continue
@@ -282,15 +309,203 @@ def validate_solution(problem: RoutingProblem,
             d = math.hypot(v["x"] - w["x"], v["y"] - w["y"])
             if d < need - _EPS:
                 _report("via_via", v["net"], w["net"],
-                        d, need, (v["x"], v["y"]))
+                        d, need, (v["x"], v["y"]),
+                        _MULTI_LAYER, _MULTI_LAYER)
 
-    return {"ok": not violations, "violations": violations,
+    # Connectivity, per net the solution says it routed. A solution with
+    # no per-net status is checked for every net that has new copper.
+    nets_info = solution.get("nets")
+    if isinstance(nets_info, dict):
+        check_nets = sorted(
+            n for n, r in nets_info.items()
+            if isinstance(r, dict) and r.get("status") == "routed")
+    else:
+        check_nets = sorted({str(t["net_name"]) for t in tracks}
+                            | {str(v["net"]) for v in vias})
+    static_by_net: dict[Any, list[dict[str, Any]]] = {}
+    for g in problem.geoms:
+        static_by_net.setdefault(g["net"], []).append(g)
+    tracks_by_net: dict[str, list[dict[str, Any]]] = {}
+    for t in tracks:
+        tracks_by_net.setdefault(str(t["net_name"]), []).append(t)
+    vias_by_net: dict[str, list[dict[str, Any]]] = {}
+    for v in vias:
+        vias_by_net.setdefault(str(v["net"]), []).append(v)
+    unconnected: list[dict[str, Any]] = []
+    for net in check_nets:
+        groups = _islands(problem, tracks_by_net.get(net, []),
+                          vias_by_net.get(net, []),
+                          static_by_net.get(net, []))
+        if len(groups) > 1:
+            unconnected.append({
+                "net": net,
+                "islands": len(groups),
+                "pads": [[list(p) for p in grp] for grp in groups],
+            })
+
+    return {"ok": not violations and not unconnected,
+            "violations": violations,
+            "unconnected": unconnected,
             "checked": checked}
 
 
+def _geom_layer_name(problem: RoutingProblem, g: dict[str, Any]) -> str:
+    """Layer name of a static obstacle, for a violation record."""
+    if g["layer"] is not None:
+        return problem.layers[g["layer"]]
+    # Copper on every layer: a through-hole pad or a via. The only track
+    # the model puts on every layer is one drawn on the keep-out layer.
+    if g["kind"] == "seg":
+        return "KeepOutLayer"
+    return _MULTI_LAYER
+
+
+def net_islands(problem: RoutingProblem, net: str,
+                tracks: list[dict[str, Any]],
+                vias: list[dict[str, Any]]) -> list[list[tuple[int, int]]]:
+    """Group a net's pads by the copper that actually joins them (mils).
+
+    The copper is the net's pads (a through-hole pad is on every layer),
+    the ``tracks`` and ``vias`` given (router output shape), and any
+    copper of the net already on the board. Two pieces join when they
+    share a layer and touch: tracks when their centrelines come within
+    the sum of their half widths, a track and a pad when the centreline
+    reaches the pad, and a via on every layer within its radius.
+
+    Returns one list of pad centres per island that holds a pad, each
+    sorted, the islands sorted. A joined net gives exactly one.
+    """
+    static = [g for g in problem.geoms if g["net"] == net]
+    return _islands(problem, tracks, vias, static)
+
+
+def _islands(problem: RoutingProblem,
+             tracks: list[dict[str, Any]],
+             vias: list[dict[str, Any]],
+             static: list[dict[str, Any]]) -> list[list[tuple[int, int]]]:
+    """Union-find over one net's copper; see :func:`net_islands`.
+
+    Each item is ``(kind, layer or None for every layer, bbox, shape)``
+    with the bbox covering the copper itself, so a sweep along x only
+    measures pairs whose copper could touch.
+    """
+    layer_idx = {name.lower(): i for i, name in enumerate(problem.layers)}
+    items: list[tuple[str, int | None, tuple[float, float, float, float],
+                      tuple[float, ...]]] = []
+    pad_items: list[int] = []
+
+    def _add_seg(li: int | None, x1: float, y1: float, x2: float,
+                 y2: float, hw: float) -> None:
+        items.append(("seg", li, (min(x1, x2) - hw, min(y1, y2) - hw,
+                                  max(x1, x2) + hw, max(y1, y2) + hw),
+                      (x1, y1, x2, y2, hw)))
+
+    def _add_circle(x: float, y: float, r: float) -> None:
+        items.append(("circle", None, (x - r, y - r, x + r, y + r),
+                      (x, y, r)))
+
+    for g in static:
+        if g["kind"] == "rect":
+            cx, cy, hw, hh = g["cx"], g["cy"], g["hw"], g["hh"]
+            rot = g.get("rot", 0.0)
+            ex, ey = rect_extents(hw, hh, rot)
+            pad_items.append(len(items))
+            items.append(("rect", g["layer"],
+                          (cx - ex, cy - ey, cx + ex, cy + ey),
+                          (cx, cy, hw, hh, rot)))
+        elif g["kind"] == "seg":
+            _add_seg(g["layer"], g["x1"], g["y1"], g["x2"], g["y2"],
+                     g["hw"])
+        else:
+            _add_circle(g["x"], g["y"], g["r"])
+    for t in tracks:
+        li = layer_idx.get(str(t["layer"]).lower())
+        if li is None:
+            continue  # not routing copper this problem knows about
+        _add_seg(li, float(t["x1"]), float(t["y1"]), float(t["x2"]),
+                 float(t["y2"]), float(t["width"]) / 2.0)
+    for v in vias:
+        _add_circle(float(v["x"]), float(v["y"]), float(v["size"]) / 2.0)
+
+    parent = list(range(len(items)))
+
+    def _find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    order = sorted(range(len(items)), key=lambda k: items[k][2][0])
+    for pos, i in enumerate(order):
+        ki, li_a, box_a, sa = items[i]
+        for q in range(pos + 1, len(order)):
+            j = order[q]
+            kj, li_b, box_b, sb = items[j]
+            if box_b[0] > box_a[2] + _EPS:
+                break  # sorted on x: nothing further along can touch
+            if box_b[1] > box_a[3] + _EPS or box_a[1] > box_b[3] + _EPS:
+                continue
+            if li_a is not None and li_b is not None and li_a != li_b:
+                continue
+            ra, rb = _find(i), _find(j)
+            if ra == rb:
+                continue
+            if _copper_touches(ki, sa, kj, sb):
+                parent[ra] = rb
+
+    groups: dict[int, list[tuple[int, int]]] = {}
+    for k in pad_items:
+        cx, cy = items[k][3][0], items[k][3][1]
+        groups.setdefault(_find(k), []).append(
+            (int(round(cx)), int(round(cy))))
+    return sorted(sorted(grp) for grp in groups.values())
+
+
+def _copper_touches(ka: str, a: tuple[float, ...],
+                    kb: str, b: tuple[float, ...]) -> bool:
+    """True if two same-layer copper shapes touch (mils). Kinds are
+    ``seg`` (x1, y1, x2, y2, hw), ``rect`` (cx, cy, hw, hh[, rot]) and
+    ``circle`` (x, y, r)."""
+    if ka > kb:  # canonical order: circle < rect < seg
+        ka, a, kb, b = kb, b, ka, a
+    if ka == "seg":
+        return dist_seg_seg(*a[:4], *b[:4]) <= a[4] + b[4] + _EPS
+    if ka == "rect" and kb == "seg":
+        return dist_seg_rect(*b[:4], *a) <= b[4] + _EPS
+    if ka == "rect":  # rect / rect
+        if not (a[4:] and a[4]) and not (b[4:] and b[4]):
+            dx = max(0.0, abs(a[0] - b[0]) - a[2] - b[2])
+            dy = max(0.0, abs(a[1] - b[1]) - a[3] - b[3])
+            return math.hypot(dx, dy) <= _EPS
+        # Turned pads: convex shapes touch when an edge of one reaches
+        # the other, or one sits wholly inside the other.
+        if (dist_point_rect(a[0], a[1], *b) <= _EPS
+                or dist_point_rect(b[0], b[1], *a) <= _EPS):
+            return True
+        pts = _rect_corners(*a)
+        return any(dist_seg_rect(*pts[i], *pts[(i + 1) % 4], *b) <= _EPS
+                   for i in range(4))
+    if kb == "seg":  # circle / seg
+        return dist_point_seg(a[0], a[1], *b[:4]) <= a[2] + b[4] + _EPS
+    if kb == "rect":  # circle / rect
+        return dist_point_rect(a[0], a[1], *b) <= a[2] + _EPS
+    return math.hypot(a[0] - b[0], a[1] - b[1]) <= a[2] + b[2] + _EPS
+
+
+def _rect_corners(cx: float, cy: float, hw: float, hh: float,
+                  rot: float = 0.0) -> list[tuple[float, float]]:
+    """A rect's four corners in order, turned ``rot`` degrees about its
+    centre."""
+    a = math.radians(rot)
+    c, s = math.cos(a), math.sin(a)
+    return [(cx + dx * c - dy * s, cy + dx * s + dy * c)
+            for dx, dy in ((-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh))]
+
+
 def dist_point_rect_edge(px: float, py: float, cx: float, cy: float,
-                         hw: float, hh: float) -> float:
+                         hw: float, hh: float, rot: float = 0.0) -> float:
     """Distance from a point to a rect's boundary, 0 inside (mils)."""
+    px, py = to_rect_frame(px, py, cx, cy, rot)
     dx = max(0.0, abs(px - cx) - hw)
     dy = max(0.0, abs(py - cy) - hh)
     return math.hypot(dx, dy)
@@ -329,14 +544,16 @@ def _route_net(problem: RoutingProblem, net: str,
     width = problem.width_for_net(net)
     cls = problem.class_of(net)
 
-    def _fail(k: int, reason: str) -> dict[str, Any]:
+    def _failed(reason: str) -> dict[str, Any]:
         # Partial copper of a failed net is dropped: it would block
         # later nets without delivering connectivity.
         return {
-            "status": "failed",
-            "reason": f"connection {k + 1}/{len(terms) - 1}: {reason}",
+            "status": "failed", "reason": reason,
             "class": cls, "width": width, "tracks": [], "vias": [],
         }
+
+    def _fail(k: int, reason: str) -> dict[str, Any]:
+        return _failed(f"connection {k + 1}/{len(terms) - 1}: {reason}")
 
     # Seed pair: globally closest two terminals (Manhattan on centers).
     best = None
@@ -391,6 +608,13 @@ def _route_net(problem: RoutingProblem, net: str,
         k += 1
 
     tracks, vias = _emit(problem, net, width, paths, terms, tree_xy)
+    # The search joined grid cells; what gets placed is the emitted
+    # copper, after corners are cut and stubs added. Measure that, so a
+    # net is never reported routed while a track stops short of the rest.
+    islands = net_islands(problem, net, tracks, vias)
+    if len(islands) > 1:
+        return _failed(f"the emitted copper leaves the pads in "
+                       f"{len(islands)} separate islands")
     return {
         "status": "routed",
         "class": cls,
@@ -508,7 +732,9 @@ def _reconstruct(parent: dict, last: tuple[int, int, int, int]
 
 
 def _chamfer(problem: RoutingProblem, net: str, li: int,
-             cells: list[tuple[int, int]]) -> list[tuple[int, int]]:
+             cells: list[tuple[int, int]],
+             keep: set[tuple[int, int]] | None = None,
+             ) -> list[tuple[int, int]]:
     """Cut every right-angle corner in a same-layer run into two 45s.
 
     A right angle in signal copper is the first thing a reviewer picks
@@ -519,15 +745,25 @@ def _chamfer(problem: RoutingProblem, net: str, li: int,
     measured: it reroutes earlier nets and strands later ones.
 
     VERIFIED AGAINST THE SAME OBSTACLE MAP the search used. The diagonal
-    crosses cells that neither leg occupies, so every one is checked. A
-    corner whose chamfer would clip a pad keeps its right angle, which
-    is correct and visible rather than clever and shorted.
+    crosses cells that neither leg occupies, so every one is checked,
+    and so are the two cells beside each diagonal step, which the
+    centreline passes between. A corner whose chamfer would clip a pad
+    keeps its right angle, which is correct and visible rather than
+    clever and shorted.
+
+    NEVER CUTS A CELL IN ``keep``. A later branch of the same net is
+    routed into any cell of the tree, so it can end on a corner or on a
+    leg cell the chamfer would delete, and its track would then stop
+    where there is no copper. The caller passes every cell something
+    else joins at (branch ends, vias, pad cells); a cut that would
+    remove one falls back to a shallower cut, or none.
 
     Cuts as deep as it can, never taking more than half of either leg,
     so a short jog keeps its shape and a long run gets a long chamfer.
     """
     if len(cells) < 3:
         return cells
+    keep = keep or set()
 
     def _unit(a: tuple[int, int], b: tuple[int, int]) -> tuple[int, int]:
         return ((b[0] > a[0]) - (b[0] < a[0]),
@@ -556,13 +792,10 @@ def _chamfer(problem: RoutingProblem, net: str, li: int,
             fwd += 1
 
         depth = min(_MAX_CHAMFER_CELLS, back // 2, fwd // 2)
+        step = (din[0] + dout[0], din[1] + dout[1])
         applied = 0
         for d in range(depth, 0, -1):
-            a = (corner[0] - din[0] * d, corner[1] - din[1] * d)
-            step = (din[0] + dout[0], din[1] + dout[1])
-            if all(problem.passable(li, a[0] + step[0] * k,
-                                    a[1] + step[1] * k, net)
-                   for k in range(1, d + 1)):
+            if _cut_is_clear(problem, net, li, corner, din, dout, d, keep):
                 applied = d
                 break
 
@@ -576,7 +809,6 @@ def _chamfer(problem: RoutingProblem, net: str, li: int,
         for _ in range(applied - 1):
             out.pop()
         a = out[-1]
-        step = (din[0] + dout[0], din[1] + dout[1])
         for k in range(1, applied + 1):
             out.append((a[0] + step[0] * k, a[1] + step[1] * k))
         # Resume past the outgoing cells the chamfer replaced.
@@ -587,6 +819,36 @@ def _chamfer(problem: RoutingProblem, net: str, li: int,
     return out
 
 
+def _cut_is_clear(problem: RoutingProblem, net: str, li: int,
+                  corner: tuple[int, int], din: tuple[int, int],
+                  dout: tuple[int, int], d: int,
+                  keep: set[tuple[int, int]]) -> bool:
+    """True if a chamfer of depth ``d`` at ``corner`` is safe to cut.
+
+    The cut removes the corner and the ``d - 1`` cells either side of it
+    on each leg, so none of those may be a cell something else joins
+    at. The new diagonal must sit on passable cells, and so must the two
+    cells beside each diagonal step: the centreline passes between them,
+    and checking only the grid points it lands on would let it clip the
+    corner of an obstacle in between.
+    """
+    if corner in keep:
+        return False
+    for k in range(1, d):
+        if ((corner[0] - din[0] * k, corner[1] - din[1] * k) in keep
+                or (corner[0] + dout[0] * k,
+                    corner[1] + dout[1] * k) in keep):
+            return False
+    sx, sy = din[0] + dout[0], din[1] + dout[1]
+    px, py = corner[0] - din[0] * d, corner[1] - din[1] * d
+    for _ in range(d):
+        for cx, cy in ((px + sx, py + sy), (px + sx, py), (px, py + sy)):
+            if not problem.passable(li, cx, cy, net):
+                return False
+        px, py = px + sx, py + sy
+    return True
+
+
 def _emit(problem: RoutingProblem, net: str, width: int,
           paths: list[list[tuple[int, int, int]]],
           terms: list[Terminal],
@@ -595,6 +857,23 @@ def _emit(problem: RoutingProblem, net: str, width: int,
     tracks: list[dict[str, Any]] = []
     vias: list[dict[str, Any]] = []
     via_at: set[tuple[int, int]] = set()
+
+    # Cells the chamfer must leave in place, per layer: where one path
+    # meets another. Each path is cut on its own, but a later branch was
+    # routed into any cell of the tree, so its end can sit on a corner of
+    # an earlier path; cutting that corner leaves the branch dangling.
+    # Vias and pad cells join copper the same way.
+    keep: list[set[tuple[int, int]]] = [set() for _ in problem.layers]
+    for path in paths:
+        for (li, ix, iy) in (path[0], path[-1]):
+            keep[li].add((ix, iy))
+        for (la, ix, iy), (lb, _x, _y) in zip(path, path[1:]):
+            if la != lb:
+                for layer_keep in keep:
+                    layer_keep.add((ix, iy))
+    for t in terms:
+        for li in t.layers:
+            keep[li].add(t.cell)
 
     def _track(x1: int, y1: int, x2: int, y2: int, layer: str) -> None:
         if (x1, y1) == (x2, y2):
@@ -614,7 +893,8 @@ def _emit(problem: RoutingProblem, net: str, width: int,
         if len(cells) < 2:
             return
         points: list[tuple[int, int]] = []
-        for ix, iy in _chamfer(problem, net, layer_idx, cells):
+        for ix, iy in _chamfer(problem, net, layer_idx, cells,
+                               keep[layer_idx]):
             pt = problem.cell_center(ix, iy)
             if not points or points[-1] != pt:
                 points.append(pt)
@@ -681,6 +961,7 @@ def _flush_run(run: list[tuple[int, int]], layer: str, track_fn) -> None:
 
 __all__ = [
     "RouterOptions",
+    "net_islands",
     "route_geometry",
     "route_problem",
     "validate_solution",

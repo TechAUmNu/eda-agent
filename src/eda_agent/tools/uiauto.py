@@ -41,6 +41,25 @@ _MENU_PATHS = {
     "pcb": "Tools|Update From PCB Libraries...",
 }
 
+#: Part of the title of the wizard each path opens. The click is a
+#: success only when that wizard appears: a path once reported ok while
+#: Signal Integrity's setup dialog opened instead.
+_MENU_EXPECT = {
+    "schematic": "Update From Librar",
+    "pcb": "Update From PCB Librar",
+}
+
+
+def _dialog_state(hwnd):
+    """What a dialog shows, comparable before and after a press: its
+    title and every control's class, text, enabled and visible state.
+    None once the window is gone."""
+    window = windows.capture(hwnd)
+    if window is None:
+        return None
+    return (window.title, tuple(
+        (c.class_name, c.text, c.enabled, c.visible) for c in window.controls))
+
 
 def _altium_pid():
     """(pid, None) or (None, error-dict).
@@ -262,11 +281,13 @@ def register_uiauto_tools(mcp):
             # keystroke and the click.
             loop = asyncio.get_running_loop()
             opened = await loop.run_in_executor(
-                None, menu.click_path, pid, _MENU_PATHS[target])
+                None, lambda: menu.click_path(pid, _MENU_PATHS[target],
+                                              expect_dialog=_MENU_EXPECT[target]))
             if not opened.get("ok"):
                 return {"ok": False, "launch": "menu",
                         "reason": opened.get("reason"),
                         "offered": opened.get("offered"),
+                        "opened_instead": opened.get("opened_instead"),
                         "note": ("nothing was opened, so nothing was "
                                  "driven and no dialog is waiting")}
 
@@ -407,7 +428,8 @@ def register_uiauto_tools(mcp):
     @mcp.tool()
     async def app_click_menu(menu_path: str,
                              may_steal_focus: bool = False,
-                             list_only: bool = False) -> dict[str, Any]:
+                             list_only: bool = False,
+                             expect_dialog: str = "") -> dict[str, Any]:
         """Invoke ANY Altium menu command by path, by driving the menu.
 
         Use this when ``app_run_menu`` will not do, which is more often
@@ -446,10 +468,19 @@ def register_uiauto_tools(mcp):
             list_only: do not invoke. Reports the top-level menus
                 currently on screen, which is the way to find out what
                 this editor context offers.
+            expect_dialog: part of the title of the dialog the command
+                should open. Then ``ok`` means that dialog appeared; any
+                other dialog, or none, fails and names what did open.
 
         Returns:
-            Dict with ``ok``; on failure ``reason`` and ``offered``
-            listing what that level actually contained.
+            Dict with ``ok`` and ``opened`` (titles of dialogs that
+            appeared); on failure ``reason`` and ``offered`` listing what
+            that level actually contained. A path that leaves the menu
+            open (it ended at a submenu, or the click did not land) is a
+            failure: no command ran. A level that reads empty, or without
+            the entry asked for, is walked once more before failing
+            (``retried``); ``first_read`` then says what the first read
+            found, and both reads are in ``reason`` when both fail.
         """
         if not menu.available():
             return {"ok": False, "reason": (
@@ -483,7 +514,7 @@ def register_uiauto_tools(mcp):
                 "may_steal_focus=True if that is acceptable now.")}
 
         return await loop.run_in_executor(
-            None, menu.click_path, pid, menu_path)
+            None, lambda: menu.click_path(pid, menu_path, expect_dialog=expect_dialog))
 
     @mcp.tool()
     async def app_list_open_dialogs() -> dict[str, Any]:
@@ -496,6 +527,12 @@ def register_uiauto_tools(mcp):
         does while a modal is up, and it works precisely when no other
         tool can because it does not use the bridge at all. It reads the
         Win32 process, so a blocked Altium answers it normally.
+
+        ``blocked: false`` ONLY MEANS THE MAIN WINDOW IS NOT DISABLED. It
+        does not mean the UI is alive. After Altium's UI crashed with the
+        process still running, this was reported reading a live pid,
+        blocked false and no dialogs. When the bridge is silent and this
+        says not blocked, look at the screen before calling it a livelock.
 
         FOR EACH DIALOG you get the caption, the message text, every
         button with its enabled state, and a ``kind``:
@@ -599,32 +636,62 @@ def register_uiauto_tools(mcp):
                 if not offered:
                     # NO BUTTON HANDLES AT ALL: a WPF dialog. Its buttons
                     # are not child windows, so there is nothing to click
-                    # and nothing to list. MEASURED on "Unsaved Changes":
-                    # this branch used to refuse and leave the bridge
-                    # blocked, while a plain Enter cleared it instantly.
-                    #
-                    # Only the two keys that map to a dialog's own
-                    # defaults are offered, and the caption still decides
-                    # which, so "Cancel" cannot silently become a save.
+                    # and nothing to list, but they are UI Automation
+                    # elements with names, so the named one is invoked.
                     role = dialog_driver.role_of(button_caption)
-                    key = "escape" if role == "dismiss" else "enter"
                     if role in dialog_driver.COMMITTING \
                             and not allow_irreversible:
                         return {"ok": False, "role": role, "reason": (
                             f"{button_caption!r} commits a change. Pass "
                             f"allow_irreversible=True if that is intended.")}
-                    windows.press_key(target.hwnd, key)
+                    from ..ui import uia
+                    pressed = {}
+                    if uia.available():
+                        pressed = uia.invoke(target.hwnd, button_caption)
+                        if pressed.get("ok"):
+                            shut = windows.wait_for_close(target.hwnd, timeout=5.0)
+                            # Invoked is not answered: a dismiss or advance
+                            # that leaves the dialog up did not take. No
+                            # keyboard retry, which could press twice.
+                            took = shut or role not in ("dismiss", "advance")
+                            return {"ok": took, "dialog": target.title,
+                                    "pressed": button_caption, "method": "uia",
+                                    "dialog_closed": shut,
+                                    "outcome_verified": shut,
+                                    "reason": None if took else (
+                                        f"{button_caption!r} was invoked and "
+                                        f"{target.title!r} is still open")}
+                    # NEVER ENTER. Enter presses the dialog's DEFAULT
+                    # button, whatever was asked for. MEASURED on "Unsaved
+                    # Changes": asked for "Don't Save", the name missed on
+                    # a curly apostrophe, Enter pressed Save, and the reply
+                    # said "Don't Save". Escape is kept for a dismiss,
+                    # because Escape is what a dialog maps to its cancel.
+                    if role != "dismiss":
+                        why = pressed.get("reason") or (
+                            "UI Automation is unavailable here")
+                        return {
+                            "ok": False, "dialog": target.title,
+                            "pressed": None,
+                            "offered": pressed.get("offered", []),
+                            "reason": (
+                                f"{button_caption!r} could not be pressed on "
+                                f"{target.title!r}, which exposes no button "
+                                f"handles ({why}). Nothing was pressed: "
+                                f"Enter would press the dialog's default "
+                                f"button, which need not be this one."),
+                        }
+                    windows.press_key(target.hwnd, "escape")
                     shut = windows.wait_for_close(target.hwnd, timeout=5.0)
                     return {
                         "ok": shut, "dialog": target.title,
                         "pressed": button_caption, "method": "keyboard",
-                        "key": key, "dialog_closed": shut,
+                        "key": "escape", "dialog_closed": shut,
+                        "outcome_verified": shut,
                         "reason": None if shut else (
-                            f"sent {key} because {target.title!r} exposes no "
-                            f"button handles, and the dialog is still open. "
-                            f"Its captions are only readable by OCR, so the "
-                            f"key is a guess at the default action rather "
-                            f"than a press of the named button."),
+                            f"sent Escape for {button_caption!r} because "
+                            f"{target.title!r} exposes no button handles, "
+                            f"and the dialog is still open."),
                     }
                 return {"ok": False,
                         "reason": (f"{button_caption!r} is not a button on "
@@ -641,6 +708,8 @@ def register_uiauto_tools(mcp):
                     f"{button.text!r} commits a change to the design. Pass "
                     f"allow_irreversible=True if that is intended.")}
 
+            before = _dialog_state(target.hwnd)
+            before_dialogs = {d.hwnd for d in open_dialogs}
             windows.click(button)
             closed = windows.wait_for_close(target.hwnd, timeout=5.0)
 
@@ -653,21 +722,31 @@ def register_uiauto_tools(mcp):
             # Staying open is NORMAL for some presses: Validate Changes
             # leaves the change order up on purpose, and a wizard page
             # advances without closing its window. So the verdict turns
-            # on the ROLE, not on closure alone. Only a press whose
-            # whole job is to dismiss can be judged by the window going
-            # away, and only when it was the sole way out.
+            # on the ROLE and on what the dialog did. A dismiss or an
+            # advance that leaves the same window up with the same title,
+            # the same controls saying the same things, and no new dialog
+            # beside it did not take, however many buttons it had: an
+            # Aceptar on a two-button prompt was reported pressed three
+            # times while a person had to click it.
+            changed, new_dialogs = False, []
+            if not closed:
+                after = _dialog_state(target.hwnd)
+                closed = after is None
+                new_dialogs = [d.title for d in windows.dialogs(pid)
+                               if d.hwnd not in before_dialogs]
+                changed = after != before or bool(new_dialogs)
             dismissing = role in ("dismiss", "advance")
-            only_way_out = len(target.buttons()) == 1
-            if not closed and dismissing and only_way_out:
+            if not closed and dismissing and not changed:
                 return {
                     "ok": False,
                     "dialog": target.title,
                     "pressed": button.text,
                     "role": role,
                     "dialog_closed": False,
+                    "dialog_changed": False,
                     "reason": (
-                        f"{button.text!r} was the only button on "
-                        f"{target.title!r} and the dialog is still open, so "
+                        f"{target.title!r} is still open after "
+                        f"{button.text!r} and nothing on it changed, so "
                         f"the press did not take. It was sent as a posted "
                         f"message, and some Altium prompts have been "
                         f"reported to ignore one while still answering "
@@ -675,10 +754,16 @@ def register_uiauto_tools(mcp):
                         f"caption through UI Automation instead, and is the "
                         f"next thing to try."),
                 }
-            return {"ok": True, "dialog": target.title,
-                    "pressed": button.text, "role": role,
-                    "dialog_closed": closed,
-                    "outcome_verified": bool(closed) or not dismissing}
+            out = {"ok": True, "dialog": target.title,
+                   "pressed": button.text, "role": role,
+                   "dialog_closed": closed,
+                   "outcome_verified": bool(closed) or (
+                       role == "advance" and changed)}
+            if not closed:
+                out["dialog_changed"] = changed
+                if new_dialogs:
+                    out["new_dialogs"] = new_dialogs
+            return out
 
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, press)
@@ -746,7 +831,8 @@ def register_uiauto_tools(mcp):
                                  dry_run: bool = False,
                                  may_steal_focus: bool = True,
                                  wait_first: float = 30.0,
-                                 budget: float = 300.0) -> dict[str, Any]:
+                                 budget: float = 300.0,
+                                 expect_dialog: str = "") -> dict[str, Any]:
         """Invoke a menu command AND answer the dialogs it raises.
 
         The composite, and usually the one to reach for. Firing a menu
@@ -777,6 +863,9 @@ def register_uiauto_tools(mcp):
             may_steal_focus: opening a menu needs real input.
             wait_first: seconds to wait for the first dialog.
             budget: seconds before giving up.
+            expect_dialog: part of the title of the dialog the command
+                should open. When a different dialog (or none) appears,
+                the reply fails at the menu stage and nothing is driven.
 
         Returns:
             ``ok``, the ``menu`` result, and the full ``dialogs`` record.
@@ -794,8 +883,10 @@ def register_uiauto_tools(mcp):
                 "may_steal_focus=True if that is acceptable now.")}
 
         loop = asyncio.get_running_loop()
+        # With expect_dialog, a different dialog is a failure here and
+        # nothing is driven: the driver answers whatever is in front.
         clicked = await loop.run_in_executor(
-            None, menu.click_path, pid, menu_path)
+            None, lambda: menu.click_path(pid, menu_path, expect_dialog=expect_dialog))
         if not clicked.get("ok"):
             return {"ok": False, "stage": "menu", "menu": clicked}
 
@@ -832,9 +923,13 @@ def register_uiauto_tools(mcp):
         is not found yet, so its absence here does not mean it is closed.
 
         Returns:
-            ``{"ok": true, "panels": [{name, rect, holder_class}],
-            "count": N, "enumerates", "note"}``, plus ``offered`` when
-            asked for.
+            ``{"ok": true, "panels": [{name, rect, holder_class,
+            button_hwnd, content_count}], "count": N, "enumerates",
+            "note"}``, plus ``offered`` when asked for. Only edge-tab
+            panels are enumerated (see ``enumerates``/``note``). A panel is
+            found by the tab it carries, so an empty list's ``note`` also
+            says it has been reported empty on AD 25 while Properties was
+            open.
         """
         from ..ui import panels
 
@@ -848,12 +943,13 @@ def register_uiauto_tools(mcp):
         out: dict[str, Any] = {
             "ok": True,
             "count": len(open_now),
-            "panels": [{"name": p["name"], "rect": p["rect"],
-                        "holder_class": p.get("holder_class", "")}
-                       for p in open_now],
+            "panels": [panels.describe(p) for p in open_now],
             "enumerates": panels.ENUMERATES,
             "note": panels._ENUMERATES_NOTE,
         }
+        if not open_now:
+            out["note"] = (panels.EMPTY_SCAN_NOTE + ". "
+                           + panels._ENUMERATES_NOTE)
         if offered_too:
             out["offered"] = panels.offered(pid)
         return out
@@ -872,7 +968,11 @@ def register_uiauto_tools(mcp):
         would close it, and asking for a panel is not a request to lose
         it. EXCEPT a panel docked open in a pane group: it is not seen as
         open (only edge tabs are), so the click CLOSES it. Do not ask for
-        a panel a screenshot shows docked open.
+        a panel a screenshot shows docked open. When the panel cannot be
+        seen after the click (it may have been open with no tab the scan
+        reads), the entry is clicked once more so the panel is left as it
+        was, and the reply says so with ``toggled_back``. Calling again
+        does not help in that case.
 
         Args:
             name: the panel's name as View > Panels spells it, e.g.
@@ -1486,15 +1586,22 @@ def register_uiauto_tools(mcp):
         That makes this the right tool for a WPF dialog, and for anything
         you want done while the user keeps working.
 
+        A CLIENT THAT DOES NOT LIST THIS TOOL can still reach it through
+        the dispatcher: ``tool_invoke(name="app_invoke_element",
+        arguments={"name": "OK", "dialog_title": "Silkscreen"})``.
+
         Args:
-            name: the element's name or automation id.
-            dialog_title: which dialog. Empty uses the main window.
+            name: the element's name or automation id. A Button of that
+                name is preferred over a label carrying the same text.
+            dialog_title: which dialog. Empty uses the frontmost open
+                dialog, or the main window when no dialog is open.
             text: set this value instead of pressing.
             expand: "true" or "false" to open or close a node instead.
 
         Returns:
-            ``ok`` with what was done, or a refusal naming which pattern
-            the element lacks and its rectangle, so a real click remains
+            ``ok`` with what was done and, for a press in a dialog,
+            ``dialog_closed``; or a refusal naming which pattern the
+            element lacks and its rectangle, so a real click remains
             possible as a fallback.
         """
         from ..ui import uia
@@ -1506,14 +1613,24 @@ def register_uiauto_tools(mcp):
             return {"ok": False, "reason": "UI Automation is unavailable here"}
 
         target = None
+        in_dialog = False
+        open_dialogs = windows.dialogs(pid)
         if dialog_title:
-            for dialog in windows.dialogs(pid):
+            for dialog in open_dialogs:
                 if dialog_title.lower() in (dialog.title or "").lower():
                     target = dialog.hwnd
                     break
             if target is None:
                 return {"ok": False,
-                        "reason": f"no dialog matching {dialog_title!r}"}
+                        "reason": f"no dialog matching {dialog_title!r}",
+                        "open": [d.title for d in open_dialogs]}
+            in_dialog = True
+        elif open_dialogs:
+            # A WPF dialog is a window of its own, so searching the main
+            # window for its OK found nothing. The frontmost dialog is
+            # the one a press is meant for.
+            target = open_dialogs[0].hwnd
+            in_dialog = True
         else:
             frame = menu.frame(pid)
             if frame is None:
@@ -1526,4 +1643,8 @@ def register_uiauto_tools(mcp):
             return uia.expand(target, name,
                               want=str(expand).strip().lower()
                               in ("1", "true", "yes"))
-        return uia.invoke(target, name)
+        done = uia.invoke(target, name)
+        if done.get("ok") and in_dialog:
+            # Reported, not required: Next or Apply leave a dialog open.
+            done["dialog_closed"] = windows.wait_for_close(target, timeout=3.0)
+        return done

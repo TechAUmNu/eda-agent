@@ -566,7 +566,9 @@ def register_project_tools(mcp):
                 `proj_get_compile_freshness` to confirm no docs are dirty.
 
         Returns:
-            Dict with "pins" and "count".
+            Dict with "pins", "count", "limit", "limit_hit" (true when
+            the list stopped at ``limit`` with pins left over) and
+            "skipped_nil" (entries Altium returned empty).
 
         Examples:
             # PREFERRED, one unfiltered call, then filter locally:
@@ -760,7 +762,9 @@ def register_project_tools(mcp):
             limit: Max components to return (default 1000).
 
         Returns:
-            Dictionary with "components" array and "count", plus
+            Dictionary with "components" array and "count", "limit",
+            "limit_hit" (true when the list stopped at ``limit`` with
+            components left over), "skipped_nil", plus
             `_datasheet_guidance` + `_datasheet_parts`.
         """
         bridge = get_bridge()
@@ -1160,16 +1164,22 @@ def register_project_tools(mcp):
 
     @mcp.tool()
     async def proj_export_step(output_path: str = "") -> dict[str, Any]:
-        """Export the active PCB to a STEP 3D model file.
+        """Export the open PCB to a STEP 3D model file.
 
-        Requires an active PCB document. If output_path is omitted,
-        Altium may show a file-save dialog.
+        The board is focused first, since the export acts on the focused
+        view. If output_path is omitted, Altium may show a file-save
+        dialog. ``generated`` is true only when a new file is at
+        output_path afterwards; otherwise the reply says the export was
+        dispatched and why nothing could be confirmed. An OutJob with an
+        ExportSTEP output, run through proj_run_outjob, is the route
+        whose result can always be checked.
 
         Args:
             output_path: Full path for the output .step file (optional)
 
         Returns:
-            Dictionary confirming the export
+            ``generated``, plus ``dispatched`` and ``reason`` when no new
+            file was found
         """
         bridge = get_bridge()
         params: dict[str, Any] = {}
@@ -2316,18 +2326,21 @@ def register_project_tools(mcp):
         The server:
           1. Compiles the project and records before-state mappings
              (matched, extra-in-schematic, extra-in-pcb).
-          2. Invokes ``WorkspaceManager:Compare`` (ObjectKind=Project,
-             Action=UpdateOther): the evidenced scriptable sch→PCB update.
-             The modal ECO dialog opens here.
+          2. Focuses the project's PCB and invokes
+             ``WorkspaceManager:Compare`` (ObjectKind=Project,
+             Action=UpdateMe): import the schematic's changes into that
+             PCB. The modal ECO dialog opens here.
           3. After the user accepts, recompiles and reports the after-state
              delta (how many components were added/removed).
 
-        Refuses with WRONG_FOCUS while a schematic is the active document.
-        MEASURED 2026-08-17: Altium answers the compare with a modal reading
-        "Cannot compare a source document against its owner project" and
-        changes nothing, and this tool used to report success anyway, three
-        times in a row, with the error still on screen. Focus the PCB with
-        ``app_set_active_document`` first.
+        THE DIRECTION DEPENDS ON FOCUS, so the tool sets it. A schematic
+        in focus makes Altium refuse with "Cannot compare a source document
+        against its owner project"; the PCB in focus with Action=UpdateOther
+        updates the SCHEMATIC from the board, which is what this tool used
+        to send, and an ECO came up with the SchDoc as the affected
+        document. Refuses with WRONG_FOCUS when the PCB cannot be focused.
+        Before executing, check that the ECO's affected documents are the
+        PcbDoc.
 
         What the result does NOT tell you: whether the dialog was accepted.
         ``dialog_outcome_verified`` is always false, because the handler

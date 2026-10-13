@@ -10,6 +10,12 @@ Claude Code reviewing a buck converter through eda-agent. The feedback resistor 
 
 [![eda-agent demo: Claude Code reviewing a buck converter](https://img.youtube.com/vi/snRyCx3OlxM/maxresdefault.jpg)](https://youtu.be/snRyCx3OlxM)
 
+## Support the project
+
+Developing eda-agent and testing it against Altium's scripting engine takes a significant amount of work. If you find eda-agent useful in your work, a donation helps keep the progress going.
+
+<a href="https://buymeacoffee.com/george.saliba"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" height="45"></a>
+
 ## Dashboard
 
 <img src="assets/dashboard.png" alt="eda-agent dashboard inside Altium Designer" width="320">
@@ -329,9 +335,9 @@ Some tool paths trigger DelphiScript compile or runtime errors ("Undeclared iden
 
 This is an ongoing reliability effort. Every identified crash is either fixed or guarded. If you hit a new one, the Altium error dialog tells you the exact identifier or line. Opening an issue with that text helps us harden the relevant path.
 
-### Projects on a UNC network path do not open
+### UNC network paths need current scripts
 
-Use a mapped drive letter (`Z:\team\board.PrjPcb`) rather than a UNC path (`\\server\team\board.PrjPcb`). A path given in UNC form arrives at the bridge with one leading backslash missing, so the file is not found and the error names a path that looks almost right. Every other path form is unaffected, and a mapped drive is the workaround until the fix ships with the next script deploy.
+A UNC path (`\\server\team\board.PrjPcb`) opens like any other with the current scripts. Scripts deployed before the fix drop one leading backslash, so the file is not found and the error names a path that looks almost right. Run `eda-agent install-scripts --force` to update them, or use a mapped drive letter (`Z:\team\board.PrjPcb`) in the meantime.
 
 ### Text above Latin-1 becomes question marks
 
@@ -520,7 +526,7 @@ At wheel build time `scripts/altium/` is copied into `src/eda_agent/scripts/` in
 
 **"Script not responding" / MCP tools time out**: confirm the script project is loaded and `StartMCPServer` is running. Re-launch it via **File > Run Script... > StartMCPServer > Run**. Check `%USERPROFILE%\EDA Agent\workspace\` is writable.
 
-**Altium error dialog "Undeclared identifier: ..." or "Could not convert variant..."**: a DelphiScript crash in one of the bridge handlers. In Altium's Script IDE toolbar, press the red **Stop** button (or **Run > Stop** / **Ctrl+F3**; use **Ctrl+Pause/Break** if the script is stuck in an infinite loop) to halt the debugger. Then re-launch the polling loop via **File > Run Script... > StartMCPServer > Run**. Report the identifier or error text as an issue.
+**Altium error dialog "Undeclared identifier: ..." or "Could not convert variant..."**: a DelphiScript crash in one of the bridge handlers. In Altium's Script IDE toolbar, press the red **Stop** button (or **Run > Stop** / **Ctrl+F3**; use **Ctrl+Pause/Break** if the script is stuck in an infinite loop) to halt the debugger. Then re-launch the polling loop via **File > Run Script... > StartMCPServer > Run**. If the identifier is one the scripts themselves define, Altium is running an older compile of a unit: run `app_ping`, which names it in `stale_units`, then close the script project in the Projects panel (right-click `Altium_API.PrjScr`, **Close Project**), reopen it and run StartMCPServer. Otherwise report the identifier or error text as an issue.
 
 **Some Altium buttons don't respond while the server is running**: expected while the AI is actively issuing commands. Built-in Altium functions that depend on DelphiScript wait for the polling loop to yield. The loop enters an idle/yield mode within ~1 s of the last AI command; if a button is still unresponsive after that, call `app_detach` from the MCP client to fully release the scripting engine.
 

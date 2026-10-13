@@ -44,3 +44,46 @@ def test_free_copper_can_be_told_from_a_footprints():
     text = SOURCE.read_text(encoding="utf-8", errors="replace")
     answered = _names(_body(text, "Function GetPCBProperty("))
     assert {"InComponent", "InPolygon", "Component", "Locked", "IsKeepout"} <= answered
+
+
+def test_every_property_the_setter_writes_is_one_the_getter_reads():
+    text = SOURCE.read_text(encoding="utf-8", errors="replace")
+    written = _names(_body(text, "Function SetPCBProperty("))
+    answered = _names(_body(text, "Function GetPCBProperty("))
+    assert written, "the setter's branches were not found; update this test"
+    assert written - answered == set(), "written by obj_modify, unreadable by obj_query"
+
+
+def test_a_texts_height_and_stroke_can_be_read_and_written():
+    # Silkscreen text size is a fabrication requirement; only the create
+    # path could set it, and "Height" was refused as not a property.
+    text = SOURCE.read_text(encoding="utf-8", errors="replace")
+    answered = _names(_body(text, "Function GetPCBProperty("))
+    written = _names(_body(text, "Function SetPCBProperty("))
+    assert {"Height", "StrokeWidth", "IsDesignator", "IsComment"} <= answered
+    assert {"Height", "StrokeWidth"} <= written
+
+
+def test_a_length_is_written_as_decimal_mils_and_a_non_number_is_refused():
+    # StrToIntDef read 3.5 as 0: a fractional width wrote zero and a
+    # fractional X moved the object to the origin.
+    text = SOURCE.read_text(encoding="utf-8", errors="replace")
+    setter = _body(text, "Function SetPCBProperty(")
+    lengths = _names(_body(text, "Function IsLengthProperty("))
+    assert "StrToIntDef(Value" not in setter
+    assert {"X", "Y", "Width", "Height", "StrokeWidth"} <= lengths
+    assert re.search(r"Refused\s*:=\s*IsLengthProperty\(PropName\)\s*And\s*\(Not IsFloatStr\(Value\)\)",
+                     setter)
+    assert re.search(r"If Refused Then\s*Begin\s*Result\s*:=\s*-1", setter)
+
+
+def test_modify_collects_before_it_changes():
+    # An object changed while the board iterator walks can move in the
+    # spatial index under it. Delete already collected first; modify did not.
+    text = SOURCE.read_text(encoding="utf-8", errors="replace")
+    walk = _body(text, "Function ProcessPCBBoardObjects(")
+    start = walk.index("If Mode = 'modify' Then")
+    arm = walk[start:walk.index("Exit;", start)]
+    first_apply = arm.index("ApplySetPropertiesPCB(")
+    destroy = arm.index("BoardIterator_Destroy(")
+    assert destroy < first_apply, "a property is applied before the walk ends"

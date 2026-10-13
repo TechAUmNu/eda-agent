@@ -114,6 +114,15 @@ _rev("Application.pas", "App_CreateDocument", "ServerDoc", "SetFileName",
      _PROVEN + " (AD26, d54996f)")
 _rev("Generic.pas", "Gen_AddSheet", "ServerDoc", "SetFileName",
      _PROVEN + " (AD26, d54996f)")
+# Upstream's simulation tools (2026.10.13 merge). Every reference is typed
+# IServerDocument, the interface that declares these members.
+_rev("Generic.pas", "Gen_RunSimulation", "ServerDoc", "SetFileName",
+     _PROVEN + " (AD26, d54996f, the App_CreateDocument pattern; release "
+     "section 1 table row '46, results saved')")
+_rev("Generic.pas", "Gen_SimCfgDocument", "ServerDoc",
+     "SupportsReload DoFileLoad UpdateModifiedDate",
+     "UNKNOWN, normal use (run nowhere else): FATAL-IF-WRONG probe P53 "
+     "(release section 46 item 3)")
 _rev("Audit.pas", "Audit_FindBadConnections", "Prim1", "TearDrop",
      "UNKNOWN, normal use: FATAL-IF-WRONG probe P43")
 _rev("Audit.pas", "Audit_FindBadConnections", "Prim2", "TearDrop",
@@ -123,7 +132,7 @@ _rev("Generic.pas", "GetSchVertexProperty", "Obj",
      _ALLOW + " (SchObjectLacksVertexArray: wires, buses, polylines)")
 _rev("Generic.pas", "GetSchProperty", "Obj",
      "Name LibReference SourceLibraryName DesignItemId ComponentDescription "
-     "FontId LineWidth Style IOType Alignment Electrical TextColor "
+     "FontId LineWidth Style IOType Alignment Electrical "
      "Justification Width PinLength XSize YSize IsSolid", _ALLOW)
 _rev("Generic.pas", "GetSchProperty", "Obj", "Text",
      _ALLOW + " (SchObjectHasText)")
@@ -144,7 +153,7 @@ _rev("Generic.pas", "GetSchProperty", "Obj", "HarnessType",
      _OBJID + " (eHarnessConnector); the write resolved live (P20)")
 _rev("Generic.pas", "SetSchProperty", "Obj",
      "Name LibReference SourceLibraryName DesignItemId ComponentDescription "
-     "FontId LineWidth Style IOType Alignment Electrical TextColor "
+     "FontId LineWidth Style IOType Alignment Electrical "
      "Justification Width PinLength XSize YSize IsSolid", _ALLOW)
 _rev("Generic.pas", "SetSchProperty", "Obj", "Text",
      _ALLOW + " (SchObjectHasText)")
@@ -177,9 +186,6 @@ _rev("Generic.pas", "Gen_ExplainPin", "Hit",
 _rev("PCB.pas", "PCB_ReplicateLayout", "Prim", "ReplicateWithChildren",
      "UNKNOWN, normal use, inside PCBServer.PreProcess: FATAL-IF-WRONG "
      "probe P41")
-_rev("PCB.pas", "PCB_DeleteObject", "Obj",
-     "x y X1Location X2Location Y1Location Y2Location",
-     _OBJID + " (pad/via x/y, fill X1..Y2: PCBPrimitivePos's pairs)")
 _rev("PCB.pas", "PCB_AddTestpointsForNetClass", "Prim",
      "IsTestpoint_Top IsTestpoint_Bottom IsAssyTestpoint_Top "
      "IsAssyTestpoint_Bottom",
@@ -251,6 +257,10 @@ def scan(altium_dir: Path = _ALTIUM) -> list[tuple[str, str, str, str, str, int]
     (unit, routine, name, member, declared type, line)."""
     hits = []
     for path in sorted(altium_dir.glob("*.pas")):
+        # The build.py bundle concatenates every unit: scanning it would
+        # report each source site a second time under Altium_MCP.pas.
+        if path.name == "Altium_MCP.pas":
+            continue
         raw = path.read_text(encoding="latin-1")
         s = _blank(raw)
         starts = [0] + [m.end() for m in re.finditer("\n", s)]
