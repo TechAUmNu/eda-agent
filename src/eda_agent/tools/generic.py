@@ -2322,8 +2322,12 @@ def register_generic_tools(mcp):
 
         Args:
             object_type: Altium object type constant (see `obj_query` for options)
-            scope: "active_doc" (default), "project", or
-                "doc:C:\\path\\Sheet.SchDoc" for a specific loaded sheet.
+            scope: "active_doc" (default), "project",
+                "doc:C:\\path\\Sheet.SchDoc" for a specific loaded sheet, or
+                "lib_component:NAME[@N]" for one symbol (part N) of the
+                active SchLib, exactly as `obj_query` takes it (it makes
+                that symbol current). A PCB object type takes only
+                "active_doc" and is refused SCOPE_NOT_SUPPORTED otherwise.
             filter: Pipe-separated property=value conditions (AND logic)
 
         Returns:

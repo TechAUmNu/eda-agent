@@ -211,7 +211,8 @@ _HANDLERS = {
 
 _LIB_HELPERS = ["SetOwnerPart", "OwnerPartIdOf", "OwnerDisplayModeOf",
                 "NoEditComponentMessage", "ResolveEditLibComponent",
-                "MarkLibDirty", "MarkLibDirtyComp", "SetParamOwnerPart"]
+                "MarkLibDirty", "MarkLibDirtyComp", "SetParamOwnerPart",
+                "SetOwnerPartUnlessGiven"]
 
 
 def _edit_ns(lib, client, queue=None):
@@ -515,6 +516,43 @@ def test_obj_create_into_a_named_component_lands_there():
     assert reply[0] == "OK", reply
     assert len(named.added) == 1
     assert events.count("pre") == events.count("post") == 1
+
+
+def test_generic_component_creates_write_the_symbols_current_part():
+    """D-A-1 (live 2026-10-13): container=component creates saved
+    OwnerPartId=-1, a primitive nothing draws or counts. Both now write the
+    narrowed component's current part, read BEFORE the PreProcess, as
+    lib_add_symbol_lines does."""
+    events: list[str] = []
+    named = NComp("X", events, part=2, mode=1)
+    lib = EditLib(A, comps=[named], events=events)
+    ns = _gen_ns(lib, _client())
+    build(_GENERIC, ["Gen_CreateObject"], ns)
+    reply = ns["Gen_CreateObject"](
+        {"object_type": "eLine", "properties": "X=1",
+         "container": "component", "component_name": "X"}, "r")
+    assert reply[0] == "OK", reply
+    prim = named.added[0]
+    assert (prim.OwnerPartId, prim.OwnerPartDisplayMode) == (2, 1)
+    assert events.index("part:X") < events.index("pre")
+
+    events2: list[str] = []
+    named2 = NComp("X", events2, part=3)
+    lib2 = GenLib(A, comps=[named2], events=events2)
+    ns2 = _gen_ns(lib2, _client())
+    queue = [{"object_type": "eLine", "properties": "X=1",
+              "container": "component"},
+             {"object_type": "eLine", "properties": "OwnerPartId=1",
+              "container": "component"}]
+    ns2["NextBatchOp"] = lambda _r: queue.pop(0) if queue else ""
+    build(_GENERIC, ["Gen_BatchCreate"], ns2)
+    reply = ns2["Gen_BatchCreate"]({"operations": "q", "component_name": "X"},
+                                   "r")
+    assert reply[0] == "OK", reply
+    assert named2.added[0].OwnerPartId == 3
+    assert getattr(named2.added[1], "OwnerPartId", None) != 3, (
+        "an explicit OwnerPartId in the properties is the caller's to keep")
+    assert events2.index("part:X") < events2.index("pre")
 
 
 class GenLib(EditLib):

@@ -431,6 +431,31 @@ Begin
         + ',"file_path":"' + EscapeJsonString(FilePath) + '"}');
 End;
 
+{ CLOSE THIS DOCUMENT OBJECT, NOT WHATEVER HAS THE FOCUS. The shared close   }
+{ for routes that used RunProcess('WorkspaceManager:CloseObject') with a    }
+{ FileName: CloseObject acts on the FOCUSED document whatever FileName says }
+{ (D-A-4, live 2026-10-13 on 2026.10.13.01: lib_reload_library of a PcbLib  }
+{ closed the unmodified SchLib that had the focus). This is exactly what    }
+{ App_CloseDocument does: Client.CloseDocument on the server document found }
+{ by path, then the path looked up again. True only when the lookup now     }
+{ answers Nil. The caller owns the modified check: this closes what it is   }
+{ given, and closing a dirty document loses its edits or raises a prompt.   }
+Function CloseServerDocByObject(ServerDoc : IServerDocument; Path : String) : Boolean;
+Var
+    Again : IServerDocument;
+Begin
+    Result := False;
+    If ServerDoc = Nil Then Exit;
+    Try
+        Client.CloseDocument(ServerDoc);
+    Except
+        RecordCaughtException('CloseServerDocByObject:CloseDocument');
+    End;
+    Again := Nil;
+    Try Again := Client.GetDocumentByPath(Path); Except Again := Nil; End;
+    Result := Again = Nil;
+End;
+
 Function App_RunProcess(Params : String; RequestId : String) : String;
 Var
     ProcessName, ProcessParams : String;

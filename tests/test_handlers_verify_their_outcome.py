@@ -509,7 +509,9 @@ def test_a_library_lookup_rereads_the_document_as_a_last_resort():
     assert "DoFileSave" in refresh, (
         "the reopen must save first; closing a dirty document loses the "
         "edits or raises a prompt nothing here can answer")
-    assert "CloseObject" in refresh and "OpenObject" in refresh
+    assert "CloseServerDocByObject(" in refresh and "OpenObject" in refresh, (
+        "the reopen closes the library BY OBJECT (D-A-4: CloseObject acts on "
+        "the focused document, whatever FileName says), then reopens it")
 
     lookup = _body(text, "LookupLibComponent")
     assert "RefreshSchLibFromDisk" in lookup, (

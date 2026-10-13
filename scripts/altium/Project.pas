@@ -355,6 +355,52 @@ Begin
     End;
 End;
 
+{ Every LOADED document's path, pipe-separated: each workspace project's     }
+{ logical documents plus the free documents (index -1, the synthetic         }
+{ FreeDocumentsProject, as DocNameMemberCount walks them), kept only when    }
+{ Client.GetDocumentByPath finds it open (a project member need not be      }
+{ loaded). Compared before and after a close with PathsGoneOtherThan, it    }
+{ names any OTHER document the close took.                                   }
+Function OpenDocumentPaths(Workspace : IWorkspace) : String;
+Var
+    I, J, ProjCount : Integer;
+    Proj : IProject;
+    Doc : IDocument;
+    ServerDoc : IServerDocument;
+    Full : String;
+Begin
+    Result := '';
+    If Workspace = Nil Then Exit;
+    ProjCount := 0;
+    Try ProjCount := Workspace.DM_ProjectCount; Except ProjCount := 0; End;
+    For I := -1 To ProjCount - 1 Do
+    Begin
+        Proj := Nil;
+        Try
+            If I < 0 Then Proj := Workspace.DM_FreeDocumentsProject
+            Else Proj := Workspace.DM_Projects(I);
+        Except
+            Proj := Nil;
+        End;
+        If Proj = Nil Then Continue;
+        For J := 0 To Proj.DM_LogicalDocumentCount - 1 Do
+        Begin
+            Doc := Nil;
+            Try Doc := Proj.DM_LogicalDocuments(J); Except Doc := Nil; End;
+            If Doc = Nil Then Continue;
+            Full := '';
+            Try Full := Doc.DM_FullPath; Except Full := ''; End;
+            If Full = '' Then Continue;
+            ServerDoc := Nil;
+            Try ServerDoc := Client.GetDocumentByPath(Full); Except ServerDoc := Nil; End;
+            If ServerDoc = Nil Then Continue;
+            If Pos('|' + UpperCase(Full) + '|', '|' + UpperCase(Result) + '|') > 0 Then Continue;
+            If Result <> '' Then Result := Result + '|';
+            Result := Result + Full;
+        End;
+    End;
+End;
+
 { Focus follows the active DOCUMENT, so the project is focused by showing one  }
 { of its documents. Only LOADED ones: opening a member here would load it as a }
 { free document, the way App_SetActiveDocument records, and focus nothing.     }

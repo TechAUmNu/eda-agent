@@ -313,6 +313,8 @@ def test_pcblib_lookup_still_asked_when_a_library_may_be_current(
     ns["PCBServer"] = server = _PcbServer()
     ns["BuildSuccessResponse"] = lambda r, d: ("OK", d)
     ns["EscapeJsonString"] = lambda s: s
+    ns["BoolToJsonStr"] = lambda b: "true" if b else "false"
+    ns["PipePathsToJsonArray"] = lambda s: "[]" if not s else str(s.split("|"))
     build(_bodies("Main.pas"), ["PcbEditorDocOpen", "PcbLibMayBeCurrent",
                                 "PcbLibMayBeCurrentAt"], ns)
     build(_bodies("Library.pas"), [routine], ns)

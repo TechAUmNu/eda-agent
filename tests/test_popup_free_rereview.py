@@ -256,10 +256,12 @@ def test_a_stale_focus_does_not_refuse_a_pcblib_open_at_the_path(routine):
 
 def test_reload_library_with_a_stale_focus_reloads():
     """Lib_ReloadLibrary closes and reopens the library, then gates the
-    lookup: a SchLib focused before the call stays the DM focus."""
-    ns = _lib_ns(_DMDoc(_SCHLIB, "SCHLIB"), [_DMDoc(_SCHLIB, "SCHLIB")],
-                 server := _PcbServer(), client=_Client([_PCBLIB]))
-    build(_bodies("Library.pas"), ["Lib_ReloadLibrary"], ns)
+    lookup: a SchLib focused before the call stays the DM focus. Since
+    D-A-4 the close is by object, so the client must carry the library's
+    server document through a close and a reopen (test_close_by_object)."""
+    from tests.test_close_by_object import reload_ns
+    ns, client, _ = reload_ns(open_paths=[_SCHLIB, _PCBLIB],
+                              server=(server := _PcbServer()))
     kind, data = ns["Lib_ReloadLibrary"]({"library_path": _PCBLIB}, "r")
     assert kind == "OK" and '"reloaded":true' in data
     assert server.asked == 1

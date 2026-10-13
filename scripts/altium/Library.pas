@@ -135,6 +135,34 @@ Begin
     Try Obj.OwnerPartDisplayMode := DisplayMode; Except End;
 End;
 
+{ SetOwnerPart for the generic creates (Gen_CreateObject, Gen_BatchCreate)  }
+{ with container=component: the same two writes, each skipped when the      }
+{ caller's own properties already set that field (ApplySetProperties ran    }
+{ first, and an explicit OwnerPartId=2 is the caller's to keep).            }
+{ D-A-1 (live 2026-10-13, 2026.10.13.01): those routes wrote no owner part, }
+{ so the saved primitive carried OwnerPartId=-1 (IsNotAccesible=T) while    }
+{ lib_add_symbol_lines' line got the symbol's current part. A -1 primitive  }
+{ is not drawn, and the SchLib iterator - which yields the current part's   }
+{ primitives only - never returns it, so obj_count / obj_query read 0.      }
+{ PartId / DisplayMode come from OwnerPartIdOf / OwnerDisplayModeOf on the  }
+{ NARROWED component, read before the PreProcess, as every Lib_Add* does.   }
+Procedure SetOwnerPartUnlessGiven(Obj : ISch_GraphicalObject; PropsStr : String;
+    PartId : Integer; DisplayMode : Integer);
+Var
+    UpProps : String;
+Begin
+    If Obj = Nil Then Exit;
+    UpProps := '|' + UpperCase(PropsStr);
+    If Pos('|OWNERPARTID=', UpProps) = 0 Then
+    Begin
+        Try Obj.OwnerPartId := PartId; Except End;
+    End;
+    If Pos('|OWNERPARTDISPLAYMODE=', UpProps) = 0 Then
+    Begin
+        Try Obj.OwnerPartDisplayMode := DisplayMode; Except End;
+    End;
+End;
+
 { The part a new primitive is owned by: the component's current part, read  }
 { ONCE before the edit. Component must be NARROWED (GetTargetLibComponent / }
 { ResolveEditLibComponent / a library lookup), never the editor's           }
@@ -678,16 +706,20 @@ Begin
     { component that no longer exists.                                    }
     ForgetRememberedLibComponent(0);
 
-    ResetParameters;
-    AddStringParameter('ObjectKind', 'Document');
-    AddStringParameter('FileName', LibPath);
-    RunProcess('WorkspaceManager:CloseObject');
+    { CLOSED BY OBJECT, NOT BY CloseObject (D-A-4, live 2026-10-13):       }
+    { WorkspaceManager:CloseObject acts on the FOCUSED document whatever    }
+    { FileName says, so it could close some other library or sheet. The   }
+    { server document at LibPath is closed itself (CloseServerDocByObject, }
+    { App_CloseDocument's route); not open means nothing to close.         }
+    ServerDoc := Nil;
+    Try ServerDoc := Client.GetDocumentByPath(LibPath); Except ServerDoc := Nil; End;
+    If ServerDoc <> Nil Then CloseServerDocByObject(ServerDoc, LibPath);
 
     { Closed, it holds no edits: the reopen below reads the FILE, so a record }
     { entry left over from a flush the editor declined (or one in the same    }
     { 2 s FileAge tick) would make the next save-all rewrite the clean        }
     { library - the 2026-10-06 harm (review 2026-10-11, F4). Only if the      }
-    { close took: CloseObject has been seen to act on another document.       }
+    { close took (CloseServerDocByObject looks the path up again to say so).  }
     ForgetBridgeEditsIfClosed(LibPath);
 
     ResetParameters;
@@ -5970,10 +6002,25 @@ End;
 { either lose the edits or raise a prompt.                                     }
 {                                                                              }
 { Params: library_path (required).                                             }
+{                                                                              }
+{ THE CLOSE IS BY OBJECT (D-A-4, live 2026-10-13 on 2026.10.13.01): this ran  }
+{ RunProcess('WorkspaceManager:CloseObject') with FileName, and CloseObject   }
+{ acts on the FOCUSED document whatever FileName says - a reload of a PcbLib  }
+{ with an unmodified SchLib focused closed the SchLib. Now the library's own  }
+{ server document is closed (CloseServerDocByObject, App_CloseDocument's      }
+{ route); a library that is not open is only opened. A library that reads    }
+{ modified, or that this bridge edited and has not written, is REFUSED        }
+{ (MODIFIED) before anything closes. The reply says whether it was open and   }
+{ closed, and names any OTHER document gone afterwards (OpenDocumentPaths     }
+{ before and after, PathsGoneOtherThan) - an empty list is the proof the      }
+{ close took only the library.                                                }
 Function Lib_ReloadLibrary(Params : String; RequestId : String) : String;
 Var
-    LibPath : String;
+    LibPath, DiskPath, BeforeClose, ClosedOthers : String;
     PcbLib : IPCB_Library;
+    ServerDoc : IServerDocument;
+    Workspace : IWorkspace;
+    WasOpen, Closed, FlagRead : Boolean;
 Begin
     LibPath := ExtractJsonValue(Params, 'library_path');
     If LibPath = '' Then
@@ -5989,11 +6036,46 @@ Begin
         Exit;
     End;
 
-    ResetParameters;
-    AddStringParameter('ObjectKind', 'Document');
-    AddStringParameter('FileName', LibPath);
-    Try RunProcess('WorkspaceManager:CloseObject'); Except End;
-    Try Application.ProcessMessages; Except End;
+    ServerDoc := Nil;
+    Try ServerDoc := Client.GetDocumentByPath(LibPath); Except ServerDoc := Nil; End;
+    WasOpen := ServerDoc <> Nil;
+    Closed := False;
+    ClosedOthers := '';
+    If WasOpen Then
+    Begin
+        DiskPath := LibPath;
+        Try
+            If ServerDoc.FileName <> '' Then DiskPath := ServerDoc.FileName;
+        Except End;
+        FlagRead := False;
+        Try FlagRead := ModifiedFlagOf(ServerDoc); Except FlagRead := False; End;
+        If FlagRead Or BridgeEditRecorded(LibPath) Or BridgeEditRecorded(DiskPath) Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'MODIFIED',
+                'The library has unsaved changes (its modified flag, or an '
+                + 'edit by this bridge not yet written), so it was not closed '
+                + 'or reloaded: ' + LibPath + '. Save it first (lib_save_library '
+                + 'or app_save_all), or close it with app_close_document '
+                + 'discard_changes=true.');
+            Exit;
+        End;
+        Workspace := Nil;
+        Try Workspace := GetWorkspace; Except Workspace := Nil; End;
+        BeforeClose := OpenDocumentPaths(Workspace);
+        Closed := CloseServerDocByObject(ServerDoc, LibPath);
+        Try Application.ProcessMessages; Except End;
+        ClosedOthers := PathsGoneOtherThan(BeforeClose,
+            OpenDocumentPaths(Workspace), LibPath);
+        If (ClosedOthers <> '') And (DiskPath <> LibPath) Then
+            ClosedOthers := PathsGoneOtherThan(ClosedOthers, '', DiskPath);
+        If Not Closed Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'CLOSE_FAILED',
+                'The library is still open after closing it, so it was not '
+                + 'reloaded: ' + LibPath);
+            Exit;
+        End;
+    End;
 
     ResetParameters;
     AddStringParameter('ObjectKind', 'Document');
@@ -6014,7 +6096,10 @@ Begin
         Exit;
     End;
     Result := BuildSuccessResponse(RequestId,
-        '{"reloaded":true,"library_path":"' + EscapeJsonString(LibPath) + '"}');
+        '{"reloaded":true,"was_open":' + BoolToJsonStr(WasOpen)
+        + ',"closed":' + BoolToJsonStr(Closed)
+        + ',"other_documents_closed":' + PipePathsToJsonArray(ClosedOthers)
+        + ',"library_path":"' + EscapeJsonString(LibPath) + '"}');
 End;
 
 { Lib_ProbeDesignator - Diagnostic. Dump the RAW geometry of one footprint's   }

@@ -559,7 +559,7 @@ def test_project_member_paths_lists_every_member():
     ("Project.pas", "Proj_Close", "MemberPaths := ProjectMemberPaths(Project);",
      "ForgetBridgeEditsIfClosed(MemberPaths);"),
     ("Library.pas", "RefreshSchLibFromDisk",
-     "RunProcess('WorkspaceManager:CloseObject');",
+     "If ServerDoc <> Nil Then CloseServerDocByObject(ServerDoc, LibPath);",
      "ForgetBridgeEditsIfClosed(LibPath);"),
     ("Generic.pas", "Gen_ReloadSchDocument", "Client.CloseDocument(ServerDoc);",
      "ForgetBridgeEdit(FilePath);"),

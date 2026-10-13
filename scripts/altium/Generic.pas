@@ -2690,6 +2690,7 @@ Var
     SchLib : ISch_Lib;
     Component : ISch_Component;
     NewObj : ISch_GraphicalObject;
+    OwnerPart, OwnerMode : Integer;
 Begin
     ResetPropertyDiag(0);
     SchDoc := Nil;
@@ -2751,7 +2752,15 @@ Begin
                 NoEditComponentMessage(CompName));
             Exit;
         End;
+        { THE OWNER PART, as lib_add_symbol_lines writes it (D-A-1): read    }
+        { ONCE from the narrowed component before PreProcess, written onto   }
+        { the new primitive unless the caller's properties set it. Without   }
+        { it the file saved OwnerPartId=-1, a primitive nothing draws or      }
+        { counts.                                                             }
+        OwnerPart := OwnerPartIdOf(Component);
+        OwnerMode := OwnerDisplayModeOf(Component);
         SchServer.ProcessControl.PreProcess(SchLib, '');
+        SetOwnerPartUnlessGiven(NewObj, PropsStr, OwnerPart, OwnerMode);
         Component.AddSchObject(NewObj);
         SchRegisterObject(Component, NewObj);
         SchServer.ProcessControl.PostProcess(SchLib, '');
@@ -7247,9 +7256,35 @@ Begin
             Exit;
         End;
 
+        { A PCB type cannot honour a scope (Gen_QueryObjects' refusal, the }
+        { same words): the count below always reads the active board, so a }
+        { lib_component / doc / project scope would be silently ignored.   }
+        If ScopeType <> 'active_doc' Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'SCOPE_NOT_SUPPORTED',
+                'A PCB object type cannot be scoped with "' + Scope + '". PCB '
+                + 'primitives live on a board, and this count always reads the '
+                + 'active one, so a document, project or lib_component scope '
+                + 'would be silently ignored. Activate the board you mean and '
+                + 'count with the default scope.');
+            Exit;
+        End;
         // PCB count, active doc only
         Result := ProcessActivePCBDoc(ObjTypeInt, FilterStr, '', '', 'query', RequestId, 0);
         // The query result already has count, just return it
+        Exit;
+    End;
+
+    { THE lib_component SCOPE IS APPLIED HERE TOO (D-A-2, live 2026-10-13).  }
+    { This handler parsed the scope and never called ApplyLibComponentScope, }
+    { so 'lib_component:TP' left ScopeType 'lib_component', fell to the      }
+    { active-document branch and counted whatever symbol was CURRENT in the  }
+    { SchLib - not TP - while obj_query with the same scope selected TP.     }
+    { Same call, same NOT_FOUND, as Gen_QueryObjects / Gen_ModifyObjects.    }
+    If Not ApplyLibComponentScope(ScopeType, ScopePath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND',
+            'Library component not found in active library: ' + ScopePath);
         Exit;
     End;
 
@@ -10364,7 +10399,7 @@ Var
     ContainerStr, LibCompName : String;
     FailuresJson, ItemReason, UnsupportedProp : String;
     FirstFailure, IsLib : Boolean;
-    CompCreated : Integer;
+    CompCreated, OwnerPart, OwnerMode : Integer;
 Begin
     ResetPropertyDiag(0);
     SchDoc := Nil;
@@ -10407,10 +10442,19 @@ Begin
     LibCompName := ExtractJsonValue(Params, 'component_name');
     If ActiveDoc <> Nil Then
         IsLib := (ActiveDoc.ObjectId = eSchLib);
+    OwnerPart := 1;
+    OwnerMode := 0;
     If IsLib Then
     Begin
         SchLib := SchServer.GetCurrentSchDocument;
         Component := ResolveEditLibComponent(SchLib, LibCompName);
+        { The owner part for container=component items, read ONCE here,   }
+        { before the shared PreProcess (D-A-1; Gen_CreateObject's note).   }
+        If Component <> Nil Then
+        Begin
+            OwnerPart := OwnerPartIdOf(Component);
+            OwnerMode := OwnerDisplayModeOf(Component);
+        End;
     End;
 
     If ActiveDoc <> Nil Then
@@ -10464,6 +10508,8 @@ Begin
                             Begin
                                 If Component <> Nil Then
                                 Begin
+                                    SetOwnerPartUnlessGiven(NewObj, PropsStr,
+                                        OwnerPart, OwnerMode);
                                     Component.AddSchObject(NewObj);
                                     SchRegisterObject(Component, NewObj);
                                     Inc(Created);
