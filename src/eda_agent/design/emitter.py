@@ -476,6 +476,42 @@ def _emit_sheet_size(
             f"document default")
 
 
+def _clear_for_full_redraw(
+    canvas: SchematicCanvas, sheet_name: str, bridge: Any, result: EmitResult
+) -> None:
+    """Remove what a full redraw is about to place again, on an existing sheet.
+
+    Measured 2026-10-17: a full emit onto a sheet that already held the
+    plan's parts placed every part a second time (same designators, two
+    copies) and stacked a second set of wires on the first. A full redraw
+    is documented as discarding the old drawing, so the plan's own parts
+    (by designator) and the sheet's copper go first. Parts the plan does
+    not name are left alone; hand-placed copper and No-ERCs are not kept,
+    which is what "full" has always promised.
+    """
+    for inst in canvas.instances_on(sheet_name):
+        try:
+            bridge.send_command("generic.delete_objects", {
+                "scope": "active_doc", "object_type": "eSchComponent",
+                "filter": f"Designator={inst.refdes}"})
+        except Exception as exc:                # noqa: BLE001
+            result.failures.append(EmitFailure(
+                refdes=inst.refdes, code="CLEAR_FAILED",
+                reason=f"removing the old {inst.refdes} raised: {exc}"))
+    for object_type in _COPPER_TYPES + ("eNoERC",):
+        try:
+            bridge.send_command("generic.delete_objects", {
+                "scope": "active_doc", "object_type": object_type,
+                "filter": ""})
+        except Exception as exc:                # noqa: BLE001
+            result.failures.append(EmitFailure(
+                refdes="", code="CLEAR_FAILED",
+                reason=f"clearing {object_type} raised: {exc}"))
+    result.notes.append(
+        f"sheet '{sheet_name}' existed: removed the plan's parts and the old "
+        f"copper before the full redraw")
+
+
 def _emit_sheet(
     canvas: SchematicCanvas,
     sheet_name: str,
@@ -486,6 +522,7 @@ def _emit_sheet(
     parameter_stamps: Optional[dict[str, dict[str, str]]] = None,
 ) -> None:
     """Emit one sheet's worth of components, wires, labels, ports, junctions."""
+    existed = _sheet_path(project, sheet_name).exists()
     sheet_path = _ensure_sheet_loaded(project, sheet_name, bridge, result)
     if sheet_path is None:
         return
@@ -497,6 +534,9 @@ def _emit_sheet(
     except Exception as exc:
         result.notes.append(f"set_active_document {sheet_name} failed: {exc}")
         return
+
+    if existed:
+        _clear_for_full_redraw(canvas, sheet_name, bridge, result)
 
     _emit_sheet_size(canvas, sheet_name, bridge, result)
 

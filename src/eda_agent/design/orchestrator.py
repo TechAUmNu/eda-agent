@@ -158,7 +158,13 @@ def execute_plan_via_canvas_from_json(
     # what the next edit deltas against, so it must describe the sheet
     # as it actually is. Read now, write after the emit.
     snapshot_path = Path(project_path).with_suffix(".canvas.json")
-    prior = _prior_canvas(snapshot_path)
+    # ONE SNAPSHOT FILE PER PROJECT, BUT THE PRIOR IS PER SHEET. Measured
+    # 2026-10-17: after drawing sheet B, an auto re-run on sheet A deltaed
+    # against B's layout, saw every A part as new and placed it a second
+    # time beside the parts already on the sheet. The prior now only counts
+    # when it describes the sheets this plan lays out.
+    prior = _prior_canvas(snapshot_path,
+                          [s.name for s in pipeline_result.canvas.sheets])
 
     if mode not in ("auto", "full", "delta"):
         out["ok"] = False
@@ -241,13 +247,31 @@ def _write_canvas_snapshot(
             f"reported {len(emit_result.failures)} failure(s), so the "
             f"sheet does not match this layout")
         return
+    entry = {
+        "plan": payload,
+        "canvas": pipeline_result.canvas.to_dict(),
+        "parameter_stamps": pipeline_result.parameter_stamps,
+    }
+    # Keep every sheet's last layout under "by_sheet" so a later edit of an
+    # older sheet still finds ITS prior; the top-level keys stay the most
+    # recent emit, which is what the learner and hints readers expect.
+    by_sheet: dict[str, Any] = {}
+    try:
+        old = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        by_sheet = dict(old.get("by_sheet") or {})
+        old_canvas = old.get("canvas") or {}
+        for s in old_canvas.get("sheets", []):
+            name = s.get("name") if isinstance(s, dict) else None
+            if name and name not in by_sheet:
+                by_sheet[name] = {k: old.get(k) for k in
+                                  ("plan", "canvas", "parameter_stamps")}
+    except (OSError, ValueError, AttributeError):
+        pass
+    for s in pipeline_result.canvas.sheets:
+        by_sheet[s.name] = entry
     try:
         snapshot_path.write_text(
-            json.dumps({
-                "plan": payload,
-                "canvas": pipeline_result.canvas.to_dict(),
-                "parameter_stamps": pipeline_result.parameter_stamps,
-            }, indent=2),
+            json.dumps(dict(entry, by_sheet=by_sheet), indent=2),
             encoding="utf-8",
         )
         out["canvas_snapshot_path"] = str(snapshot_path)
@@ -255,11 +279,16 @@ def _write_canvas_snapshot(
         out["notes"].append(f"canvas snapshot write failed: {exc}")
 
 
-def _prior_canvas(snapshot_path: Path) -> Optional[dict[str, Any]]:
-    """The ``canvas`` half of an existing snapshot, or None.
+def _prior_canvas(snapshot_path: Path,
+                  sheet_names: Optional[list[str]] = None
+                  ) -> Optional[dict[str, Any]]:
+    """The prior ``canvas`` for these sheets, or None.
 
     Returns None for a missing OR unreadable snapshot: a delta against a
-    half-parsed file would delete every part it failed to read.
+    half-parsed file would delete every part it failed to read. With
+    ``sheet_names``, also None unless the prior describes exactly those
+    sheets (looked up in ``by_sheet`` first, then the top-level canvas): a
+    prior of another sheet would make every part look new.
     """
     if not snapshot_path.exists():
         return None
@@ -268,6 +297,17 @@ def _prior_canvas(snapshot_path: Path) -> Optional[dict[str, Any]]:
     except (OSError, json.JSONDecodeError):
         return None
     canvas = payload.get("canvas")
+    if sheet_names:
+        by_sheet = payload.get("by_sheet") or {}
+        if len(sheet_names) == 1 and isinstance(
+                by_sheet.get(sheet_names[0]), dict):
+            canvas = by_sheet[sheet_names[0]].get("canvas")
+        if not isinstance(canvas, dict):
+            return None
+        prior_names = {s.get("name") for s in canvas.get("sheets", [])
+                       if isinstance(s, dict)}
+        if prior_names != set(sheet_names):
+            return None
     if not isinstance(canvas, dict) or not canvas.get("instances"):
         return None
     return canvas
