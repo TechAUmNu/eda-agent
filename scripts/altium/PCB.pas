@@ -3779,10 +3779,11 @@ Var
     { string arrays as function locals corrupt the function return slot   }
     { in DelphiScript, see [[delphiscript_fixed_string_array_bug]].       }
     Desig, XStr, YStr, RotStr, Token : String;
-    NewX, NewY : Integer;
+    NewX, NewY : Double;
     NewRot : Double;
     HasX, HasY, HasRot : Boolean;
     CurX, CurY, DeltaX, DeltaY : Integer;
+    BadList : String;
 Begin
     Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then
@@ -3800,6 +3801,7 @@ Begin
 
     Applied := 0;
     Failed := 0;
+    BadList := '';
     Remaining := MovesStr;
 
     While Length(Remaining) > 0 Do
@@ -3862,8 +3864,20 @@ Begin
         HasY := (YStr <> '');
         HasRot := (RotStr <> '');
 
-        If HasX Then NewX := StrToIntDef(XStr, 0);
-        If HasY Then NewY := StrToIntDef(YStr, 0);
+        { Coordinates are decimal mils. They were read with StrToIntDef(..., 0),
+          so 7260.6 became 0 and the part went to the board origin with the
+          move counted as applied (2026-10-17). A field that is not a number
+          now fails its entry, named in bad_entries, and moves nothing. }
+        If (HasX And Not IsFloatStr(XStr)) Or (HasY And Not IsFloatStr(YStr))
+           Or (HasRot And Not IsFloatStr(RotStr)) Then
+        Begin
+            Failed := Failed + 1;
+            If BadList <> '' Then BadList := BadList + ',';
+            BadList := BadList + '"' + EscapeJsonString(Desig) + '"';
+            Continue;
+        End;
+        If HasX Then NewX := StrToFloatDef(XStr, 0);
+        If HasY Then NewY := StrToFloatDef(YStr, 0);
         If HasRot Then NewRot := StrToFloatDef(RotStr, 0);
 
         { Per-component PreProcess+PostProcess (same as singular). Each move   }
@@ -3914,7 +3928,8 @@ Begin
 
     Result := BuildSuccessResponse(RequestId,
         '{"moves_applied":' + IntToStr(Applied) + ','
-        + '"failed":' + IntToStr(Failed) + '}');
+        + '"failed":' + IntToStr(Failed) + ','
+        + '"bad_entries":[' + BadList + ']}');
 End;
 
 {..............................................................................}

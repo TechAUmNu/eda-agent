@@ -306,7 +306,12 @@ def _prior_canvas(snapshot_path: Path,
             return None
         prior_names = {s.get("name") for s in canvas.get("sheets", [])
                        if isinstance(s, dict)}
-        if prior_names != set(sheet_names):
+        if not prior_names:
+            prior_names = {i.get("sheet") for i in canvas.get("instances", [])
+                           if isinstance(i, dict) and i.get("sheet")}
+        # A snapshot written before sheets were recorded names none: it is
+        # the prior of whatever single-sheet project wrote it, as before.
+        if prior_names and prior_names != set(sheet_names):
             return None
     if not isinstance(canvas, dict) or not canvas.get("instances"):
         return None
