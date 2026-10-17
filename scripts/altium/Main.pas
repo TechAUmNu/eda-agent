@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.10.17.01';
+    SCRIPT_VERSION = '2026.10.17.02';
 
     // How far a linked 3D body's box may sit from its footprint's pads (or
     // origin, with no pads) before lib_link_3d_model reports placement_ok

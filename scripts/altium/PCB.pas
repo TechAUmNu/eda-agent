@@ -6255,6 +6255,164 @@ Begin
 End;
 
 {..............................................................................}
+{ PCB_PlaceArcs - Place many arcs in one round trip, with nets.               }
+{ Param 'arcs' is a pipe-separated list; each arc is 8 comma-separated        }
+{ fields: x_center,y_center,radius,start_angle,end_angle,width,layer,net.    }
+{ Coordinates, radius and width are DECIMAL mils (a 100-ohm pair's inner and  }
+{ outer arcs differ by fractions of a mil, which PCB_PlaceArc's integer       }
+{ parse cannot hold). Angles in degrees, counter-clockwise start to end.      }
+{ Same parse, layer check and single broadcast as PCB_PlaceTracks.            }
+{..............................................................................}
+
+Function PCB_PlaceArcs(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Arc : IPCB_Arc;
+    ArcsStr, ArcStr, Remaining : String;
+    PipePos, CommaPos, Placed, Failed, FieldIdx : Integer;
+    AXC, AYC, ARad, ASA, AEA, AWidth : Double;
+    LayerStr, NetStr, BadLayers : String;
+    FoundNet : IPCB_Net;
+    ArcLayer : TLayer;
+    F0, F1, F2, F3, F4, F5, F6, F7, Token : String;
+Begin
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    ArcsStr := ExtractJsonValue(Params, 'arcs');
+    If ArcsStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'arcs parameter required');
+        Exit;
+    End;
+
+    Placed := 0;
+    Failed := 0;
+    BadLayers := '';
+    Remaining := ArcsStr;
+
+    PCBServer.PreProcess;
+    Try
+        While Length(Remaining) > 0 Do
+        Begin
+            PipePos := Pos('|', Remaining);
+            If PipePos = 0 Then
+            Begin
+                ArcStr := Remaining;
+                Remaining := '';
+            End
+            Else
+            Begin
+                ArcStr := Copy(Remaining, 1, PipePos - 1);
+                Remaining := Copy(Remaining, PipePos + 1, Length(Remaining));
+            End;
+
+            If ArcStr = '' Then Continue;
+
+            F0 := '';
+            F1 := '';
+            F2 := '';
+            F3 := '';
+            F4 := '';
+            F5 := '';
+            F6 := '';
+            F7 := '';
+            FieldIdx := 0;
+            While (ArcStr <> '') And (FieldIdx <= 7) Do
+            Begin
+                CommaPos := Pos(',', ArcStr);
+                If CommaPos = 0 Then
+                Begin
+                    Token := ArcStr;
+                    ArcStr := '';
+                End
+                Else
+                Begin
+                    Token := Copy(ArcStr, 1, CommaPos - 1);
+                    ArcStr := Copy(ArcStr, CommaPos + 1, Length(ArcStr));
+                End;
+                Case FieldIdx Of
+                    0: F0 := Token;
+                    1: F1 := Token;
+                    2: F2 := Token;
+                    3: F3 := Token;
+                    4: F4 := Token;
+                    5: F5 := Token;
+                    6: F6 := Token;
+                    7: F7 := Token;
+                End;
+                Inc(FieldIdx);
+            End;
+
+            { A radius that does not parse must not become a default arc. }
+            ARad := StrToFloatDef(F2, -1);
+            If ARad <= 0 Then
+            Begin
+                Inc(Failed);
+                Continue;
+            End;
+            AXC := StrToFloatDef(F0, 0);
+            AYC := StrToFloatDef(F1, 0);
+            ASA := StrToFloatDef(F3, 0);
+            AEA := StrToFloatDef(F4, 360);
+            AWidth := StrToFloatDef(F5, 10);
+            LayerStr := F6;
+            NetStr := F7;
+
+            If LayerStr = '' Then ArcLayer := eTopLayer
+            Else ArcLayer := ResolveLayerId(Board, LayerStr);
+            If ArcLayer = eNoLayer Then
+            Begin
+                Inc(Failed);
+                If BadLayers = '' Then BadLayers := LayerStr
+                Else If Pos(LayerStr, BadLayers) = 0 Then
+                    BadLayers := BadLayers + ', ' + LayerStr;
+                Continue;
+            End;
+
+            Arc := PCBServer.PCBObjectFactory(eArcObject, eNoDimension, eCreate_Default);
+            If Arc = Nil Then
+            Begin
+                Inc(Failed);
+                Continue;
+            End;
+
+            Arc.XCenter := MilsToCoordF(AXC);
+            Arc.YCenter := MilsToCoordF(AYC);
+            Arc.Radius := MilsToCoordF(ARad);
+            Arc.StartAngle := ASA;
+            Arc.EndAngle := AEA;
+            Arc.LineWidth := MilsToCoordF(AWidth);
+            Arc.Layer := ArcLayer;
+
+            If NetStr <> '' Then
+            Begin
+                FoundNet := FindNetByName(Board, NetStr);
+                BindPrimitiveToNet(FoundNet, Arc);
+            End;
+
+            Board.AddPCBObject(Arc);
+            Inc(Placed);
+        End;
+        PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+            PCBM_BoardRegisteration, c_NoEventData);
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    MarkDocDirtyByPath(Board.FileName);
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"placed":' + IntToStr(Placed) + ','
+        + '"failed":' + IntToStr(Failed) + ','
+        + '"unknown_layers":"' + EscapeJsonString(BadLayers) + '"}');
+End;
+
+{..............................................................................}
 { PCB_PlaceArc - Place an arc on the PCB                                      }
 { Params: x_center, y_center, radius, start_angle, end_angle, width, layer   }
 {..............................................................................}
@@ -6593,6 +6751,9 @@ Var
     RuleSMask : IPCB_SolderMaskExpansionRule;
     RulePMask : IPCB_PasteMaskExpansionRule;
     RuleVUS : IPCB_ViasUnderSMDConstraint;
+    RulePC : IPCB_PolygonConnectStyleRule;
+    ConnectStr : String;
+    ConnectVal : Integer;
     RuleTypeStr, RuleName, ValueStr, MaxValueStr, FavoredValueStr : String;
     ScopeStr, NetScopeStr, MaxUncoupStr, AllowedStr : String;
     RuleValue, MaxValue, FavoredValue, MaxUncoupVal, NetScopeVal : Integer;
@@ -6615,6 +6776,7 @@ Begin
     ScopeStr := ExtractJsonValue(Params, 'scope');
     NetScopeStr := LowerCase(ExtractJsonValue(Params, 'net_scope'));
     AllowedStr := ExtractJsonValue(Params, 'allowed');
+    ConnectStr := LowerCase(ExtractJsonValue(Params, 'connect_style'));
 
     If RuleName = '' Then
     Begin
@@ -6757,6 +6919,36 @@ Begin
                 RulePMask.Scope1Expression := ScopeStr;
             Rule := RulePMask;
         End
+        Else If RuleTypeStr = 'polygon_connect' Then
+        Begin
+            { How a polygon pour joins pads and vias of its own net.         }
+            { Stitching and return vias want a DIRECT connection: thermal    }
+            { relief spokes add inductance and break the return path.        }
+            { The rule kind and the style go in as ORDINALS (20 is the kind  }
+            { an existing PolygonConnect rule reports on AD 26; the style    }
+            { order is eReliefConnectToPlane, eDirectConnectToPlane,         }
+            { eNoConnect) so no enum identifier has to resolve: an           }
+            { undeclared identifier is not catchable in DelphiScript.        }
+            { value is the relief conductor width in mils (relief only).     }
+            If ConnectStr = 'direct' Then ConnectVal := 1
+            Else If ConnectStr = 'none' Then ConnectVal := 2
+            Else If (ConnectStr = '') Or (ConnectStr = 'relief') Then ConnectVal := 0
+            Else
+            Begin
+                Result := BuildErrorResponse(RequestId, 'INVALID_PARAM',
+                    'connect_style must be direct, relief or none, not ' + ConnectStr);
+                Exit;
+            End;
+            RulePC := PCBServer.PCBRuleFactory(20);
+            RulePC.Name := RuleName;
+            RulePC.NetScope := NetScopeVal;
+            RulePC.ConnectStyle := ConnectVal;
+            If ConnectVal = 0 Then
+                RulePC.RelifConductorWidth := MilsToCoord(RuleValue);
+            If ScopeStr <> '' Then
+                RulePC.Scope1Expression := ScopeStr;
+            Rule := RulePC;
+        End
         Else If RuleTypeStr = 'vias_under_smd' Then
         Begin
             { A boolean rule: value is ignored and "allowed" decides. This  }
@@ -6774,7 +6966,7 @@ Begin
             Result := BuildErrorResponse(RequestId, 'INVALID_PARAM',
                 'Unknown rule_type: ' + RuleTypeStr + '. Use clearance, width, '
                 + 'via_size, differential_pairs, solder_mask_expansion, '
-                + 'paste_mask_expansion, or vias_under_smd');
+                + 'paste_mask_expansion, vias_under_smd or polygon_connect');
             Exit;
         End;
 
@@ -16533,6 +16725,7 @@ Begin
         'place_tracks':            Result := PCB_PlaceTracks(Params, RequestId);
         'place_vias':              Result := PCB_PlaceVias(Params, RequestId);
         'place_arc':               Result := PCB_PlaceArc(Params, RequestId);
+        'place_arcs':              Result := PCB_PlaceArcs(Params, RequestId);
         'place_text':              Result := PCB_PlaceText(Params, RequestId);
         'place_fill':              Result := PCB_PlaceFill(Params, RequestId);
         'start_polygon_placement': Result := PCB_StartPolygonPlacement(Params, RequestId);

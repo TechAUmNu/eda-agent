@@ -4642,6 +4642,41 @@ def register_pcb_tools(mcp):
         return result
 
     @mcp.tool()
+    async def pcb_place_arcs(
+        arcs: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Place many arcs, each with a net, in ONE round trip.
+
+        Centre, radius and width keep their decimals, which a rounded
+        diff-pair corner needs: the P and N arcs share a centre and their
+        radii differ by the pair pitch, a fraction of a mil off any grid.
+        ``pcb_place_arc`` takes whole mils and no net, so it cannot.
+
+        Args:
+            arcs: List of dicts. Each supports x_center, y_center, radius
+                (required, mils), start_angle, end_angle (degrees, CCW
+                from start to end; default 0 and 360), width (default 10
+                mils), layer (default "TopLayer"), net_name (optional).
+
+        Returns:
+            Dictionary with "placed" and "failed" counts and
+            "unknown_layers".
+        """
+        parts = []
+        for a in arcs:
+            parts.append(",".join([
+                _mils(a["x_center"]), _mils(a["y_center"]), _mils(a["radius"]),
+                repr(float(a.get("start_angle", 0))),
+                repr(float(a.get("end_angle", 360))),
+                _mils(a.get("width", 10)),
+                str(a.get("layer", "TopLayer")),
+                str(a.get("net_name", "")),
+            ]))
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.place_arcs", {"arcs": "|".join(parts)})
+
+    @mcp.tool()
     async def pcb_place_vias(
         vias: list[dict[str, Any]],
     ) -> dict[str, Any]:
@@ -4833,6 +4868,7 @@ def register_pcb_tools(mcp):
         scope: str = "",
         net_scope: str = "different_nets",
         allowed: Optional[bool] = None,
+        connect_style: str = "",
     ) -> dict[str, Any]:
         """Create a new design rule on the active PCB.
 
@@ -4855,6 +4891,12 @@ def register_pcb_tools(mcp):
                     ``"IsVia"`` to tent vias and leave pads alone.
                 ``"paste_mask_expansion"`` - Same shape, stencil side
                     (value = radial expansion in mils, signed).
+                ``"polygon_connect"`` - How a pour joins pads and vias of
+                    its own net. Set ``connect_style`` to ``"direct"``
+                    (solid, what stitching/return vias want: relief spokes
+                    break the return path), ``"relief"`` (value = spoke
+                    width in mils) or ``"none"``. Scope with ``"IsVia"``
+                    to make vias direct and leave pads on relief.
                 ``"vias_under_smd"`` - Whether the autorouter may put a
                     via inside an SMD pad. Boolean: set ``allowed``, not
                     ``value``. This is the DRC that catches via-in-pad,
@@ -4928,6 +4970,8 @@ def register_pcb_tools(mcp):
             params["scope"] = scope
         if allowed is not None:
             params["allowed"] = "true" if allowed else "false"
+        if connect_style:
+            params["connect_style"] = connect_style
         result = await bridge.send_command_async("pcb.create_design_rule", params)
         return result
 
