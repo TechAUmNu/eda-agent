@@ -5296,6 +5296,16 @@ Begin
             End;
         End;
 
+    { IN-PLACE REBUILD SHRINKS OVERLAPPING POURS. Each polygon rebuilds    }
+    { around the OTHER polygons' current copper, so where a high-priority  }
+    { pour (a buck VIN bar) overlaps a low-priority flood (the block's GND),}
+    { every repour takes the clearance off it again: measured 2026-10-17,  }
+    { thin VIN pours went to 0 pieces after two repours and an L5 island  }
+    { split. Polygons pour correctly when CREATED in priority order, so a  }
+    { board with overlapping pours is rebuilt by deleting and re-creating  }
+    { them in order (pcb.place_polygon). Clearing first was tried: Poured  }
+    { := False does not take through the API, and NoHatch leaves outline  }
+    { copper that cuts the later pours.                                    }
     RepourMode := PCBServer.SystemOptions.PolygonRepour;
     PCBServer.SystemOptions.PolygonRepour := eAlwaysRepour;
     Rebuilt := 0; Shelved := 0; Failed := 0;
@@ -8379,9 +8389,9 @@ Var
     Iterator : IPCB_BoardIterator;
     Polygon : IPCB_Polygon;
     IndexStr, NetStr, LayerStr, HatchStr : String;
-    DeadStr, NecksStr, IslandsStr : String;
+    DeadStr, NecksStr, IslandsStr, PourIdxStr : String;
     Changed, Failed : String;
-    TargetIdx, CurIdx : Integer;
+    TargetIdx, CurIdx, PourIdx : Integer;
     FoundPoly : IPCB_Polygon;
     FoundNet : IPCB_Net;
     Found, Want : Boolean;
@@ -8401,6 +8411,7 @@ Begin
     DeadStr := ExtractJsonValue(Params, 'remove_dead');
     NecksStr := ExtractJsonValue(Params, 'remove_narrow_necks');
     IslandsStr := ExtractJsonValue(Params, 'remove_islands_by_area');
+    PourIdxStr := ExtractJsonValue(Params, 'pour_index');
     Changed := '';
     Failed := '';
 
@@ -8546,6 +8557,22 @@ Begin
                 AddChangedField(Changed, 'remove_narrow_necks')
             Else
                 AddFailReason(Failed, 'remove_narrow_necks', 'the flag did not take');
+        End;
+        { Pour order: lower pours first and the rest clear around it. Read }
+        { back, like the flags below.                                       }
+        If PourIdxStr <> '' Then
+        Begin
+            PourIdx := StrToIntDef(PourIdxStr, -1);
+            If PourIdx < 0 Then
+                AddFailReason(Failed, 'pour_index', 'not a whole number >= 0')
+            Else
+            Begin
+                FoundPoly.PourIndex := PourIdx;
+                If FoundPoly.PourIndex = PourIdx Then
+                    AddChangedField(Changed, 'pour_index')
+                Else
+                    AddFailReason(Failed, 'pour_index', 'the index did not take');
+            End;
         End;
         If IslandsStr <> '' Then
         Begin
@@ -9018,6 +9045,246 @@ Begin
         '{"success":true,'
         + '"x1":' + IntToStr(X1) + ',"y1":' + IntToStr(Y1) + ','
         + '"x2":' + IntToStr(X2) + ',"y2":' + IntToStr(Y2) + '}');
+End;
+
+{..............................................................................}
+{ PCB_PlacePolygon - a polygon pour with ANY outline, and its pour order.     }
+{                                                                              }
+{ pts=x1,y1,x2,y2,... in DECIMAL mils (at least 3 vertices, closed            }
+{ implicitly), net, layer, pour_over (default true), pour_index (optional).   }
+{ A plane split - a 1V8 island inside a 5V plane - needs an L or T outline    }
+{ and needs the island to pour FIRST so the plane clears around it; the       }
+{ rectangle tool can do neither. Lower pour_index pours first (the order      }
+{ PCB_RepourPolygons uses). pour_index is read back and reported.            }
+{ Vertices are walked twice with NextCsvValue: once to count and check every }
+{ value is a number, once to fill the segments.                              }
+{..............................................................................}
+
+Function PCB_PlacePolygon(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Polygon : IPCB_Polygon;
+    PtsStr, Walk, XTok, YTok, NetStr, LayerStr, PourOverStr, PourIdxStr : String;
+    DeadStr, IslandsStr : String;
+    N, K, PourIdx, GotIdx : Integer;
+    FoundNet : IPCB_Net;
+    Seg : TPolySegment;
+    TargetLayer : TLayer;
+    AllNumbers : Boolean;
+Begin
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    PtsStr := ExtractJsonValue(Params, 'pts');
+    NetStr := ExtractJsonValue(Params, 'net');
+    LayerStr := ExtractJsonValue(Params, 'layer');
+    PourOverStr := ExtractJsonValue(Params, 'pour_over');
+    PourIdxStr := ExtractJsonValue(Params, 'pour_index');
+    DeadStr := ExtractJsonValue(Params, 'remove_dead');
+    IslandsStr := ExtractJsonValue(Params, 'remove_islands_by_area');
+
+    N := 0;
+    AllNumbers := True;
+    Walk := PtsStr;
+    While Walk <> '' Do
+    Begin
+        XTok := NextCsvValue(Walk);
+        YTok := NextCsvValue(Walk);
+        If (Not IsFloatStr(XTok)) Or (Not IsFloatStr(YTok)) Then AllNumbers := False;
+        Inc(N);
+    End;
+    If (Not AllNumbers) Or (N < 3) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'INVALID_PARAM',
+            'pts must be at least 3 x,y pairs of numbers (decimal mils)');
+        Exit;
+    End;
+
+    If LayerStr = '' Then TargetLayer := eTopLayer
+    Else TargetLayer := ResolveLayerId(Board, LayerStr);
+    If TargetLayer = eNoLayer Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'UNKNOWN_LAYER',
+            'Unknown layer name: ' + LayerStr + '. ' + BoardLayerNamesHint(Board));
+        Exit;
+    End;
+
+    FoundNet := Nil;
+    If NetStr <> '' Then
+    Begin
+        FoundNet := FindNetByName(Board, NetStr);
+        If FoundNet = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'UNKNOWN_NET',
+                'no net named "' + NetStr + '" on this board');
+            Exit;
+        End;
+    End;
+
+    GotIdx := -1;
+    PCBServer.PreProcess;
+    Try
+        Polygon := PCBServer.PCBObjectFactory(ePolyObject, eNoDimension, eCreate_Default);
+        If Polygon = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Failed to create polygon object');
+            Exit;
+        End;
+
+        Polygon.Layer := TargetLayer;
+        Polygon.PolyHatchStyle := ePolySolid;
+
+        { Same Segments write as PCB_PlacePolygonRect: Seg := TPolySegment }
+        { before any field is written.                                    }
+        Polygon.PointCount := N;
+        Seg := TPolySegment;
+        Seg.Kind := ePolySegmentLine;
+        Walk := PtsStr;
+        For K := 0 To N - 1 Do
+        Begin
+            XTok := NextCsvValue(Walk);
+            YTok := NextCsvValue(Walk);
+            Seg.vx := MilsToCoordF(StrToFloatDef(XTok, 0));
+            Seg.vy := MilsToCoordF(StrToFloatDef(YTok, 0));
+            Polygon.Segments[K] := Seg;
+        End;
+
+        If FoundNet <> Nil Then Polygon.Net := FoundNet;
+
+        If (PourOverStr = '') Or (LowerCase(PourOverStr) = 'true') Then
+            Polygon.PourOver := ePolygonPourOver_SameNet
+        Else
+            Polygon.PourOver := ePolygonPourOver_None;
+
+        If PourIdxStr <> '' Then
+        Begin
+            PourIdx := StrToIntDef(PourIdxStr, -1);
+            If PourIdx >= 0 Then Polygon.PourIndex := PourIdx;
+        End;
+
+        { Pour options BEFORE the first pour: the polygon pours as it is  }
+        { added, and an island with no via yet is dead copper unless      }
+        { remove_dead is off at that moment.                              }
+        If DeadStr <> '' Then Polygon.RemoveDead := StrToBool(DeadStr);
+        If IslandsStr <> '' Then Polygon.RemoveIslandsByArea := StrToBool(IslandsStr);
+
+        Board.AddPCBObject(Polygon);
+        PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+            PCBM_BoardRegisteration, Polygon.I_ObjectAddress);
+        Polygon.Rebuild;
+        GotIdx := Polygon.PourIndex;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    MarkDocDirtyByPath(Board.FileName);
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"placed":true,'
+        + '"vertices":' + IntToStr(N) + ','
+        + '"layer":"' + EscapeJsonString(GetLayerString(Polygon.Layer)) + '",'
+        + '"net":"' + EscapeJsonString(NetStr) + '",'
+        + '"pour_index":' + IntToStr(GotIdx) + '}');
+End;
+
+{..............................................................................}
+{ PCB_GetPolygonPieces - where each poured piece of one polygon is.           }
+{                                                                              }
+{ get_polygons counts a pour's pieces; this says WHERE they are: per region   }
+{ its bounding box in mils, its copper (Area less holes, RegionCopperSqMils)  }
+{ and its hole count. A plane that splits into a main piece and a few small   }
+{ ones needs the small ones located before deciding whether they are slivers }
+{ to remove or copper a via should stitch. Params: index (as get_polygons).   }
+{..............................................................................}
+
+Function PCB_GetPolygonPieces(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iterator : IPCB_BoardIterator;
+    Polygon, FoundPoly : IPCB_Polygon;
+    Iter : IPCB_GroupIterator;
+    Region : IPCB_Region;
+    Rect : TCoordRect;
+    TargetIdx, CurIdx, Count, Holes : Integer;
+    Copper : Double;
+    Exact : Boolean;
+    Items, NetName : String;
+Begin
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    TargetIdx := StrToIntDef(ExtractJsonValue(Params, 'index'), -1);
+    If TargetIdx < 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'INVALID_PARAM', 'index (a whole number >= 0) is required');
+        Exit;
+    End;
+
+    FoundPoly := Nil;
+    CurIdx := 0;
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(ePolyObject));
+    Iterator.AddFilter_LayerSet(AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+    Polygon := Iterator.FirstPCBObject;
+    While Polygon <> Nil Do
+    Begin
+        If CurIdx = TargetIdx Then
+        Begin
+            FoundPoly := Polygon;
+            Break;
+        End;
+        Inc(CurIdx);
+        Polygon := Iterator.NextPCBObject;
+    End;
+    Board.BoardIterator_Destroy(Iterator);
+    If FoundPoly = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND', 'Polygon index ' + IntToStr(TargetIdx) + ' not found');
+        Exit;
+    End;
+
+    Items := '';
+    Count := 0;
+    Iter := FoundPoly.GroupIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eRegionObject));
+    Region := Iter.FirstPCBObject;
+    While Region <> Nil Do
+    Begin
+        Exact := True;
+        Copper := RegionCopperSqMils(Region, Exact);
+        Holes := -1;
+        Try Holes := Region.HoleCount; Except Holes := -1; End;
+        Rect := Region.BoundingRectangle;
+        If Items <> '' Then Items := Items + ',';
+        Items := Items + '{"left":' + FloatToJsonStr(CoordToMilsF(Rect.Left))
+            + ',"bottom":' + FloatToJsonStr(CoordToMilsF(Rect.Bottom))
+            + ',"right":' + FloatToJsonStr(CoordToMilsF(Rect.Right))
+            + ',"top":' + FloatToJsonStr(CoordToMilsF(Rect.Top))
+            + ',"copper_sqmils":' + FloatToJsonStr(Copper)
+            + ',"copper_exact":' + BoolToJsonStr(Exact)
+            + ',"holes":' + IntToStr(Holes) + '}';
+        Inc(Count);
+        Region := Iter.NextPCBObject;
+    End;
+    FoundPoly.GroupIterator_Destroy(Iter);
+
+    NetName := '';
+    Try
+        If FoundPoly.Net <> Nil Then NetName := FoundPoly.Net.Name;
+    Except NetName := ''; End;
+    Result := BuildSuccessResponse(RequestId,
+        '{"index":' + IntToStr(TargetIdx) + ','
+        + '"net":"' + EscapeJsonString(NetName) + '",'
+        + '"layer":"' + EscapeJsonString(GetLayerString(FoundPoly.Layer)) + '",'
+        + '"pieces":[' + Items + '],"count":' + IntToStr(Count) + '}');
 End;
 
 {..............................................................................}
@@ -16726,6 +16993,8 @@ Begin
         'place_vias':              Result := PCB_PlaceVias(Params, RequestId);
         'place_arc':               Result := PCB_PlaceArc(Params, RequestId);
         'place_arcs':              Result := PCB_PlaceArcs(Params, RequestId);
+        'place_polygon':           Result := PCB_PlacePolygon(Params, RequestId);
+        'get_polygon_pieces':      Result := PCB_GetPolygonPieces(Params, RequestId);
         'place_text':              Result := PCB_PlaceText(Params, RequestId);
         'place_fill':              Result := PCB_PlaceFill(Params, RequestId);
         'start_polygon_placement': Result := PCB_StartPolygonPlacement(Params, RequestId);

@@ -154,7 +154,8 @@ class Router:
                  global_routing: bool = True, nets: frozenset | None = None,
                  pres_growth: float = 1.8, history_step: float = 0.4,
                  repair_rounds: int = 2, fanout: bool = True, pours: bool = True,
-                 stages=None, log: Callable[[str], None] | None = None):
+                 stages=None, log: Callable[[str], None] | None = None,
+                 exclude_layers: frozenset = frozenset()):
         from .stages import StageOptions, StageReport
 
         self.board = board
@@ -197,7 +198,10 @@ class Router:
         self.pour_planes = [p for p in self._pour_planes() if p.layer not in self.released] \
             if planes else []
         on_planes = {p.layer for p in self.pour_planes}
-        routing = [l for l in board.signal_layers() if l not in on_planes]
+        # Layers the caller keeps free of routing (a solid outer heat-spreader,
+        # say): never a plane, never routed.
+        self.exclude_layers = frozenset(exclude_layers)
+        routing = [l for l in board.signal_layers() if l not in on_planes and l not in self.exclude_layers]
         self.grid = RouteGrid(board, self.pitch, reach, layers=routing, grow=self.object_grow,
                               field_of=self.field_of, n_fields=self.n_fields).build()
         self._fixed: dict | None = None       # fixed shapes per layer, for exact checks

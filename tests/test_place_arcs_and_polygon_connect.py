@@ -44,3 +44,29 @@ def test_python_tool_sends_connect_style():
     py = (Path(__file__).resolve().parents[1] / "src" / "eda_agent" / "tools" / "pcb.py").read_text(encoding="utf-8")
     assert 'params["connect_style"] = connect_style' in py
     assert '"pcb.place_arcs"' in py
+
+
+def test_place_polygon_is_dispatched_and_checks_its_input():
+    assert "'place_polygon':           Result := PCB_PlacePolygon(Params, RequestId);" in _src()
+    b = _body("Function PCB_PlacePolygon(", "{ PCB_PlacePolygonRect - ")
+    assert "IsFloatStr(XTok)" in b and "(N < 3)" in b
+    assert "UNKNOWN_NET" in b
+    assert "Polygon.PourIndex := PourIdx" in b and "GotIdx := Polygon.PourIndex" in b
+
+
+def test_modify_polygon_reads_back_pour_index():
+    b = _body("Function PCB_ModifyPolygon(", "{ PCB_PlacePolygon - ")  if False else _src()
+    assert "If FoundPoly.PourIndex = PourIdx Then" in b
+
+
+def test_get_polygon_pieces_is_dispatched_and_reports_location():
+    assert "'get_polygon_pieces':      Result := PCB_GetPolygonPieces(Params, RequestId);" in _src()
+    b = _body("Function PCB_GetPolygonPieces(", "{ PCB_PlacePolygonRect - ")
+    assert "Region.BoundingRectangle" in b and "RegionCopperSqMils(Region, Exact)" in b
+
+
+
+def test_repour_documents_the_overlap_shrink():
+    b = _body("Function PCB_RepourPolygons(", "{ PCB_PlaceVia - ")
+    assert "IN-PLACE REBUILD SHRINKS OVERLAPPING POURS" in b
+    assert "ePolyNoHatch" not in b and "Poured := False" not in b.replace("{ := False", "")

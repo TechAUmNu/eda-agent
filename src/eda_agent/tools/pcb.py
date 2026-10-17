@@ -4402,6 +4402,15 @@ def register_pcb_tools(mcp):
     async def pcb_repour_polygons() -> dict[str, Any]:
         """Repour every poured polygon on the open PCB, in pour order.
 
+        OVERLAPPING POURS SHRINK. Each polygon is rebuilt around the other
+        polygons' CURRENT copper, so a high-priority pour that overlaps a
+        lower-priority flood (a buck's VIN bar inside the block's GND
+        flood, an island inside a plane) loses the clearance again on
+        every repour; thin ones vanish. Polygons pour correctly when they
+        are CREATED in priority order, so rebuild such a board by deleting
+        and re-creating its pours in order with ``pcb_place_polygon``, and
+        use this only on boards whose pours do not overlap.
+
         Each polygon is rebuilt through the API, so a changed clearance
         or board-edge rule takes effect. Shelved polygons stay shelved.
         ``repoured`` is true only when at least one polygon was rebuilt
@@ -4640,6 +4649,76 @@ def register_pcb_tools(mcp):
             "pcb.place_tracks", {"tracks": "|".join(parts)}
         )
         return result
+
+    @mcp.tool()
+    async def pcb_get_polygon_pieces(index: int) -> dict[str, Any]:
+        """Locate every poured piece of one polygon.
+
+        ``pcb_get_polygons`` counts a pour's ``copper_pieces``; this says
+        where each is: per region ``left``/``bottom``/``right``/``top`` in
+        mils, ``copper_sqmils`` (area less holes) and ``holes``. Use it
+        when a plane pours in more pieces than expected, to tell slivers
+        from copper that needs a stitching via.
+
+        Args:
+            index: Polygon index from ``pcb_get_polygons``.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.get_polygon_pieces", {"index": str(index)})
+
+    @mcp.tool()
+    async def pcb_place_polygon(
+        points: list[list[float]],
+        net: str = "",
+        layer: str = "TopLayer",
+        pour_over: bool = True,
+        pour_index: Optional[int] = None,
+        remove_dead: Optional[bool] = None,
+        remove_islands_by_area: Optional[bool] = None,
+    ) -> dict[str, Any]:
+        """Place a solid polygon pour with ANY outline, and set its pour order.
+
+        ``remove_dead`` / ``remove_islands_by_area`` are set BEFORE the
+        polygon first pours (it pours as it is added): an island with no
+        via yet survives only if remove_dead is False from the start.
+
+        For plane splits and shaped pours: an L-shaped 1V8 island inside a
+        5V plane, a pour that follows a buck's footprint. Lower
+        ``pour_index`` pours first and later polygons on the layer clear
+        around it, so give an island a LOWER index than the plane it sits
+        in. ``pcb_place_polygon_rect`` can do neither.
+
+        Args:
+            points: Outline vertices [[x, y], ...] in mils (decimals kept),
+                at least 3, closed implicitly.
+            net: Net name; an unknown net is refused, not poured as no-net
+                copper.
+            layer: Copper layer.
+            pour_over: Pour over same-net objects (default True).
+            pour_index: Optional pour order, read back in the reply.
+
+        Returns:
+            ``placed``, ``vertices``, ``layer``, ``net``, ``pour_index``.
+            Nothing is poured until ``pcb_repour_polygons`` if the board
+            has polygons that must clear around this one.
+        """
+        if len(points) < 3:
+            return {"error": "points needs at least 3 vertices"}
+        params: dict[str, Any] = {
+            "pts": ",".join(f"{_mils(x)},{_mils(y)}" for x, y in points),
+            "net": net,
+            "layer": layer,
+            "pour_over": "true" if pour_over else "false",
+        }
+        if pour_index is not None:
+            params["pour_index"] = str(pour_index)
+        if remove_dead is not None:
+            params["remove_dead"] = "true" if remove_dead else "false"
+        if remove_islands_by_area is not None:
+            params["remove_islands_by_area"] = "true" if remove_islands_by_area else "false"
+        bridge = get_bridge()
+        return await bridge.send_command_async("pcb.place_polygon", params)
 
     @mcp.tool()
     async def pcb_place_arcs(
@@ -5597,8 +5676,12 @@ def register_pcb_tools(mcp):
         remove_dead: Optional[bool] = None,
         remove_narrow_necks: Optional[bool] = None,
         remove_islands_by_area: Optional[bool] = None,
+        pour_index: Optional[int] = None,
     ) -> dict[str, Any]:
         """Modify a polygon pour's properties and its pour options.
+
+        ``pour_index`` sets the pour order (lower pours first; later
+        polygons on the same layer clear around it), read back.
 
         Changes net, layer, hatching style, or the three "remove" options
         from the Polygon Pour dialog. Use ``pcb_get_polygons`` first to
@@ -5655,6 +5738,8 @@ def register_pcb_tools(mcp):
         if remove_islands_by_area is not None:
             params["remove_islands_by_area"] = (
                 "true" if remove_islands_by_area else "false")
+        if pour_index is not None:
+            params["pour_index"] = str(pour_index)
         result = await bridge.send_command_async("pcb.modify_polygon", params)
         return result
 

@@ -36,6 +36,7 @@ def route_job(params: dict[str, Any]) -> dict[str, Any]:
     r = route_adaptive(board, nets=frozenset(nets) if nets else None,
                        planes=bool(params.get("planes", True)),
                        stages=params.get("stages"),
+                       exclude_layers=frozenset(params.get("exclude_layers") or ()),
                        log=live.progress_logger("route"))
     out = r.apply()
     new_tracks = out.tracks[len(board.tracks):]
