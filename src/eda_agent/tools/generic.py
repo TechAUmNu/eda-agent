@@ -554,7 +554,12 @@ def register_generic_tools(mcp):
                 StandoffHeight, OverallHeight, BodyOpacity3D, InComponent, Component,
                 InPolygon, IsKeepout, Locked, Layer1, Layer2,
                 IsRedundant, Mode, Height, StrokeWidth, IsDesignator,
-                IsComment, UseTTFonts.
+                IsComment, UseTTFonts, IsTenting_Top, IsTenting_Bottom.
+
+                On a via, IsTenting_Top / IsTenting_Bottom read and write
+                its own Tented flags; a write takes only once the via's
+                mask expansion is manual (pcb_set_via_soldermask_relief
+                first) and is reported failed otherwise.
 
                 On a text, Height and StrokeWidth are writable in mils
                 (Altium's own names, Size and Width, answer the same).

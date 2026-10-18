@@ -262,6 +262,16 @@ Begin
             If Oid = ePadObject Then Begin Pad := Obj; Result := FloatToJsonStr(CoordToMilsF(Pad.HoleSize)); End
             Else If Oid = eViaObject Then Begin Via := Obj; Result := FloatToJsonStr(CoordToMilsF(Via.HoleSize)); End;
         End
+        Else If (PropName = 'IsTenting_Top') Or (PropName = 'IsTenting_Bottom') Then
+        Begin
+            { A via's own Tented flags (Properties > Solder Mask Expansion). }
+            If Oid = eViaObject Then
+            Begin
+                Via := Obj;
+                If PropName = 'IsTenting_Top' Then Result := BoolToJsonStr(Via.IsTenting_Top)
+                Else Result := BoolToJsonStr(Via.IsTenting_Bottom);
+            End;
+        End
         Else If PropName = 'TopXSize' Then
         Begin
             If Oid = ePadObject Then Begin Pad := Obj; Result := FloatToJsonStr(CoordToMilsF(Pad.TopXSize)); End;
@@ -630,6 +640,37 @@ Begin
             End
             Else Matched := False;
         End
+        { TENTING: the via's own Tented toggles, top and bottom. A mask
+          expansion rule with a negative value covers a via in the output
+          too, but the flags are what the owner reads in the via's
+          properties and what audit_tented_via_ratio counts. }
+        Else If (PropName = 'IsTenting_Top') Or (PropName = 'IsTenting_Bottom') Then
+        Begin
+            If Oid = eViaObject Then
+            Begin
+                Via := Obj;
+                { Assigning the property was accepted and read back unchanged
+                  (2026-10-18): the setter is called explicitly, inside the
+                  robot BeginModify/EndModify the via mask write uses. IT ONLY
+                  TAKES ON A VIA WHOSE MASK EXPANSION IS MANUAL: on a via left
+                  on the rule the call reads back unchanged and is reported
+                  failed. Run pcb_set_via_soldermask_relief first (measured on
+                  v0: 2 of 2204 took, then all 2204 after the relief call). }
+                PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast,
+                    PCBM_BeginModify, c_NoEventData);
+                If PropName = 'IsTenting_Top' Then
+                    Via.SetState_IsTenting_Top((UpperCase(Value) = 'TRUE') Or (Value = '1'))
+                Else
+                    Via.SetState_IsTenting_Bottom((UpperCase(Value) = 'TRUE') Or (Value = '1'));
+                PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast,
+                    PCBM_EndModify, c_NoEventData);
+                If PropName = 'IsTenting_Top' Then
+                    Refused := Via.GetState_IsTenting_Top <> ((UpperCase(Value) = 'TRUE') Or (Value = '1'))
+                Else
+                    Refused := Via.GetState_IsTenting_Bottom <> ((UpperCase(Value) = 'TRUE') Or (Value = '1'));
+            End
+            Else Matched := False;
+        End
         Else If PropName = 'Size' Then
         Begin
             If Oid = eViaObject Then
@@ -920,7 +961,8 @@ Begin
         (PropName = 'Layer2') Or (PropName = 'IsRedundant') Or
         (PropName = 'Mode') Or (PropName = 'Height') Or
         (PropName = 'StrokeWidth') Or (PropName = 'IsDesignator') Or
-        (PropName = 'IsComment') Or (PropName = 'UseTTFonts');
+        (PropName = 'IsComment') Or (PropName = 'UseTTFonts') Or
+        (PropName = 'IsTenting_Top') Or (PropName = 'IsTenting_Bottom');
 End;
 
 Function UnknownPCBProperties(PropsStr : String) : String;
@@ -961,7 +1003,7 @@ Function KnownPCBPropertyList(Dummy : Integer) : String;
 Begin
     Result := 'ObjectId, X, Y, Layer, Descriptor, Selected, Net, X1, Y1, '
         + 'X2, Y2, Width, Radius, StartAngle, EndAngle, XCenter, YCenter, '
-        + 'HoleSize, Size, TopShape, TopXSize, TopYSize, Rotation, Name, '
+        + 'HoleSize, Size, IsTenting_Top, IsTenting_Bottom, TopShape, TopXSize, TopYSize, Rotation, Name, '
         + 'Text, Pattern, Designator, Comment, SourceDesignator, '
         { Everything the reader above answers. A list that lags the reader
           tells a caller a property does not exist when it does, which is
