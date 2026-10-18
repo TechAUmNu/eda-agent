@@ -37,6 +37,14 @@ def route_job(params: dict[str, Any]) -> dict[str, Any]:
                        planes=bool(params.get("planes", True)),
                        stages=params.get("stages"),
                        exclude_layers=frozenset(params.get("exclude_layers") or ()),
+                       neck_pads=bool(params.get("neck_pads", False)),
+                       layer_dirs=params.get("layer_dirs"),
+                       dir_strength=params.get("dir_strength"),
+                       outer_cost=float(params.get("outer_cost", 1.0)),
+                       # Grid pitch in mils. Left out, the router sizes it from the
+                       # narrowest width on the WHOLE board, so a few 4 mil pairs made a
+                       # power-only run search a 4 mil grid (40+ min on v0).
+                       **({"pitch": float(params["pitch"])} if params.get("pitch") else {}),
                        log=live.progress_logger("route"))
     out = r.apply()
     new_tracks = out.tracks[len(board.tracks):]
@@ -117,8 +125,14 @@ def _without_old_pours(board: LayoutBoard) -> tuple[LayoutBoard, list[str]]:
     in the old vias' voids: 137 s and 76 violations. Without it the same
     board routed in 8 s with none.
     """
+    # Matched by layer AND NET. By (layer, source) nothing matched on a live
+    # read, where a boundary's source is "polygon:..." and its poured copper's
+    # is "region": every old pour stayed as fixed copper, walled off the pads
+    # inside other nets' floods and left them unrouted (v0, 2026-10-18).
     outlines = {(r.layer, r.source) for r in board.regions if r.kind == "pour_boundary"}
-    old = [r for r in board.regions if r.kind == "pour" and (r.layer, r.source) in outlines]
+    nets = {(r.layer, r.net) for r in board.regions if r.kind == "pour_boundary" and r.net}
+    old = [r for r in board.regions if r.kind == "pour"
+           and ((r.layer, r.source) in outlines or (r.layer, r.net) in nets)]
     if not old:
         return board, []
     out = copy_board(board)

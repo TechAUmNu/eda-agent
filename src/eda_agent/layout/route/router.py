@@ -55,6 +55,14 @@ class Terminal:
     # Cells outside the pad reached by a stub out along one of its axes,
     # where the grid has no way out of it: cell -> the stub's points.
     stubs: dict = field(default_factory=dict)
+    # Set when the pad is narrower than the net's track (Router neck_pads):
+    # its stubs are laid at this width and the track starts at full width
+    # where the stub ends, the way a person necks down at a small pad.
+    neck: float | None = None
+    # A pad neither the full track nor a neck stub reaches: kept so the net
+    # counts it as failed, but never entered at full width (its cells are
+    # not opened); the branch pass reaches it narrower.
+    blocked: bool = False
 
 
 @dataclass
@@ -66,6 +74,10 @@ class NetJob:
     terminals: list[Terminal]
     plane_mask: np.ndarray | None = None      # (ny, nx) cells in its plane
     paths: list[list[tuple[int, int, int]]] = field(default_factory=list)
+    # Per path, the width it is laid at when not the net's (a branch the
+    # trunk could not reach at full width, Router._branch_down); empty or
+    # None means job.width.
+    path_w: list = field(default_factory=list)
     via_at: dict = field(default_factory=dict)   # (y, x) -> index into vias
     stamp: list = field(default_factory=list)
     failed: int = 0
@@ -86,6 +98,10 @@ class NetJob:
     # in one of the net's own pads that may not take one (see
     # Router._no_via_cells).
     no_via: list | None = None
+    # join_existing: the net's pads grouped by the copper already joining
+    # them, each (terminal indices, extra cells (k, 3) of that copper). The
+    # first group seeds the tree and each other is joined to it whole.
+    pre_groups: list | None = None
     # Where the net stands in the routing order: 0 high current, 1 rails,
     # 2 the rest (see Router._rank).
     rank: int = 2
@@ -155,7 +171,10 @@ class Router:
                  pres_growth: float = 1.8, history_step: float = 0.4,
                  repair_rounds: int = 2, fanout: bool = True, pours: bool = True,
                  stages=None, log: Callable[[str], None] | None = None,
-                 exclude_layers: frozenset = frozenset()):
+                 exclude_layers: frozenset = frozenset(), neck_pads: bool = False,
+                 layer_dirs: dict | None = None, dir_strength: float | None = None,
+                 outer_cost: float = 1.0, join_existing: bool = False,
+                 join_regions: list | None = None):
         from .stages import StageOptions, StageReport
 
         self.board = board
@@ -182,7 +201,24 @@ class Router:
         net_id = {n: i + 1 for i, n in enumerate(nets)}
         self.rr = RouteRules(board, self.rules, net_id)
         pads_of = board.pads_by_net()
-        widths = [self.rr.width(n, pads_of.get(n, [])) for n in nets] or [6.0]
+        # neck_pads: a net is routed at its rule's preferred width and necks
+        # down only at the pads narrower than that (Terminal.neck). Without
+        # it the narrowest pad sets the whole net's width, and a 20 V rail
+        # that touches one 0402 was routed 8 mil from end to end.
+        self.neck_pads = bool(neck_pads)
+        # Per layer name: 'h' or 'v', the direction its long runs keep to;
+        # dir_strength the extra cost of a move across it (0.6 when unset).
+        # outer_cost: the cost of a cell on the board's outer layers, so
+        # long runs go inside and the outer layers keep the pad hops.
+        self.layer_dirs = dict(layer_dirs or {})
+        self.dir_strength = dir_strength
+        self.outer_cost = float(outer_cost)
+        # join_existing: route only what the board's copper leaves apart. Pads
+        # already joined by a net's tracks, vias or a join region (layer, net,
+        # outline) are one group; a net already whole is not routed.
+        self.join_existing = bool(join_existing)
+        self.join_regions = list(join_regions or [])
+        widths = [self._net_width(n, pads_of.get(n, [])) for n in nets] or [6.0]
         self.w_def = float(np.median(widths))
         self.c = self.rr.default_clearance
         self.pitch = pitch or self._pitch_for(min(widths), self.c)
@@ -223,6 +259,10 @@ class Router:
         # other net, as walls (_negotiate_locally).
         self._walls: tuple | None = None
         self.move_factor = self._move_factors()
+        copper = board.copper_layers()
+        outer_names = {copper[0], copper[-1]} if copper else set()
+        self.layer_cost = np.array([self.outer_cost if n in outer_names else 1.0
+                                    for n in self.grid.layers])
         # Nets a plane or a pour joins: the rails, routed after the high
         # current nets and before the rest when the order is by class.
         self._rails = set(self._plane_masks()) | {r.net for r in board.regions
@@ -408,6 +448,11 @@ class Router:
             p = (width + clearance + p * p / (4.0 * D)) / 3.0
         return max(1.5, min(5.0, p * 1.001))
 
+    def _net_width(self, net: str, pads) -> float:
+        """The width a net is routed at: the rule's preferred width, capped
+        by its narrowest pad unless the pads neck down (neck_pads)."""
+        return self.rr.width(net, () if self.neck_pads else pads)
+
     def _move_factors(self) -> np.ndarray:
         """Per layer, the cost multiplier of each of the eight moves.
 
@@ -416,13 +461,33 @@ class Router:
         """
         L = self.L
         f = np.ones((L, 8))
+        copper = self.board.copper_layers()
+        board_outer = {copper[0], copper[-1]} if copper else set()
+        names = list(self.grid.layers)
+        inner_seen = 0
         for l in range(L):
-            outer = l in (0, L - 1)
+            name = names[l] if l < len(names) else ""
+            # OUTER means the board's outer copper. Judged by the ends of
+            # the routing list, an inner layer became "outer" whenever the
+            # layer outside it was left out of routing (a plane, or an
+            # excluded heat-spreader), lost its direction, and the inner
+            # layer before it took the other one.
+            outer = name in board_outer if name else l in (0, L - 1)
             if L > 2 and outer:
                 strength = 0.0
             else:
-                strength = 0.25 if L <= 2 else 0.6
-            horizontal = (l % 2 == 0)
+                strength = self.dir_strength if self.dir_strength is not None else \
+                    (0.25 if L <= 2 else 0.6)
+            if name in self.layer_dirs:
+                horizontal = str(self.layer_dirs[name]).lower().startswith('h')
+                if outer:
+                    strength = self.dir_strength if self.dir_strength is not None else 0.6
+            elif outer:
+                horizontal = (l % 2 == 0)
+            else:
+                horizontal = (inner_seen % 2 == 0)
+            if not outer:
+                inner_seen += 1
             for k, (dx, dy, _) in enumerate(MOVES):
                 if dx and dy:
                     f[l, k] = 1.0 + strength / 2 + 0.02
@@ -503,7 +568,7 @@ class Router:
                 continue
             plane = planes.get(net)
             nid = self.grid.net_id[net]
-            width = self.rr.width(net, pads)
+            width = self._net_width(net, pads)
             vias = self.rr.vias(net)
             terms = [self._terminal(index[id(p)], p, nid, width) for p in pads]
             terms = [t for t in terms if len(t.cells)]
@@ -520,12 +585,134 @@ class Router:
             elif len(terms) < 2:
                 continue
             job = NetJob(nid, net, width, vias, terms, plane)
+            if self.join_existing and plane is None:
+                groups = self._existing_groups(net, terms)
+                if len(groups) < 2:
+                    continue
+                job.pre_groups = groups
             job.rank = self._rank(job)
             job.no_via = self._no_via_cells(job, [index[id(p)] for p in pads])
             self._pad_vias(job)
             jobs.append(job)
         jobs.sort(key=self._order)
         return jobs
+
+    def _existing_groups(self, net: str, terms: list) -> list:
+        """The net's terminals grouped by the copper already joining them
+        (join_existing), each with the grid cells of that copper."""
+        from .grid import fill_polygon
+        spec = self.grid.spec
+        li_of = self.grid.layer_index
+        b = self.board
+        items = []          # (kind, data)
+        for k, t in enumerate(terms):
+            items.append(("t", k))
+        trs = [tr for tr in b.tracks if tr.net == net]
+        vs = [v for v in b.vias if v.net == net]
+        regs = [(l, pts) for l, n, pts in self.join_regions if n == net]
+        for tr in trs:
+            items.append(("tr", tr))
+        for v in vs:
+            items.append(("v", v))
+        for r in regs:
+            items.append(("r", r))
+        n = len(items)
+        par = list(range(n))
+
+        def f(i):
+            while par[i] != i:
+                par[i] = par[par[i]]
+                i = par[i]
+            return i
+
+        def pts_of(it):
+            kind, d = it
+            if kind == "t":
+                pad = b.pads[terms[d].pad]
+                return [((pad.x, pad.y), max(max(c.w, c.h) for c in pad.copper) / 2,
+                         set(pad.layers()) if not pad.is_smd else {pad.copper[0].layer})]
+            if kind == "tr":
+                return [((d.x1, d.y1), d.width / 2, {d.layer}), ((d.x2, d.y2), d.width / 2, {d.layer})]
+            if kind == "v":
+                return [((d.x, d.y), d.diameter / 2, None)]
+            return []
+
+        def seg_d(p, a, c):
+            dx, dy = c[0] - a[0], c[1] - a[1]
+            ll = dx * dx + dy * dy
+            u = 0.0 if ll == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / ll))
+            return math.hypot(p[0] - a[0] - u * dx, p[1] - a[1] - u * dy)
+
+        def inside(pt, poly):
+            x, y = pt
+            c = False
+            for (x1, y1), (x2, y2) in zip(poly, poly[1:] + poly[:1]):
+                if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+                    c = not c
+            return c
+
+        def touch(a, c):
+            if a[0] == "r" or c[0] == "r":
+                rr, o = (a, c) if a[0] == "r" else (c, a)
+                if o[0] == "r":
+                    return False
+                lay, poly = rr[1]
+                return any((ls is None or lay in ls) and inside(pt, poly) for pt, _, ls in pts_of(o))
+            if a[0] == "tr" or c[0] == "tr":
+                tt, o = (a, c) if a[0] == "tr" else (c, a)
+                t_ = tt[1]
+                if o[0] == "tr":
+                    o_ = o[1]
+                    if o_.layer != t_.layer:
+                        return False
+                    return min(seg_d(q, (o_.x1, o_.y1), (o_.x2, o_.y2)) for q in ((t_.x1, t_.y1), (t_.x2, t_.y2))) \
+                        <= (t_.width + o_.width) / 2 + 0.5 or \
+                        min(seg_d(q, (t_.x1, t_.y1), (t_.x2, t_.y2)) for q in ((o_.x1, o_.y1), (o_.x2, o_.y2))) \
+                        <= (t_.width + o_.width) / 2 + 0.5
+                return any((ls is None or t_.layer in ls) and
+                           seg_d(pt, (t_.x1, t_.y1), (t_.x2, t_.y2)) <= t_.width / 2 + r + 0.5
+                           for pt, r, ls in pts_of(o))
+            for pa, ra, la in pts_of(a):
+                for pc, rc, lc in pts_of(c):
+                    if la is not None and lc is not None and not (la & lc):
+                        continue
+                    if math.hypot(pa[0] - pc[0], pa[1] - pc[1]) <= ra + rc + 0.5:
+                        return True
+            return False
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                if f(i) != f(j) and touch(items[i], items[j]):
+                    par[f(i)] = f(j)
+        groups: dict = {}
+        for i, it in enumerate(items):
+            groups.setdefault(f(i), []).append(it)
+        out = []
+        for g in groups.values():
+            tk = [d for kind, d in g if kind == "t"]
+            if not tk:
+                continue
+            cells = []
+            for kind, d in g:
+                if kind == "tr" and d.layer in li_of:
+                    L_ = max(2, int(math.hypot(d.x2 - d.x1, d.y2 - d.y1) / (self.pitch / 2)))
+                    for k in range(L_ + 1):
+                        x = d.x1 + (d.x2 - d.x1) * k / L_
+                        y = d.y1 + (d.y2 - d.y1) * k / L_
+                        ci, cj = spec.cell(x, y)
+                        cells.append((li_of[d.layer], cj, ci))
+                elif kind == "v":
+                    ci, cj = spec.cell(d.x, d.y)
+                    cells += [(li, cj, ci) for li in range(self.L)]
+                elif kind == "r" and d[0] in li_of:
+                    m = fill_polygon(spec, [d[1]])
+                    ys, xs = np.nonzero(m)
+                    cells += [(li_of[d[0]], int(y), int(x)) for y, x in zip(ys, xs)]
+            cells = [c for c in cells if 0 <= c[1] < self.ny and 0 <= c[2] < self.nx]
+            out.append((tk, np.array(sorted(set(cells)), dtype=np.int64).reshape(-1, 3)))
+        # the biggest group seeds the tree
+        out.sort(key=lambda g: -(len(g[0]) + len(g[1])))
+        return out
 
     def _in_plane(self, plane: np.ndarray, pad: Pad) -> bool:
         ci, cj = self.grid.spec.cell(pad.x, pad.y)
@@ -677,11 +864,23 @@ class Router:
             self._fixed[li] = (items, boxes)
         return self._fixed[li]
 
+    def _neck_width(self, nid: int, pad: Pad, width: float) -> float | None:
+        """The width a stub to this pad is laid at when the pad is narrower
+        than the net's track, else None."""
+        if not self.neck_pads:
+            return None
+        sizes = [min(c.w, c.h) for c in pad.copper if min(c.w, c.h) > 0]
+        if not sizes or min(sizes) >= width - EPS:
+            return None
+        return max(self.rr.min_width(self.rr.names[nid]), min(sizes))
+
     def _terminal(self, idx: int, pad: Pad, nid: int, width: float) -> Terminal:
         g = self.grid
         cells = []
         deep = []
+        inside_cells = []
         row = self.rr.clearance_row(nid)
+        neck = self._neck_width(nid, pad, width)
         for c in pad.copper:
             li = g.layer_index.get(c.layer)
             if li is None:
@@ -696,6 +895,17 @@ class Router:
             win = (slice(j0, j1), slice(i0, i1))
             slack = self._slack(nid, li, win, row) - width / 2
             ok = inside & (slack >= -EPS)
+            if neck is not None:
+                # A necked pad: only cells where the full track fits are
+                # entered; the rest is reached by a stub at the neck width.
+                iy, ix = np.nonzero(inside)
+                inside_cells += [(li, int(y + j0), int(x + i0)) for y, x in zip(iy, ix)]
+                if not inside.any():
+                    ci, cj = g.spec.cell(pad.x, pad.y)
+                    if 0 <= ci < g.spec.nx and 0 <= cj < g.spec.ny:
+                        inside_cells.append((li, cj, ci))
+            if neck is not None and not ok.any():
+                continue
             if not ok.any() and inside.any():
                 # Nothing inside clears every neighbour: take the best
                 # cells inside and let the DRC judge.
@@ -718,18 +928,34 @@ class Router:
             for y, x in zip(ys, xs):
                 cells.append((li, int(y + j0), int(x + i0)))
                 deep.append(bool(is_deep[y, x]))
-        stubs = self._escapes(pad, nid, width, cells)
+        if neck is not None:
+            stubs = self._escapes(pad, nid, width, cells + inside_cells, stub_width=neck,
+                                  own_cells=inside_cells)
+        else:
+            stubs = self._escapes(pad, nid, width, cells)
         for c in stubs:
             cells.append(c)
             deep.append(False)
+        if neck is not None and not cells and inside_cells:
+            # Neither the full track nor a neck stub reaches the pad. Kept
+            # as its own copper, so the net counts it as failed and the
+            # branch pass (_branch_down) reaches it narrower: left with no
+            # cells, the terminal was dropped from the net, the pad was
+            # never counted, and a run reported 0 failed with it unrouted.
+            cells = list(dict.fromkeys(inside_cells))
+            deep = [False] * len(cells)
+            return Terminal(idx, np.array(cells, dtype=np.int64).reshape(-1, 3), (pad.x, pad.y),
+                            np.array(deep, dtype=bool), stubs, neck=None, blocked=True)
         return Terminal(idx, np.array(cells, dtype=np.int64).reshape(-1, 3), (pad.x, pad.y),
-                        np.array(deep, dtype=bool), stubs)
+                        np.array(deep, dtype=bool), stubs,
+                        neck=neck if (neck is not None and stubs) else None)
 
     #: How far past a pad's edge an escape along its axis may reach: the
     #: track's half-width and largest clearance, and this many cells more.
     ESCAPE_CELLS = 3
 
-    def _escapes(self, pad: Pad, nid: int, width: float, cells) -> dict:
+    def _escapes(self, pad: Pad, nid: int, width: float, cells, stub_width: float | None = None,
+                 own_cells=None) -> dict:
         """Cells outside a pad that a straight stub out along one of its
         axes reaches, on each of its layers where no cell next to it has
         room for the track.
@@ -748,6 +974,12 @@ class Router:
         row = self.rr.clearance_row(nid)
         centre = (float(pad.x), float(pad.y))
         out: dict = {}
+        # A neck stub (stub_width) is checked at its own width and reaches a
+        # cell where the FULL track fits; the pad's own cells are all of it
+        # (own_cells), not only those the full track fits in.
+        sw = width if stub_width is None else stub_width
+        if own_cells is not None:
+            cells = own_cells
         for c in pad.copper:
             li = g.layer_index.get(c.layer)
             if li is None:
@@ -757,7 +989,7 @@ class Router:
                 continue
             ring = {(y + dy, x + dx) for y, x in own for dy in (-1, 0, 1) for dx in (-1, 0, 1)}
             ring = [(y, x) for y, x in ring - own if 0 <= y < g.spec.ny and 0 <= x < g.spec.nx]
-            if ring:
+            if ring and stub_width is None:
                 ry = np.array([y for y, _ in ring])
                 rx = np.array([x for _, x in ring])
                 if (self._slack(nid, li, (ry, rx), row) >= need).any():
@@ -786,7 +1018,7 @@ class Router:
                                 continue
                             pts = [centre, p, q] if math.hypot(q[0] - p[0], q[1] - p[1]) > EPS \
                                 else [centre, q]
-                            if all(self._static_clears(nid, width, li, a_, b_)
+                            if all(self._static_clears(nid, sw, li, a_, b_)
                                    for a_, b_ in zip(pts, pts[1:])):
                                 out[(li, qj, qi)] = pts
                                 found = True
@@ -822,7 +1054,8 @@ class Router:
                 ok_t &= occ == 0
             elif walls is not None:
                 ok_t &= walls[0][wq, l][at] == 0
-            cell[l] = np.where(ok_t, (1.0 + self.hist_t[l][at]) * (1.0 + pres * occ), np.inf)
+            cell[l] = np.where(ok_t, self.layer_cost[l] * (1.0 + self.hist_t[l][at]) * (1.0 + pres * occ),
+                               np.inf)
             if lanes is not None:
                 # Another net's pin access lane: crossed only at a price.
                 cell[l] = np.where(lanes[l], cell[l] * self.options.lane_cost, cell[l])
@@ -866,6 +1099,10 @@ class Router:
         # there too, nets round a chip-scale part lost room they needed.
         # Escape cells are outside the pad and judged like any other.
         for t in job.terminals:
+            if t.blocked:
+                # Opened, its cells took a track at full width straight
+                # through a connector's pins (USB-C VBUS, 2026-10-18).
+                continue
             keep = np.ones(len(t.cells), dtype=bool) if not t.stubs else \
                 np.array([tuple(c) not in t.stubs for c in t.cells.tolist()], dtype=bool)
             keep &= win.contains(t.cells[:, 1], t.cells[:, 2])
@@ -1168,6 +1405,7 @@ class Router:
             return
         self._unstamp(job)
         job.paths = []
+        job.path_w = []
         job.via_at = {}
         job.failed = 0
         if job.plane_mask is not None:
@@ -1180,7 +1418,17 @@ class Router:
                     self._add_path(job, path)
             self._stamp(job)
             return
-        terms = job.terminals
+        # A blocked pad (neck_pads) is joined last, by the branch pass: as the
+        # first pad of the tree every connection had to reach it, all failed,
+        # and the whole net was necked down to the branch width.
+        if job.pre_groups:
+            self._route_groups(job, pres, hard)
+            return
+        terms = sorted(job.terminals, key=lambda t: t.blocked)
+        reach = [t for t in terms if not t.blocked]
+        if reach and len(reach) < len(terms):
+            terms = reach
+            job.failed += len(job.terminals) - len(reach)
         cx = np.array([t.center[0] for t in terms])
         cy = np.array([t.center[1] for t in terms])
         start = int(np.argmin(cx + cy))
@@ -1202,6 +1450,43 @@ class Router:
                 else:
                     tree.add((l, y, x))
             tree.update(tuple(c) for c in terms[k].cells.tolist())
+        self._stamp(job)
+
+    def _route_groups(self, job: NetJob, pres: float, hard: bool) -> None:
+        """join_existing: the first group (its pads and the copper joining
+        them) seeds the tree; each other group is joined to it whole, the
+        nearest first. A route ending on existing copper needs no stub."""
+        spec = self.grid.spec
+        groups = job.pre_groups
+        terms = job.terminals
+
+        def cells_of(g):
+            tc = [terms[k].cells for k in g[0] if len(terms[k].cells)]
+            allc = tc + ([g[1]] if len(g[1]) else [])
+            return np.concatenate(allc) if allc else np.zeros((0, 3), dtype=np.int64)
+
+        def centre(g):
+            xs = [terms[k].center[0] for k in g[0]]
+            ys = [terms[k].center[1] for k in g[0]]
+            return (sum(xs) / len(xs), sum(ys) / len(ys))
+
+        tree = {tuple(c) for c in cells_of(groups[0]).tolist()}
+        hubs: set = set()
+        tc = centre(groups[0])
+        rest = sorted(groups[1:], key=lambda g: math.hypot(centre(g)[0] - tc[0], centre(g)[1] - tc[1]))
+        for g in rest:
+            src = cells_of(g)
+            if not len(src):
+                job.failed += 1
+                continue
+            path = self._connect(job, src, tree, hubs, [centre(g), tc], pres, hard=hard)
+            if path is None:
+                job.failed += 1
+                continue
+            self._add_path(job, path)
+            for l, y, x in path:
+                (hubs.add((y, x)) if l < 0 else tree.add((l, y, x)))
+            tree.update(tuple(c) for c in src.tolist())
         self._stamp(job)
 
     # -- occupancy -----------------------------------------------------------
@@ -1518,6 +1803,7 @@ class Router:
         else:
             if self.repair_rounds:
                 self._repair(self.repair_rounds)
+                self._branch_down()
                 self._neck_down()
             if self.pours:
                 self._pour_stage()
@@ -1746,6 +2032,64 @@ class Router:
             self._walls = None
         return clean and sum(j.failed for j in self.jobs) < before
 
+    def _branch_down(self) -> None:
+        """neck_pads: a net that still misses pads keeps the trunk it has
+        and reaches each missing pad on its own as a narrower branch, half
+        the width and then the rule's minimum, joining the routed copper
+        with nothing in conflict. The whole-net neck-down would have laid
+        the trunk at the branch's width."""
+        if not self.neck_pads:
+            return
+        spec = self.grid.spec
+        for job in self.jobs:
+            if not job.failed or job.plane_mask is not None or job.groups is not None or not job.paths \
+                    or job.pre_groups:
+                continue
+            full = job.width
+            job.path_w = (list(job.path_w) + [None] * len(job.paths))[:len(job.paths)]
+            tree = {(l, y, x) for pth in job.paths for (l, y, x) in pth if l >= 0}
+            hubs = {(y, x) for pth in job.paths for (l, y, x) in pth if l < 0}
+            missing = []
+            for t in job.terminals:
+                cells = {tuple(c) for c in t.cells.tolist()}
+                if cells & tree:
+                    tree |= cells
+                else:
+                    missing.append(t)
+            floor = self.rr.min_width(job.name)
+            tl = np.array(sorted(tree), dtype=np.int64) if tree else None
+            for t in missing:
+                pad = self.board.pads[t.pad]
+                w = full
+                while w > floor + EPS:
+                    w = max(floor, w / 2)
+                    nt = self._terminal(t.pad, pad, job.id, w)
+                    if not len(nt.cells) or tl is None:
+                        continue
+                    xs, ys = spec.x(tl[:, 2]), spec.y(tl[:, 1])
+                    k = int(np.argmin((xs - pad.x) ** 2 + (ys - pad.y) ** 2))
+                    self._unstamp(job)
+                    job.width = w
+                    try:
+                        path = self._connect(job, nt.cells, tree, hubs,
+                                             [nt.center, (float(xs[k]), float(ys[k]))], 1.0, hard=True)
+                    finally:
+                        job.width = full
+                    if path is not None:
+                        self._add_path(job, path)
+                        job.path_w.append(w)
+                        job.terminals[job.terminals.index(t)] = nt
+                        for l, y, x in path:
+                            (hubs.add((y, x)) if l < 0 else tree.add((l, y, x)))
+                        tree |= {tuple(c) for c in nt.cells.tolist()}
+                        tl = np.array(sorted(tree), dtype=np.int64)
+                        job.failed -= 1
+                        job._deep = None
+                        self._stamp(job)
+                        self.log(f"{job.name}: branch to {pad.comp}.{pad.name} at {w:g} mil")
+                        break
+                    self._stamp(job)
+
     def _neck_down(self) -> None:
         """A net that still fails is tried narrower, down to the rule's
         minimum: half its width, then half again, and the minimum itself
@@ -1759,7 +2103,8 @@ class Router:
         """
         fanned = set(self.laid_via)
         for job in [j for j in self.jobs if j.failed and j.plane_mask is None
-                    and not any(t.pad in fanned for t in j.terminals)]:
+                    and not any(t.pad in fanned for t in j.terminals)
+                    and not (self.neck_pads and j.paths)]:
             floor = self.rr.min_width(job.name)
             saved = (self._save(job), job.width, list(job.terminals), job.pad_via, job.pv_arr)
             width = job.width
@@ -1830,6 +2175,7 @@ class Router:
                                       p.net, "plane", source="plane:pour"))
         copper = out.copper_layers()
         self._keep = {}
+        self._neck_tracks: set = set()
         index = self._routed = self._routed_index()
         bends = self.options.bends
         straight = self.options.straight
@@ -1840,8 +2186,14 @@ class Router:
             junctions = self._junctions(job) if bends or straight else None
             lines = [] if straight else None
             for k, path in enumerate(job.paths):
-                self._emit_path(job, path, out, spec, layers, vias_done, copper, junctions,
-                                lines, k)
+                w0 = job.width
+                if k < len(job.path_w) and job.path_w[k]:
+                    job.width = job.path_w[k]
+                try:
+                    self._emit_path(job, path, out, spec, layers, vias_done, copper, junctions,
+                                    lines, k)
+                finally:
+                    job.width = w0
             if not (bends or straight):
                 continue
             # The nets after this one are checked against its copper as
@@ -1887,8 +2239,12 @@ class Router:
                 new.append(out.tracks[t0:t1])
                 continue
             meets = self._junction_cells(job)
-            tracks = []
+            # Neck stubs (Terminal.neck) are laid once, at their own width,
+            # and are not part of any line: kept as the first pass laid them.
+            tracks = [t for t in out.tracks[t0:t1] if id(t) in getattr(self, "_neck_tracks", ())]
+            w0 = job.width
             for l, pre, cells, post, k, first in lines:
+                job.width = job.path_w[k] if k < len(job.path_w) and job.path_w[k] else w0
                 pts = self._straighten(job, l, cells, meets.get(l, {}), pre, post, k)
                 pts = [p for i, p in enumerate(pts)
                        if i == 0 or math.hypot(p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]) > EPS]
@@ -1898,6 +2254,7 @@ class Router:
                     pts = first
                 for a, b in zip(pts, pts[1:]):
                     tracks.append(Track(layers[l], a[0], a[1], b[0], b[1], job.width, job.name))
+            job.width = w0
             self._index_job(index, job, tracks, vias)
             new.append(tracks)
         first, last = laid[0][1], laid[-1][2]
@@ -1974,6 +2331,16 @@ class Router:
         for side, (end, t) in enumerate(ends):
             if t is not None and end[0] >= 0:
                 q = (float(spec.x(end[2])), float(spec.y(end[1])))
+                neck_pts = t.stubs.get(tuple(end)) if t.neck is not None else None
+                if neck_pts and len(neck_pts) >= 2:
+                    # Laid at the neck width on its own; the run starts at
+                    # full width on the cell the stub reaches.
+                    for a_, b_ in zip(neck_pts, neck_pts[1:]):
+                        if math.hypot(b_[0] - a_[0], b_[1] - a_[1]) > EPS:
+                            tr = Track(layers[end[0]], a_[0], a_[1], b_[0], b_[1], t.neck, job.name)
+                            out.tracks.append(tr)
+                            self._neck_tracks.add(id(tr))
+                    continue
                 pts = t.stubs.get(tuple(end)) or self._stub(job, t, layers[end[0]], q) or []
                 if len(pts) >= 2:
                     stubs[side] = [tuple(p) for p in pts]
