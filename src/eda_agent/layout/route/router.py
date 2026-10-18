@@ -102,6 +102,9 @@ class NetJob:
     # them, each (terminal indices, extra cells (k, 3) of that copper). The
     # first group seeds the tree and each other is joined to it whole.
     pre_groups: list | None = None
+    # reuse_vias: (y, x) -> (vx, vy) of a via of the net already on the
+    # board; a route changing layer there uses it and adds none.
+    reuse: dict = field(default_factory=dict)
     # Where the net stands in the routing order: 0 high current, 1 rails,
     # 2 the rest (see Router._rank).
     rank: int = 2
@@ -174,7 +177,9 @@ class Router:
                  exclude_layers: frozenset = frozenset(), neck_pads: bool = False,
                  layer_dirs: dict | None = None, dir_strength: float | None = None,
                  outer_cost: float = 1.0, join_existing: bool = False,
-                 join_regions: list | None = None):
+                 join_regions: list | None = None, via_pad_gap: float = 0.5,
+                 same_net_via_gap: float | None = None, reuse_vias: bool = False,
+                 power_vias: float = 0.0, pad_entry: str = ""):
         from .stages import StageOptions, StageReport
 
         self.board = board
@@ -218,6 +223,31 @@ class Router:
         # outline) are one group; a net already whole is not routed.
         self.join_existing = bool(join_existing)
         self.join_regions = list(join_regions or [])
+        # Fab rules for vias (JLCPCB multilayer, 2026-10-18):
+        #  via_pad_gap       copper gap a via keeps from a pad of its own net
+        #                    it is not centred in (pad_vias="centre" puts a
+        #                    via that fits a pad at the pad's centre, POFV).
+        #                    At 0.5 mil vias sat glued to the pads' sides.
+        #  same_net_via_gap  copper gap between two vias of one net; None
+        #                    leaves it to the clearance rules, which judge
+        #                    other nets only, and vias of one net touched.
+        #  reuse_vias        a via of the net already on the board is a
+        #                    free layer change, and a plane pad it already
+        #                    joins is not routed again (the plane fanout's
+        #                    vias were doubled by the router's own).
+        #  power_vias        nets this wide or wider (mil) get extra vias at
+        #                    every layer change, one per ~15 mil, up to 4.
+        #  pad_entry="axis"  a track leaves a pad along the pad's axis and
+        #                    turns at 45 or 90 degrees, not slantwise.
+        self.via_pad_gap = float(via_pad_gap)
+        self.same_net_via_gap = same_net_via_gap
+        self.reuse_vias = bool(reuse_vias)
+        self.power_vias = float(power_vias)
+        self.pad_entry = str(pad_entry or "")
+        self._net_vias: dict = {}
+        for v in board.vias:
+            if v.net:
+                self._net_vias.setdefault(v.net, []).append((float(v.x), float(v.y), float(v.diameter)))
         widths = [self._net_width(n, pads_of.get(n, [])) for n in nets] or [6.0]
         self.w_def = float(np.median(widths))
         self.c = self.rr.default_clearance
@@ -272,6 +302,16 @@ class Router:
         # _no_via_cells).
         bgas = find_bgas(board)
         self.via_pads = {i for b in bgas for i in b.pads} | set(find_exposed_pads(board))
+        if self.options.pad_vias == "centre":
+            # A via anywhere in a pad is for a real exposed pad (an IC's, with
+            # pins round it) or a BGA ball; a test point's big pad is a pad.
+            per = {}
+            for p_ in board.pads:
+                if p_.comp:
+                    per[p_.comp] = per.get(p_.comp, 0) + 1
+            bga = {i for b in bgas for i in b.pads}
+            self.via_pads = {i for i in self.via_pads
+                             if i in bga or per.get(board.pads[i].comp, 0) >= 3}
         # What copper laid before the routing joins: pad -> the via it was
         # given, pads joined to another pad of their net, nets joined
         # whole.
@@ -580,6 +620,14 @@ class Router:
                 # out as joined, such a pad stayed apart.
                 terms = [t for t in terms if self.board.pads[t.pad].is_smd
                          or not self._in_plane(plane, self.board.pads[t.pad])]
+                if self.reuse_vias and terms:
+                    # A pad its net's copper already joins to a via into
+                    # the plane is in it: routed again it got a second via.
+                    served = set()
+                    for tk, _cells, has_via in self._existing_groups(net, terms, with_vias=True):
+                        if has_via:
+                            served.update(tk)
+                    terms = [t for k, t in enumerate(terms) if k not in served]
                 if not terms:
                     continue
             elif len(terms) < 2:
@@ -593,11 +641,22 @@ class Router:
             job.rank = self._rank(job)
             job.no_via = self._no_via_cells(job, [index[id(p)] for p in pads])
             self._pad_vias(job)
+            if self.options.pad_vias == "centre" and job.no_via is not None and job.pad_via:
+                # The centre cell of a pad a via fits is where it goes.
+                keep = set(job.pad_via)
+                job.no_via = [nv[[(int(a), int(b)) not in keep for a, b in nv]] if len(nv) else nv
+                              for nv in job.no_via]
+            if self.reuse_vias:
+                spec = self.grid.spec
+                for vx, vy, _d in self._net_vias.get(net, ()):
+                    ci, cj = spec.cell(vx, vy)
+                    if 0 <= ci < spec.nx and 0 <= cj < spec.ny:
+                        job.reuse[(cj, ci)] = (vx, vy)
             jobs.append(job)
         jobs.sort(key=self._order)
         return jobs
 
-    def _existing_groups(self, net: str, terms: list) -> list:
+    def _existing_groups(self, net: str, terms: list, with_vias: bool = False) -> list:
         """The net's terminals grouped by the copper already joining them
         (join_existing), each with the grid cells of that copper."""
         from .grid import fill_polygon
@@ -709,7 +768,11 @@ class Router:
                     ys, xs = np.nonzero(m)
                     cells += [(li_of[d[0]], int(y), int(x)) for y, x in zip(ys, xs)]
             cells = [c for c in cells if 0 <= c[1] < self.ny and 0 <= c[2] < self.nx]
-            out.append((tk, np.array(sorted(set(cells)), dtype=np.int64).reshape(-1, 3)))
+            arr = np.array(sorted(set(cells)), dtype=np.int64).reshape(-1, 3)
+            if with_vias:
+                out.append((tk, arr, any(kind == "v" for kind, _ in g)))
+            else:
+                out.append((tk, arr))
         # the biggest group seeds the tree
         out.sort(key=lambda g: -(len(g[0]) + len(g[1])))
         return out
@@ -757,6 +820,8 @@ class Router:
                 continue
             if mode == "ic" and not self._is_passive(pad):
                 continue
+            # "centre": every surface pad keeps vias off it except at its
+            # centre (where _pad_vias registers one when it fits).
             for c in pad.copper:
                 if c.layer not in self.grid.layer_index:
                     continue
@@ -764,14 +829,15 @@ class Router:
                 for k, v in enumerate(job.vias):
                     r = v.diameter / 2
                     x0, y0, x1, y1 = s.bbox
-                    i0, j0, i1, j1 = spec.window(x0 - r, y0 - r, x1 + r, y1 + r)
+                    g_ = self.via_pad_gap
+                    i0, j0, i1, j1 = spec.window(x0 - r - g_, y0 - r - g_, x1 + r + g_, y1 + r + g_)
                     if i0 >= i1 or j0 >= j1:
                         continue
                     X = spec.x(np.arange(i0, i1))[None, :]
                     Y = spec.y(np.arange(j0, j1))[:, None]
                     # Short of touching by a margin: a via that grazes the
                     # pad by a ten-thousandth of a mil is in it all the same.
-                    ys, xs = np.nonzero(shape_distance(s, X, Y) < r + self.VIA_PAD_MARGIN)
+                    ys, xs = np.nonzero(shape_distance(s, X, Y) < r + self.via_pad_gap)
                     out[k].append(np.stack([ys + j0, xs + i0], axis=1))
         if not any(out):
             return None
@@ -802,6 +868,12 @@ class Router:
             if self.options.pad_vias == "ic" and self._is_passive(pad) \
                     and t.pad not in self.via_pads:
                 continue
+            if self.options.pad_vias == "centre" and t.pad not in self.via_pads:
+                # Only a pad the via (nearly) fits: centred in a 8 mil QFN pin
+                # a 16 mil via is no via-in-pad, it is a via on the neighbours.
+                dmin = min(v.diameter for v in job.vias)
+                if min(min(c.w, c.h) for c in pad.copper) < 0.75 * dmin:
+                    continue
             ci, cj = spec.cell(pad.x, pad.y)
             if not (0 <= ci < spec.nx and 0 <= cj < spec.ny):
                 continue
@@ -1083,6 +1155,39 @@ class Router:
             better = fits & (cost < via)
             via = np.where(better, cost, via)
             style = np.where(better, k, style)
+        if self.same_net_via_gap is not None or job.reuse:
+            spec = self.grid.spec
+            X = spec.x(gx).astype(np.float64)
+            Y = spec.y(gy).astype(np.float64)
+            x0, x1, y0, y1 = float(X.min()), float(X.max()), float(Y.min()), float(Y.max())
+            pts = list(self._net_vias.get(job.name, ()))
+            for path in job.paths:
+                for l, y, x in path:
+                    if l < 0:
+                        vx, vy = job.reuse.get((y, x)) or (job.pad_via.get((y, x)) or
+                                                           (float(spec.x(x)), float(spec.y(y))))[:2]
+                        pts.append((vx, vy, job.vias[job.via_at.get((y, x), 0)].diameter))
+            if self.same_net_via_gap is not None and pts:
+                dmax = max(v.diameter for v in job.vias)
+                reach = dmax + self.same_net_via_gap + max(d for _, _, d in pts)
+                for vx, vy, d in pts:
+                    if vx < x0 - reach or vx > x1 + reach or vy < y0 - reach or vy > y1 + reach:
+                        continue
+                    dist = np.hypot(X - vx, Y - vy)
+                    for k, v in enumerate(job.vias):
+                        bad = (dist < (v.diameter + d) / 2 + self.same_net_via_gap) & (dist > self.pitch * 0.75)
+                        if bad.any():
+                            # styles share the one via array: bar the cell for
+                            # this style only when no other style fits there
+                            via = np.where(bad & (style == k), np.inf, via)
+                            style = np.where(bad & (style == k), -1, style)
+            if job.reuse:
+                for (ry, rx), _xy in job.reuse.items():
+                    if win.contains(np.array([ry]), np.array([rx]))[0]:
+                        r_ = win.rank[ry - win.j0, rx - win.i0]
+                        via[r_] = self.via_base * 0.05
+                        style[r_] = 0
+            self._last_style = (win, style)
         if job.plane_mask is not None:
             # A via into its own plane is what a plane net is FOR.
             via = np.where(job.plane_mask[at], via * 0.5, via)
@@ -2180,6 +2285,7 @@ class Router:
         bends = self.options.bends
         straight = self.options.straight
         laid = []
+        self._job_vias: dict = {}
         for job in self.jobs:
             vias_done = set()
             t0, v0 = len(out.tracks), len(out.vias)
@@ -2194,6 +2300,7 @@ class Router:
                                     lines, k)
                 finally:
                     job.width = w0
+            self._job_vias[job.id] = (v0, len(out.vias))
             if not (bends or straight):
                 continue
             # The nets after this one are checked against its copper as
@@ -2202,10 +2309,155 @@ class Router:
             laid.append((job, t0, len(out.tracks), out.vias[v0:], lines, junctions))
         if straight and laid:
             self._straighten_all(out, index, laid)
+        if self.pad_entry == "axis":
+            self._square_off(out, len(self.board.tracks))
+        if self.power_vias > 0:
+            self._add_power_vias(out)
         self._keep = None
         if pours:
             out.regions.extend(pour_mod.regions(self))
         return out
+
+    def _square_off(self, out: LayoutBoard, first: int) -> None:
+        """Every routed segment not at a multiple of 45 degrees laid again
+        as an L, or as a 45 and a straight piece, where that clears every
+        other net's copper exactly; left as it is where nothing does. The
+        grid's cell centres sit up to half a pitch off a pad's centre, and
+        the last piece into a pad came out at whatever angle that left."""
+        index = self._routed if self._routed is not None else self._routed_index()
+        self._routed = index
+        ids = {j.name: j.id for j in self.jobs}
+
+        def off(a, b):
+            if math.hypot(b[0] - a[0], b[1] - a[1]) < 0.05:
+                return False
+            ang = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0])) % 45.0
+            return min(ang, 45.0 - ang) > 0.1
+
+        new = []
+        for t in out.tracks[first:]:
+            a, b = (t.x1, t.y1), (t.x2, t.y2)
+            nid = ids.get(t.net)
+            li = self.grid.layer_index.get(t.layer)
+            if nid is None or li is None or not off(a, b):
+                new.append(t)
+                continue
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            m = min(abs(dx), abs(dy))
+            sx, sy = (1.0 if dx > 0 else -1.0), (1.0 if dy > 0 else -1.0)
+            options = [[a, (a[0] + sx * m, a[1] + sy * m), b], [a, (b[0] - sx * m, b[1] - sy * m), b],
+                       [a, (b[0], a[1]), b], [a, (a[0], b[1]), b]]
+            done = False
+            for pts in options:
+                pts = [pts[0]] + [q for p_, q in zip(pts, pts[1:]) if math.hypot(q[0] - p_[0], q[1] - p_[1]) > 0.05]
+                if all(self._static_clears(nid, t.width, li, p_, q) and
+                       self._routed_clears(nid, t.width, li, p_, q) for p_, q in zip(pts, pts[1:])):
+                    for p_, q in zip(pts, pts[1:]):
+                        new.append(Track(t.layer, p_[0], p_[1], q[0], q[1], t.width, t.net))
+                        index.add(li, nid, geom.capsule(p_[0], p_[1], q[0], q[1], t.width), nid)
+                    done = True
+                    break
+            if not done:
+                new.append(t)
+        out.tracks[first:] = new
+
+    POWER_VIA_PER = 15.0     # mil of track width per via at a layer change
+    POWER_VIA_MAX = 4
+
+    def _add_power_vias(self, out: LayoutBoard) -> None:
+        """At every layer change of a net at least ``power_vias`` wide, add
+        vias beside the one the route made until there is about one per 15
+        mil of width (at most 4): a 40 mil trunk through one 18 mil via is a
+        neck in its current and its inductance. Each sits one via pitch
+        (diameter plus the same-net gap) from the first, joined on each of
+        its layers by a stub at the net's width, and is checked exactly
+        against every other net's copper, fixed and routed, on every layer."""
+        gap = self.same_net_via_gap if self.same_net_via_gap is not None else self.c
+        index = self._routed if self._routed is not None else self._routed_index()
+        self._routed = index
+        for job in self.jobs:
+            if job.width < self.power_vias - EPS or job.id not in self._job_vias:
+                continue
+            v0, v1 = self._job_vias[job.id]
+            want = min(self.POWER_VIA_MAX, max(1, int(round(job.width / self.POWER_VIA_PER))))
+            mine = [v for v in out.vias if v.net == job.name]
+            for via in list(out.vias[v0:v1]):
+                d = via.diameter
+                pitch = d + gap
+                ends = []
+                for t in out.tracks:
+                    if t.net != job.name or t.layer not in self.grid.layer_index:
+                        continue
+                    for (ax, ay), (bx, by) in (((t.x1, t.y1), (t.x2, t.y2)), ((t.x2, t.y2), (t.x1, t.y1))):
+                        if math.hypot(ax - via.x, ay - via.y) < 0.5 and math.hypot(bx - ax, by - ay) > EPS:
+                            ll = math.hypot(bx - ax, by - ay)
+                            ends.append((t.layer, ((bx - ax) / ll, (by - ay) / ll)))
+                layers = sorted({l for l, _ in ends})
+                if len(layers) < 2:
+                    continue
+                cands = []
+                for _, (ux, uy) in ends:
+                    for k in (1, 2):
+                        cands += [(via.x - ux * pitch * k, via.y - uy * pitch * k),
+                                  (via.x - uy * pitch * k, via.y + ux * pitch * k),
+                                  (via.x + uy * pitch * k, via.y - ux * pitch * k)]
+                have = 1
+                placed = [(via.x, via.y)]
+                for cx, cy in cands:
+                    if have >= want:
+                        break
+                    near = min(math.hypot(cx - px, cy - py) for px, py in placed)
+                    if near > pitch * 1.01 + EPS:
+                        continue        # chain from a via already placed
+                    # every via of the net, this round's included: a candidate came up twice
+                    # (two tracks leaving the via the same way) and was laid twice
+                    if any(math.hypot(cx - o.x, cy - o.y) < (d + o.diameter) / 2 + gap - 1e-3
+                           for o in mine):
+                        continue
+                    if not self._via_pad_ok(job.name, cx, cy, d):
+                        continue
+                    ok = all(self._static_clears(job.id, d, li, (cx, cy), (cx, cy))
+                             and self._routed_clears(job.id, d, li, (cx, cy), (cx, cy))
+                             for li in range(self.L))
+                    px, py = min(placed, key=lambda q: math.hypot(cx - q[0], cy - q[1]))
+                    ok = ok and all(self._static_clears(job.id, job.width, self.grid.layer_index[l],
+                                                        (px, py), (cx, cy))
+                                    and self._routed_clears(job.id, job.width, self.grid.layer_index[l],
+                                                            (px, py), (cx, cy))
+                                    for l in layers)
+                    if not ok:
+                        continue
+                    nv = Via(cx, cy, d, via.hole, via.low_layer, via.high_layer, job.name)
+                    out.vias.append(nv)
+                    mine.append(nv)
+                    for li in range(self.L):
+                        index.add(li, job.id, geom.circle(cx, cy, d), job.id)
+                    for l in layers:
+                        out.tracks.append(Track(l, px, py, cx, cy, job.width, job.name))
+                        index.add(self.grid.layer_index[l], job.id,
+                                  geom.capsule(px, py, cx, cy, job.width), job.id)
+                    placed.append((cx, cy))
+                    have += 1
+
+    def _via_pad_ok(self, net: str, x: float, y: float, d: float) -> bool:
+        """A via near a surface pad of its own net is centred in it or clear
+        of it by via_pad_gap (pad_vias="centre"); a real exposed pad takes
+        one anywhere."""
+        if self.options.pad_vias != "centre":
+            return True
+        via = geom.circle(x, y, d)
+        for i, p_ in enumerate(self.board.pads):
+            if p_.net != net or not p_.is_smd or i in self.via_pads:
+                continue
+            if abs(p_.x - x) > 150 or abs(p_.y - y) > 150:
+                continue
+            if math.hypot(p_.x - x, p_.y - y) <= 0.6:
+                continue
+            for c in p_.copper:
+                sh = p_.shape_on(c.layer)
+                if sh is not None and geom.clearance(via, sh) < self.via_pad_gap - EPS:
+                    return False
+        return True
 
     def _index_job(self, index, job: NetJob, tracks, vias) -> None:
         """Swap the net's shapes in the routed index for these."""
@@ -2313,6 +2565,9 @@ class Router:
                 vx, vy = float(spec.x(x)), float(spec.y(y))
                 if (y, x) in job.pad_via:
                     vx, vy = job.pad_via[(y, x)][:2]
+                if (y, x) in job.reuse:
+                    vx, vy = job.reuse[(y, x)]
+                    vias_done.add((round(vx, 4), round(vy, 4)))
                 key = (round(vx, 4), round(vy, 4))
                 if key not in vias_done:
                     vias_done.add(key)
@@ -2825,6 +3080,8 @@ class Router:
                                                     np.array([[q[1]]]))[0, 0]) >= half - EPS
         e = self._exit_point(pad, layer, half, q)
         options = []
+        if self.pad_entry == "axis":
+            options += self._axis_entries(pad, layer, c, q)
         if fits:
             options.append([c, q])
         if e is not None:
@@ -2844,6 +3101,35 @@ class Router:
                    for a, b in zip(pts, pts[1:])):
                 return pts
         return None
+
+    @staticmethod
+    def _axis_entries(pad: Pad, layer: str, c, q) -> list:
+        """Stubs that leave the pad along one of its axes and turn once, at
+        45 or 90 degrees, onto ``q``: straight when ``q`` lies on an axis.
+        Tried first (pad_entry="axis"); a slantwise stub from the centre
+        read as a track leaving the pad at a random angle."""
+        a = math.radians(pad.rotation or 0.0)
+        axes = [(math.cos(a), math.sin(a)), (-math.sin(a), math.cos(a))]
+        dx, dy = q[0] - c[0], q[1] - c[1]
+        out = []
+        for ux, uy in axes:
+            du = dx * ux + dy * uy
+            dv = dx * -uy + dy * ux
+            if abs(dv) < 0.25:
+                out.append([c, q])
+                continue
+            if abs(du) < 0.25:
+                continue
+            sgn = 1.0 if du > 0 else -1.0
+            # along the axis, then 45 degrees onto q
+            run = abs(du) - abs(dv)
+            if run >= 0:
+                out.append([c, (c[0] + sgn * run * ux, c[1] + sgn * run * uy), q])
+            # along the axis to level with q, then square onto it
+            out.append([c, (c[0] + du * ux, c[1] + du * uy), q])
+        # nearest first: the axis q is most nearly on
+        out.sort(key=lambda pts: sum(math.hypot(b[0] - a_[0], b[1] - a_[1]) for a_, b in zip(pts, pts[1:])))
+        return out
 
     @staticmethod
     def _axis_point(pad: Pad, layer: str, q):
@@ -2970,6 +3256,8 @@ class Router:
                         vx, vy = float(spec.x(x)), float(spec.y(y))
                         if (y, x) in job.pad_via:
                             vx, vy = job.pad_via[(y, x)][:2]
+                        if (y, x) in job.reuse:
+                            vx, vy = job.reuse[(y, x)]
                         d = job.vias[job.via_at.get((y, x), 0)].diameter
                         for li in range(self.L):
                             idx.add(li, job.id, geom.circle(vx, vy, d), job.id)
