@@ -739,6 +739,29 @@ class Router:
                 return [((d.x, d.y), d.diameter / 2, None)]
             return []
 
+        shp_cache: dict = {}
+
+        def shp_of(it):
+            """(shape, layers) of a pad, track or via; layers None = every layer."""
+            key_ = id(it[1]) if it[0] != "t" else ("t", it[1])
+            if key_ in shp_cache:
+                return shp_cache[key_]
+            kind, d = it
+            if kind == "t":
+                pad = b.pads[terms[d].pad]
+                if pad.is_smd:
+                    out_ = [(pad.shape_on(c_.layer), {c_.layer}) for c_ in pad.copper]
+                else:
+                    out_ = [(pad.shape_on(pad.copper[0].layer), None)]
+            elif kind == "tr":
+                out_ = [(geom.capsule(d.x1, d.y1, d.x2, d.y2, d.width), {d.layer})]
+            elif kind == "v":
+                out_ = [(geom.circle(d.x, d.y, d.diameter), None)]
+            else:
+                out_ = []
+            shp_cache[key_] = out_
+            return out_
+
         def seg_d(p, a, c):
             dx, dy = c[0] - a[0], c[1] - a[1]
             ll = dx * dx + dy * dy
@@ -771,14 +794,17 @@ class Router:
                         <= (t_.width + o_.width) / 2 + 0.5 or \
                         min(seg_d(q, (t_.x1, t_.y1), (t_.x2, t_.y2)) for q in ((o_.x1, o_.y1), (o_.x2, o_.y2))) \
                         <= (t_.width + o_.width) / 2 + 0.5
-                return any((ls is None or t_.layer in ls) and
-                           seg_d(pt, (t_.x1, t_.y1), (t_.x2, t_.y2)) <= t_.width / 2 + r + 0.5
-                           for pt, r, ls in pts_of(o))
-            for pa, ra, la in pts_of(a):
-                for pc, rc, lc in pts_of(c):
+                ts = geom.capsule(t_.x1, t_.y1, t_.x2, t_.y2, t_.width)
+                return any((ls is None or t_.layer in ls) and geom.bboxes_near(ts, so, 0.5)
+                           and geom.clearance(ts, so) <= 0.5 for so, ls in shp_of(o))
+            # pads, tracks and vias meet when their real copper meets (a pad as a circle of
+            # max(w, h)/2 joined adjacent fine-pitch pins and pins beside an exposed pad, so
+            # those pins were never routed)
+            for sa, la in shp_of(a):
+                for sc, lc in shp_of(c):
                     if la is not None and lc is not None and not (la & lc):
                         continue
-                    if math.hypot(pa[0] - pc[0], pa[1] - pc[1]) <= ra + rc + 0.5:
+                    if geom.bboxes_near(sa, sc, 0.5) and geom.clearance(sa, sc) <= 0.5:
                         return True
             return False
 
@@ -1242,12 +1268,28 @@ class Router:
                             # this style only when no other style fits there
                             via = np.where(bad & (style == k), np.inf, via)
                             style = np.where(bad & (style == k), -1, style)
+            if self.reuse_vias and pts:
+                # a new via near one of the net's vias costs more: a second via a
+                # pitch from the first, where one would do (owner, 2026-10-18)
+                for vx, vy, d in pts:
+                    if vx < x0 - 50 or vx > x1 + 50 or vy < y0 - 50 or vy > y1 + 50:
+                        continue
+                    nearv = np.hypot(X - vx, Y - vy) < 50.0
+                    via = np.where(nearv, via * 3.0, via)
             if job.reuse:
                 for (ry, rx), _xy in job.reuse.items():
                     if win.contains(np.array([ry]), np.array([rx]))[0]:
                         r_ = win.rank[ry - win.j0, rx - win.i0]
                         via[r_] = self.via_base * 0.05
                         style[r_] = 0
+            if self.reuse_vias:
+                # joining at one of the net's own vias (another route's) is a via
+                # already paid for
+                for path in job.paths:
+                    for l, y, x in path:
+                        if l < 0 and win.contains(np.array([y]), np.array([x]))[0]:
+                            r_ = win.rank[y - win.j0, x - win.i0]
+                            via[r_] = self.via_base * 0.05
             self._last_style = (win, style)
         if job.plane_mask is not None:
             # A via into its own plane is what a plane net is FOR.
@@ -2374,6 +2416,7 @@ class Router:
         if self.pad_entry == "axis":
             self._square_off(out, len(self.board.tracks))
             self._repair_entries(out, len(self.board.tracks))
+            self._chamfer_corners(out, len(self.board.tracks))
         if self.power_vias > 0:
             self._add_power_vias(out)
         self._keep = None
@@ -3243,6 +3286,72 @@ class Router:
                             self._routed.add(li, job.id, geom.capsule(p_[0], p_[1], q_[0], q_[1], t0.width), job.id)
         out.tracks[:] = [t for t in tracks if t is not None]
 
+    CHAMFER = 12.0      # mil cut off each leg of a 90 degree corner, at most
+
+    def _chamfer_corners(self, out: LayoutBoard, first: int) -> None:
+        """Every 90 degree corner between two routed tracks of one net (one
+        layer, one width, nothing else meeting there, not inside a pad)
+        cut to two 45s, where the cut clears every other net's copper: an
+        L read as untidy where a 45 would do (owner, 2026-10-18)."""
+        jobs = {j.name: j for j in self.jobs}
+        tracks = out.tracks
+        key = lambda p_: (round(p_[0], 3), round(p_[1], 3))
+        ends: dict = {}
+        for i in range(first, len(tracks)):
+            t = tracks[i]
+            for a_ in ((t.x1, t.y1), (t.x2, t.y2)):
+                ends.setdefault((t.net, t.layer, key(a_)), []).append(i)
+        viapts = {(v.net, key((v.x, v.y))) for v in out.vias}
+        padbox = {}
+        for p_ in self.board.pads:
+            padbox.setdefault(p_.net, []).append(p_)
+        done = set()
+        for (net, layer, pt), idx in list(ends.items()):
+            if len(idx) != 2 or (net, pt) in viapts or net not in jobs:
+                continue
+            i, j = idx
+            if i in done or j in done:
+                continue
+            ti, tj = tracks[i], tracks[j]
+            if ti is None or tj is None or abs(ti.width - tj.width) > 1e-6:
+                continue
+            far_i = (ti.x2, ti.y2) if key((ti.x1, ti.y1)) == pt else (ti.x1, ti.y1)
+            far_j = (tj.x2, tj.y2) if key((tj.x1, tj.y1)) == pt else (tj.x1, tj.y1)
+            v_ = (pt[0], pt[1])
+            li_, lj = math.dist(v_, far_i), math.dist(v_, far_j)
+            if li_ < 1.0 or lj < 1.0:
+                continue
+            ui = ((far_i[0] - v_[0]) / li_, (far_i[1] - v_[1]) / li_)
+            uj = ((far_j[0] - v_[0]) / lj, (far_j[1] - v_[1]) / lj)
+            if abs(ui[0] * uj[0] + ui[1] * uj[1]) > 0.01:
+                continue                        # only square corners
+            if any(math.hypot(p_.x - v_[0], p_.y - v_[1]) < max(max(c.w, c.h) for c in p_.copper) / 2 + ti.width
+                   for p_ in padbox.get(net, ())):
+                continue                        # near a pad: the entry stays straight
+            cut = min(self.CHAMFER, li_ / 2, lj / 2)
+            if far_i in [(p_.x, p_.y) for p_ in padbox.get(net, ())]:
+                cut = min(cut, li_ - 1.0)
+            A = (v_[0] + ui[0] * cut, v_[1] + ui[1] * cut)
+            B = (v_[0] + uj[0] * cut, v_[1] + uj[1] * cut)
+            job = jobs[net]
+            li = self.grid.layer_index.get(layer)
+            if li is None:
+                continue
+            w0 = job.width
+            job.width = ti.width
+            try:
+                ok = self._piece_clears(job, li, A, B)
+            finally:
+                job.width = w0
+            if not ok:
+                continue
+            tracks[i] = Track(layer, far_i[0], far_i[1], A[0], A[1], ti.width, net)
+            tracks[j] = Track(layer, far_j[0], far_j[1], B[0], B[1], tj.width, net)
+            tracks.append(Track(layer, A[0], A[1], B[0], B[1], ti.width, net))
+            if self._routed is not None:
+                self._routed.add(li, job.id, geom.capsule(A[0], A[1], B[0], B[1], ti.width), job.id)
+            done.update((i, j))
+
     def _entries_ok(self, job: NetJob, li: int, pts) -> bool:
         return self._entries_bad(job, li, pts) == 0
 
@@ -3397,6 +3506,10 @@ class Router:
                     mids.append([])
                 elif du >= abs(dv):
                     mids.append([(e[0] + u[0] * (du - abs(dv)), e[1] + u[1] * (du - abs(dv)))])
+                else:
+                    # 45 degrees off the axis, then square onto the route: two 45s, no 90
+                    sg = 1.0 if dv > 0 else -1.0
+                    mids.append([(e[0] + u[0] * du + vp[0] * sg * du, e[1] + u[1] * du + vp[1] * sg * du)])
                 mids.append([(e[0] + u[0] * du, e[1] + u[1] * du)])
             elif abs(dv) > b + m:
                 # the route heads off sideways: out through the end first, then round

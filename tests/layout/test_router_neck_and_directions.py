@@ -131,3 +131,18 @@ def test_old_pours_are_stripped_when_their_source_differs_from_the_boundary():
                              Region("TopLayer", sq, [], "GND", "pour", source="region")])
     out, old = _without_old_pours(b)
     assert [r.kind for r in out.regions] == ["pour_boundary"] and old == ["TopLayer:GND"]
+
+
+def test_join_existing_does_not_join_adjacent_fine_pitch_pins_or_a_pin_beside_an_exposed_pad():
+    # v0 owner review 4: pads modelled as circles of max(w,h)/2 made U401
+    # pins 24/25 (7.9 x 23.6 at 15.75 pitch) and a pin beside the exposed pad
+    # one group, so pin 25 and those pins were never routed. Real copper only.
+    pads = [Pad("U1", "24", 300, 300, net="P", copper=[PadCopper("TopLayer", "rect", 7.9, 23.6)]),
+            Pad("U1", "25", 315.75, 300, net="P", copper=[PadCopper("TopLayer", "rect", 7.9, 23.6)]),
+            Pad("U1", "15", 300, 400, net="G", rotation=90, copper=[PadCopper("TopLayer", "rect", 7.9, 23.6)]),
+            Pad("U1", "EP", 400, 400, net="G", copper=[PadCopper("TopLayer", "rect", 150, 150)])]
+    b = LayoutBoard(name="f", outline=[(0, 0), (800, 0), (800, 600), (0, 600)],
+                    layers=[Layer("TopLayer", "signal", 0)], pads=pads, rules=_rules(6.0))
+    r = Router(b, pitch=2.5, join_existing=True, nets=frozenset({"P", "G"}))
+    groups = {job.name: len(job.pre_groups) for job in r.jobs}
+    assert groups == {"P": 2, "G": 2}, groups

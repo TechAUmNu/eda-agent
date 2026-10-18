@@ -149,3 +149,21 @@ def test_the_side_keep_out_bars_the_long_sides_of_an_ic_pin_and_not_its_ends():
     end = spec.cell(300 + 30 + 6, 300)     # just past the short end
     assert (side[1], side[0]) in barred
     assert (end[1], end[0]) not in barred
+
+
+def test_chamfer_cuts_a_square_corner_to_45_degrees():
+    from eda_agent.layout.model import Track
+    b = _board([_pad("R1", 100, 300, "P"), _pad("R2", 300, 500, "P")])
+    r = Router(b, pitch=5.0, pad_entry="axis")
+    r.report = r.run()
+    out = r.apply(pours=False)
+    first = len(b.tracks)
+    out.tracks[first:] = [Track("TopLayer", 100, 300, 300, 300, 6.0, "P"),
+                          Track("TopLayer", 300, 300, 300, 500, 6.0, "P")]
+    r._chamfer_corners(out, first)
+    segs = out.tracks[first:]
+    assert any(abs(abs(t.x2 - t.x1) - abs(t.y2 - t.y1)) < 1e-6 and abs(t.x2 - t.x1) > 1 for t in segs)
+    assert not any((abs(t.x1 - 300) < 1e-6 and abs(t.y1 - 300) < 1e-6) or
+                   (abs(t.x2 - 300) < 1e-6 and abs(t.y2 - 300) < 1e-6) for t in segs)
+    ends = {(round(t.x1, 3), round(t.y1, 3)) for t in segs} | {(round(t.x2, 3), round(t.y2, 3)) for t in segs}
+    assert (100, 300) in ends and (300, 500) in ends
