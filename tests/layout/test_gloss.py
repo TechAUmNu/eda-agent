@@ -114,7 +114,8 @@ def test_the_shortcut_keeps_clear_of_another_nets_copper():
 def test_a_clean_line_is_left_alone():
     pads = [_pad("R1", "1", 500, 500, "N", 20, 20), _pad("R2", "1", 700, 600, "N", 20, 20),
             _pad("R1", "2", 500, 450, "A", 20, 20), _pad("R2", "2", 700, 650, "B", 20, 20)]
-    pts = [(500, 500), (520, 500), (600, 500), (700, 600)]
+    # straight out of one pad, one 45, straight into the other
+    pts = [(500, 500), (580, 500), (680, 600), (700, 600)]
     tr = [Track("TopLayer", a[0], a[1], c[0], c[1], 6.0, "N") for a, c in zip(pts, pts[1:])]
     b = _board(pads, tr)
     r = gloss_board(b, clearance=5.0)
@@ -207,3 +208,36 @@ def test_the_router_glosses_its_own_lines_and_stays_drc_clean():
     assert _max_turn(out, "N") <= 90.5
     d = run_drc(out, limit=1000)
     assert not [v for v in d.violations if "N" in (v.a + v.b) and "clearance" in str(v).lower()]
+
+
+def test_a_run_started_on_a_pads_edge_is_re_laid_from_the_pad():
+    # v0 review: a track starting on the bottom edge of a big pad ran along
+    # that edge for 100 mil before kinking away (C888 / C887 on v0)
+    pads = [_pad("C1", "1", 600, 500, "N", 160, 80), _pad("C1", "2", 600, 380, "Q", 160, 80),
+            _pad("R1", "1", 900, 640, "N", 20, 20), _pad("R1", "2", 950, 640, "Z", 20, 20)]
+    pts = [(530, 462), (660, 462), (680, 482), (680, 540), (780, 640), (900, 640)]   # from the pad's bottom-left corner
+    tr = [Track("TopLayer", a[0], a[1], c[0], c[1], 6.0, "N") for a, c in zip(pts, pts[1:])]
+    b = _board(pads, tr)
+    gloss_board(b, clearance=5.0)
+    # nothing runs along the pad's bottom edge any more
+    assert not any(t.net == "N" and abs(t.y1 - 462) < 1 and abs(t.y2 - 462) < 1 for t in b.tracks)
+    assert _max_turn(b, "N") <= 90.5
+    # and the run leaves the pad straight out of an edge, not slantwise from its corner
+    sh = next(p for p in b.pads if p.comp == "C1" and p.net == "N").shape_on("TopLayer")
+    leaving = [t for t in b.tracks if t.net == "N" and (geom.clearance(geom.circle(t.x1, t.y1, 0.0), sh) <= 0.0)
+               != (geom.clearance(geom.circle(t.x2, t.y2, 0.0), sh) <= 0.0)]
+    assert leaving and all(abs(t.x1 - t.x2) < 1e-6 or abs(t.y1 - t.y2) < 1e-6 for t in leaving)
+
+
+def test_a_wide_track_on_one_pin_that_joins_the_next_pin_stays():
+    # v0 dry run: a 40 mil track with both ends on eFuse pin 1 also covered
+    # pin 2 and was its only join; dropping it as "pad copper" split the net
+    pads = [_pad("U1", "1", 500, 500, "N", 12, 30), _pad("U1", "2", 520, 500, "N", 12, 30),
+            _pad("U1", "3", 540, 500, "X", 12, 30), _pad("R1", "1", 500, 300, "N", 20, 20), _pad("R1", "2", 450, 300, "Y", 20, 20)]
+    tr = [Track("TopLayer", 500, 495, 500, 505, 40.0, "N"),                      # on pin 1, covers pin 2 as well
+          Track("TopLayer", 500, 500, 500, 300, 10.0, "N")]
+    b = _board(pads, tr)
+    gloss_board(b, clearance=0.5)
+    p2 = next(p for p in b.pads if p.name == "2" and p.comp == "U1")
+    assert any(geom.clearance(geom.capsule(t.x1, t.y1, t.x2, t.y2, t.width), p2.shape_on("TopLayer")) <= 0.01
+               for t in b.tracks if t.net == "N")

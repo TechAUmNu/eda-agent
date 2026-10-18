@@ -38,6 +38,7 @@ from ..model import LayoutBoard, Pad, Track
 
 EPS = 1e-6
 OFFSET_COST = 8.0       # mil a run must save to leave a pad off its centre
+SLANT_COST = 25.0       # mil an end leaving its pad slantwise counts against a run
 
 
 @dataclass
@@ -118,6 +119,28 @@ def _touching(idx, layer, net, shape, skip=()):
                 else:
                     out.add((k, "x"))
     return out
+
+
+def _only_on(idx, layer, net, t, own_id, host) -> bool:
+    """Whether everything of the net touching track ``t`` also touches its
+    host pad: then the pad joins it all and the track can go. A wide track
+    on one pin that also covers the next pin (the eFuse's input pins on v0)
+    is that pin's join, and stays."""
+    pd, sh = host
+    cap = geom.capsule(t.x1, t.y1, t.x2, t.y2, t.width)
+    for k, how in _touching(idx, layer, net, cap, {own_id}):
+        kind = idx.items[k][5]
+        if kind == f"pad:{id(pd)}":
+            continue
+        if isinstance(how, tuple):
+            if geom.clearance(geom.circle(how[0], how[1], 0.0), sh) <= 0.0:
+                continue
+            return False
+        if how == "x" or kind.startswith("pad:"):
+            return False
+        if geom.clearance(idx.items[k][2], sh) > 0.0:       # a via off the pad
+            return False
+    return True
 
 
 def _key(p):
@@ -220,7 +243,7 @@ def gloss_board(board: LayoutBoard, clearance: float = 5.0, region_clearance: fl
         for lay in lays:
             sh = p.shape_on(lay if lay else p.copper[0].layer)
             if sh is not None:
-                idx.add(lay, p.net, sh, clearance)
+                idx.add(lay, p.net, sh, clearance, f"pad:{id(p)}")
     for v in board.vias:
         idx.add(None, v.net, geom.circle(v.x, v.y, v.diameter), clearance)
     for r in board.regions:
@@ -255,6 +278,28 @@ def gloss_board(board: LayoutBoard, clearance: float = 5.0, region_clearance: fl
 
     dead = set()
     new_tracks: list[Track] = []
+    # a track with both ends on one pad of its net is pad copper already: it
+    # only thickens the pad's edge (a run along a pad's side, owner review 5)
+    # and its ends stay joined through the pad, so it goes
+    for (net, layer), ids in groups.items():
+        own_sh = []
+        for pd in pads_by_net.get(net, ()):
+            sh = pd.shape_on(layer) if pd.is_smd else pd.shape_on(pd.copper[0].layer)
+            if sh is not None:
+                own_sh.append((pd, sh))
+        keep_ids = []
+        for i in ids:
+            t = board.tracks[i]
+            a, c = geom.circle(t.x1, t.y1, 0.0), geom.circle(t.x2, t.y2, 0.0)
+            host = next(((pd, sh) for pd, sh in own_sh
+                         if geom.clearance(a, sh) <= 0.0 and geom.clearance(c, sh) <= 0.0), None)
+            if host is not None and _only_on(idx, layer, net, t, tid[i], host):
+                dead.add(i)
+                idx.kill(tid[i])
+                removed.append(t)
+            else:
+                keep_ids.append(i)
+        ids[:] = keep_ids
     for (net, layer), ids in groups.items():
         ends = defaultdict(list)
         for i in ids:
@@ -279,12 +324,23 @@ def gloss_board(board: LayoutBoard, clearance: float = 5.0, region_clearance: fl
                 return True
             return in_own_pad(k)
 
-        def root_of(J, own, ends=ends, net=net):
+        def root_of(J, own, ends=ends, net=net, pads_=own, layer=layer):
             """A junction just outside a pad, joined to the pad's centre by one
             short stub that its branches share (one stub out of a pad's long
             side feeding two runs): the pad's centre, so a branch can be
             re-laid from the pad itself. None otherwise."""
-            if len(ends[J]) < 3 or (net, J) in viapts or (net, J) in centre:
+            if (net, J) in viapts or (net, J) in centre:
+                return None
+            # an end on a pad's copper but off its centre (a track started on
+            # the pad's edge or corner): the pad's centre, so the run can be
+            # re-laid with a proper entry (owner review 5: tracks leaving along
+            # a pad's edge, from a corner, tangent to a round pad)
+            dot = geom.circle(J[0], J[1], 0.0)
+            inside = [pd for pd in pads_ if (pd.shape_on(layer) if pd.is_smd else pd.shape_on(pd.copper[0].layer)) is not None
+                      and geom.clearance(dot, pd.shape_on(layer) if pd.is_smd else pd.shape_on(pd.copper[0].layer)) <= 0.0]
+            if len(inside) == 1:
+                return _key((inside[0].x, inside[0].y))
+            if len(ends[J]) < 3:
                 return None
             found = []
             for i in ends[J]:
@@ -495,13 +551,35 @@ def _gloss_chain(pts, w, net, layer, idx, centre, comp_pads, comp_xy, clr, margi
             c += math.dist(roots[1], pts[-1]) - buried(roots[1], pts[-1])
         return c
 
-    end_pads = []
+    end_pads, end_pad_objs = [], []
     for q in (pts[0], pts[-1], roots[0], roots[1]):
         pd = centre.get((net, _key(q))) if q is not None else None
         if pd is not None:
             sh = pd.shape_on(layer) if pd.is_smd else pd.shape_on(pd.copper[0].layer)
             if sh is not None:
                 end_pads.append(sh)
+                end_pad_objs.append((pd, sh))
+
+    def slant(seq):
+        # an end on a pad whose first segment is not square to the pad's
+        # edges (out of a corner, slantwise): the owner reads it as a fault
+        n_ = 0
+        for a_, b_ in ((seq[0], seq[1]), (seq[-1], seq[-2])):
+            u_ = _dir(a_, b_)
+            if u_ is None:
+                continue
+            dot_ = geom.circle(a_[0], a_[1], 0.0)
+            for pd, sh in end_pad_objs:
+                if geom.clearance(dot_, sh) > 0.0:
+                    continue
+                fr = _pad_axes(pd, layer if pd.is_smd else pd.copper[0].layer)
+                if fr is None:
+                    break
+                ua_, _, ub_, _ = fr
+                if max(abs(u_[0] * ua_[0] + u_[1] * ua_[1]), abs(u_[0] * ub_[0] + u_[1] * ub_[1])) < 0.999:
+                    n_ += 1
+                break
+        return SLANT_COST * n_
 
     def buried(a, b):
         # how far a segment from a runs inside an end pad's copper (not seen, not routing)
@@ -527,7 +605,7 @@ def _gloss_chain(pts, w, net, layer, idx, centre, comp_pads, comp_xy, clr, margi
             return 0.0
         return _length(seq) - buried(seq[0], seq[1]) - buried(seq[-1], seq[-2])
 
-    old_len = seen_len(pts)
+    old_len = seen_len(pts) + slant(pts)
     starts = {_key(pts[0])} | ({_key(roots[0])} if roots[0] is not None else set())
     finishes = {_key(pts[-1])} | ({_key(roots[1])} if roots[1] is not None else set())
 
@@ -537,7 +615,7 @@ def _gloss_chain(pts, w, net, layer, idx, centre, comp_pads, comp_xy, clr, margi
 
     def score_of(seq):
         sq = sum(1 for a in _turns(seq) if a > 89.0)
-        return (round(seen_len(seq) - credit(seq) + offset(seq) + 10.0 * sq, 2), len(seq))
+        return (round(seen_len(seq) - credit(seq) + offset(seq) + slant(seq) + 10.0 * sq, 2), len(seq))
 
     best = None
     for hs, hu in heads:
@@ -565,7 +643,7 @@ def _gloss_chain(pts, w, net, layer, idx, centre, comp_pads, comp_xy, clr, margi
                 best = (score, seq, turn)
     if best is not None:
         _, seq, turn = best
-        L, n = seen_len(seq) - credit(seq) + offset(seq), len(seq)
+        L, n = seen_len(seq) - credit(seq) + offset(seq) + slant(seq), len(seq)
         sq_new = sum(1 for a in _turns(seq) if a > 89.0)
         sq_old = sum(1 for a in _turns(pts) if a > 89.0)
         if ((L < old_len - 0.5 or (L <= old_len + 0.5 and n - 2 < old_bends)
