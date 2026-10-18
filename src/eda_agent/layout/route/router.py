@@ -183,7 +183,7 @@ class Router:
                  outer_cost: float = 1.0, join_existing: bool = False,
                  join_regions: list | None = None, via_pad_gap: float = 0.5,
                  same_net_via_gap: float | None = None, reuse_vias: bool = False,
-                 power_vias: float = 0.0, pad_entry: str = ""):
+                 power_vias: float = 0.0, pad_entry: str = "", gloss: bool = False):
         from .stages import StageOptions, StageReport
 
         self.board = board
@@ -247,6 +247,9 @@ class Router:
         self.same_net_via_gap = same_net_via_gap
         self.reuse_vias = bool(reuse_vias)
         self.power_vias = float(power_vias)
+        # Re-lay the routed lines' bends as short 45/90 runs once every
+        # other pass is done (gloss.py; owner review 5, 2026-10-18).
+        self.gloss = bool(gloss)
         self.pad_entry = str(pad_entry or "")
         self._net_vias: dict = {}
         for v in board.vias:
@@ -2419,6 +2422,10 @@ class Router:
             self._chamfer_corners(out, len(self.board.tracks))
         if self.power_vias > 0:
             self._add_power_vias(out)
+        if self.gloss:
+            from .gloss import gloss_board
+            gloss_board(out, clearance=self.rules.default_clearance(),
+                        nets={j.name for j in self.jobs}, first=len(self.board.tracks))
         self._keep = None
         if pours:
             out.regions.extend(pour_mod.regions(self))
