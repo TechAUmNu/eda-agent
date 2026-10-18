@@ -97,3 +97,55 @@ def test_square_off_leaves_no_segment_off_45_degrees():
         ang = math.degrees(math.atan2(t.y2 - t.y1, t.x2 - t.x1)) % 45
         assert min(ang, 45 - ang) <= 0.1, (t.x1, t.y1, t.x2, t.y2)
     assert r.report.failed == 0 and not run_drc(out).violations
+
+
+def test_a_track_leaves_an_elongated_pad_centred_through_its_short_edge():
+    # pads off the grid: the route used to run in offset and cut into the centre at 45 degrees
+    pads = [_pad("U1", 100.7, 301.3, "P", w=30, h=10), _pad("U2", 700.3, 418.6, "P", w=30, h=10)]
+    b = _board(pads)
+    r = Router(b, pitch=5.0, pad_entry="axis")
+    r.report = r.run()
+    out = r.apply(pours=False)
+    tr = [t for t in out.tracks if t.net == "P"]
+    for px, py in ((100.7, 301.3), (700.3, 418.6)):
+        legs = [t for t in tr if (abs(t.x1 - px) < 1e-6 and abs(t.y1 - py) < 1e-6)
+                or (abs(t.x2 - px) < 1e-6 and abs(t.y2 - py) < 1e-6)]
+        assert legs, (px, py)
+        for t in legs:
+            far = (t.x2, t.y2) if abs(t.x1 - px) < 1e-6 and abs(t.y1 - py) < 1e-6 else (t.x1, t.y1)
+            assert abs(far[1] - py) < 1e-6, "leaves along the long (x) axis, centred"
+            assert abs(far[0] - px) >= 15 + 2 - 1e-6, "straight until clear of the pad"
+    assert r.report.failed == 0 and not run_drc(out).violations
+
+
+def test_a_route_leaves_an_ic_pin_through_its_short_end_not_its_side():
+    # IC pin 1 (long axis x); the cap sits right above it: without the side
+    # keep-out the route left pin 1 straight up through its long (top) edge
+    ic = [Pad("U1", str(k + 1), 300, 300 - 50 * k, net=n, copper=[PadCopper("TopLayer", "rect", 60, 18)])
+          for k, n in enumerate(("P", "Q1", "Q2", "Q3"))]
+    cap = [_pad("C1", 300, 345, "P", 20, 22), _pad("C1", 300, 385, "GNDX", 20, 22)]
+    b = _board(ic + cap)
+    r = Router(b, pitch=5.0, pad_entry="axis", nets=frozenset({"P"}))
+    r.report = r.run()
+    out = r.apply(pours=False)
+    legs = [t for t in out.tracks if t.net == "P" and ((abs(t.x1 - 300) < 1e-6 and abs(t.y1 - 300) < 1e-6)
+                                                      or (abs(t.x2 - 300) < 1e-6 and abs(t.y2 - 300) < 1e-6))]
+    assert legs
+    for t in legs:
+        assert abs(t.y1 - t.y2) < 1e-6 and max(abs(t.x1 - 300), abs(t.x2 - 300)) >= 30 + 2, (t.x1, t.y1, t.x2, t.y2)
+    assert r.report.failed == 0 and not run_drc(out).violations
+
+
+def test_the_side_keep_out_bars_the_long_sides_of_an_ic_pin_and_not_its_ends():
+    ic = [Pad("U1", str(k + 1), 300, 300 - 50 * k, net=n, copper=[PadCopper("TopLayer", "rect", 60, 18)])
+          for k, n in enumerate(("P", "Q1", "Q2", "Q3"))]
+    b = _board(ic + [_pad("C1", 600, 300, "P")])
+    r = Router(b, pitch=5.0, pad_entry="axis", nets=frozenset({"P"}))
+    job = r.jobs[0]
+    assert job.side_bar is not None
+    barred = {(int(y), int(x)) for _, y, x in job.side_bar}
+    spec = r.grid.spec
+    side = spec.cell(300, 300 + 9 + 4)     # just above the long edge
+    end = spec.cell(300 + 30 + 6, 300)     # just past the short end
+    assert (side[1], side[0]) in barred
+    assert (end[1], end[0]) not in barred

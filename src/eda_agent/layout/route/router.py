@@ -105,6 +105,10 @@ class NetJob:
     # reuse_vias: (y, x) -> (vx, vy) of a via of the net already on the
     # board; a route changing layer there uses it and adds none.
     reuse: dict = field(default_factory=dict)
+    # pad_entry="axis": (k, 3) cells beside the long edges of the net's own IC
+    # pins that its tracks and vias keep out of, so a route leaves a pin
+    # through its short end.
+    side_bar: np.ndarray | None = None
     # Where the net stands in the routing order: 0 high current, 1 rails,
     # 2 the rest (see Router._rank).
     rank: int = 2
@@ -646,6 +650,8 @@ class Router:
                 keep = set(job.pad_via)
                 job.no_via = [nv[[(int(a), int(b)) not in keep for a, b in nv]] if len(nv) else nv
                               for nv in job.no_via]
+            if self.pad_entry == "axis":
+                job.side_bar = self._side_bar(job)
             if self.reuse_vias:
                 spec = self.grid.spec
                 for vx, vy, _d in self._net_vias.get(net, ()):
@@ -655,6 +661,43 @@ class Router:
             jobs.append(job)
         jobs.sort(key=self._order)
         return jobs
+
+    def _side_bar(self, job: NetJob):
+        """Cells beside the long edges of the net's own elongated IC pins, on
+        each pin's layers, out to the track's half-width, the clearance and a
+        cell: a route there left the pin sideways, between it and the next
+        pin, and turned into its centre (owner, 2026-10-18)."""
+        spec = self.grid.spec
+        cells = []
+        for t in job.terminals:
+            pad = self.board.pads[t.pad]
+            if not pad.is_smd or self._is_passive(pad) or t.pad in self.via_pads:
+                continue
+            for c in pad.copper:
+                li = self.grid.layer_index.get(c.layer)
+                if li is None:
+                    continue
+                fr = self._pad_frame(pad, c.layer)
+                if fr is None:
+                    continue
+                ua, a, ub, b = fr
+                if a <= 1.2 * b:
+                    continue
+                band = b + job.width / 2 + self.c + self.pitch
+                r_ = math.hypot(a, band)
+                i0, j0, i1, j1 = spec.window(pad.x - r_, pad.y - r_, pad.x + r_, pad.y + r_)
+                if i0 >= i1 or j0 >= j1:
+                    continue
+                X = spec.x(np.arange(i0, i1))[None, :] - pad.x
+                Y = spec.y(np.arange(j0, j1))[:, None] - pad.y
+                du = X * ua[0] + Y * ua[1]
+                dv = X * ub[0] + Y * ub[1]
+                m = (np.abs(du) <= a) & (np.abs(dv) > b) & (np.abs(dv) <= band)
+                ys, xs = np.nonzero(m)
+                cells += [(li, int(y + j0), int(x + i0)) for y, x in zip(ys, xs)]
+        if not cells:
+            return None
+        return np.array(sorted(set(cells)), dtype=np.int64)
 
     def _existing_groups(self, net: str, terms: list, with_vias: bool = False) -> list:
         """The net's terminals grouped by the copper already joining them
@@ -1070,9 +1113,19 @@ class Router:
             a = math.radians(pad.rotation)
             ux, uy = math.cos(a), math.sin(a)
             limit_extra = half + float(row.max()) + self.ESCAPE_CELLS * self.pitch
-            for u in ((ux, uy), (-ux, -uy), (-uy, ux), (uy, -ux)):
+            dirs = ((ux, uy), (-ux, -uy), (-uy, ux), (uy, -ux))
+            if self.pad_entry == "axis" and not self._is_passive(pad):
+                fr = self._pad_frame(pad, c.layer)
+                if fr is not None and fr[1] > 1.2 * fr[3]:
+                    # an IC pin escapes only out of its short ends (side keep-out)
+                    la = fr[0]
+                    dirs = tuple(d_ for d_ in dirs if abs(d_[0] * la[0] + d_[1] * la[1]) > 0.9)
+            for u in dirs:
                 edge = max((px - centre[0]) * u[0] + (py - centre[1]) * u[1] for px, py in sh.pts) + sh.r
-                d = edge
+                # with pad_entry="axis" the stub runs straight until the track is clear
+                # of the pad before it turns: turning at the pad's edge, half the track's
+                # width still bent inside the pad and narrowed the mask web
+                d = edge + (sw / 2 + 1.0 if self.pad_entry == "axis" else 0.0)
                 found = False
                 while d <= edge + limit_extra and not found:
                     p = (centre[0] + d * u[0], centre[1] + d * u[1])
@@ -1155,6 +1208,14 @@ class Router:
             better = fits & (cost < via)
             via = np.where(better, cost, via)
             style = np.where(better, k, style)
+        if job.side_bar is not None and len(job.side_bar):
+            sb = job.side_bar
+            inside = win.contains(sb[:, 1], sb[:, 2])
+            if inside.any():
+                c_ = sb[inside]
+                r_ = win.rank[c_[:, 1] - win.j0, c_[:, 2] - win.i0]
+                cell[c_[:, 0], r_] = np.inf
+                via[r_] = np.inf
         if self.same_net_via_gap is not None or job.reuse:
             spec = self.grid.spec
             X = spec.x(gx).astype(np.float64)
@@ -2286,6 +2347,7 @@ class Router:
         straight = self.options.straight
         laid = []
         self._job_vias: dict = {}
+        self._via_snap: dict = {}
         for job in self.jobs:
             vias_done = set()
             t0, v0 = len(out.tracks), len(out.vias)
@@ -2311,6 +2373,7 @@ class Router:
             self._straighten_all(out, index, laid)
         if self.pad_entry == "axis":
             self._square_off(out, len(self.board.tracks))
+            self._repair_entries(out, len(self.board.tracks))
         if self.power_vias > 0:
             self._add_power_vias(out)
         self._keep = None
@@ -2502,6 +2565,13 @@ class Router:
                        if i == 0 or math.hypot(p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]) > EPS]
                 if len(pts) >= 2 and self.options.bends:
                     pts = self._legalise(job, l, pts, (junctions or {}).get(l, ()))
+                pts = self._snap_line(job, pts)
+                if len(pts) >= 2:
+                    pts = self._centre_entries(job, l, pts)
+                if len(pts) < 2 and len(first) < 2:
+                    continue
+                if len(pts) >= 2 and self.pad_entry == "axis" and len(first) >= 2                         and self._entries_bad(job, l, first) < self._entries_bad(job, l, pts):
+                    pts = first     # straightening spoiled a pad entry the first pass had right
                 if len(pts) < 2 or not self._line_holds(job, l, pts, first):
                     pts = first
                 for a, b in zip(pts, pts[1:]):
@@ -2568,6 +2638,11 @@ class Router:
                 if (y, x) in job.reuse:
                     vx, vy = job.reuse[(y, x)]
                     vias_done.add((round(vx, 4), round(vy, 4)))
+                cxy = (float(spec.x(x)), float(spec.y(y)))
+                if math.dist(cxy, (vx, vy)) > 0.01:
+                    # a via moved off its cell (a pad's centre, or one reused): the
+                    # runs either side end on it, not on the cell (_snap_line)
+                    self._via_snap.setdefault(job.id, {})[(round(cxy[0], 3), round(cxy[1], 3))] = (vx, vy)
                 key = (round(vx, 4), round(vy, 4))
                 if key not in vias_done:
                     vias_done.add(key)
@@ -2616,6 +2691,10 @@ class Router:
         for l, pts, pre, cells, post in lines:
             if self.options.bends:
                 pts = self._legalise(job, l, pts, (junctions or {}).get(l, ()))
+            pts = self._snap_line(job, pts)
+            if len(pts) < 2:
+                continue
+            pts = self._centre_entries(job, l, pts)
             if lines_out is not None:
                 # What the second pass lays again, and what it falls back
                 # on (_straighten_all).
@@ -3100,6 +3179,236 @@ class Router:
                    and self._routed_clears(job.id, job.width, li, a, b, loose)
                    for a, b in zip(pts, pts[1:])):
                 return pts
+        return None
+
+    def _repair_entries(self, out: LayoutBoard, first: int) -> None:
+        """On the finished copper: every chain of routed tracks leaving an
+        elongated IC pin's centre that does not run straight out along the
+        pin's long axis until clear of it gets its head rebuilt that way
+        (_centre_entry), checked exactly. Whatever pass laid the line
+        (straightening re-lays lines in free geometry and moved one into the
+        pin's side band), the entry is judged as laid."""
+        jobs = {j.name: j for j in self.jobs}
+        tracks = out.tracks
+        key = lambda p_: (round(p_[0], 3), round(p_[1], 3))
+        for pad in self.board.pads:
+            job = jobs.get(pad.net)
+            if job is None or not pad.is_smd or self._is_passive(pad):
+                continue
+            for c_ in pad.copper:
+                li = self.grid.layer_index.get(c_.layer)
+                if li is None:
+                    continue
+                fr = self._pad_frame(pad, c_.layer)
+                if fr is None or fr[1] <= 1.2 * fr[3]:
+                    continue
+                c = (float(pad.x), float(pad.y))
+                ends = {}
+                for i in range(first, len(tracks)):
+                    t = tracks[i]
+                    if t is None or t.net != pad.net or t.layer != c_.layer:
+                        continue
+                    for a_ in ((t.x1, t.y1), (t.x2, t.y2)):
+                        ends.setdefault(key(a_), []).append(i)
+                for i0 in list(ends.get(key(c), ())):
+                    t0 = tracks[i0]
+                    if t0 is None:
+                        continue
+                    seq, used, cur, idx = [c], [], c, i0
+                    reach = fr[1] + job.width + 2 * self.pitch + 10.0
+                    while idx is not None and len(used) < 40:
+                        t = tracks[idx]
+                        a_, b_ = (t.x1, t.y1), (t.x2, t.y2)
+                        nxt = b_ if key(a_) == key(cur) else a_
+                        seq.append(nxt); used.append(idx); cur = nxt
+                        if math.dist(c, nxt) >= reach:
+                            break
+                        nb = [j_ for j_ in ends.get(key(nxt), ()) if j_ not in used and tracks[j_] is not None]
+                        idx = nb[0] if len(nb) == 1 else None
+                    if len(seq) < 2 or self._entries_bad(job, li, [seq[0], seq[1]]) == 0:
+                        continue
+                    w0 = job.width
+                    job.width = t0.width
+                    try:
+                        new = self._centre_entry(job, li, c_.layer, seq)
+                    finally:
+                        job.width = w0
+                    if new is None:
+                        continue
+                    for i in used:
+                        tracks[i] = None
+                    for p_, q_ in zip(new, new[1:]):
+                        tracks.append(Track(c_.layer, p_[0], p_[1], q_[0], q_[1], t0.width, pad.net))
+                        if self._routed is not None:
+                            self._routed.add(li, job.id, geom.capsule(p_[0], p_[1], q_[0], q_[1], t0.width), job.id)
+        out.tracks[:] = [t for t in tracks if t is not None]
+
+    def _entries_ok(self, job: NetJob, li: int, pts) -> bool:
+        return self._entries_bad(job, li, pts) == 0
+
+    def _entries_bad(self, job: NetJob, li: int, pts) -> int:
+        """How many ends of the line sit at an elongated IC pin's centre and do
+        not leave straight along the pin's long axis until clear of it."""
+        layer = self.grid.layers[li]
+        bad = 0
+        for a_, b_ in ((pts[0], pts[1]), (pts[-1], pts[-2])):
+            pad = self._pad_centres().get((round(a_[0], 2), round(a_[1], 2)))
+            if pad is None or pad.net != job.name or self._is_passive(pad):
+                continue
+            fr = self._pad_frame(pad, layer)
+            if fr is None or fr[1] <= 1.2 * fr[3]:
+                continue
+            ua, a = fr[0], fr[1]
+            ll = math.dist(a_, b_)
+            if ll < EPS or abs(((b_[0] - a_[0]) * ua[0] + (b_[1] - a_[1]) * ua[1]) / ll) < 0.999                     or ll < a + job.width / 2 - 0.5:
+                bad += 1
+        return bad
+
+    def _snap_line(self, job: NetJob, pts) -> list:
+        """A line's ends that sit on the cell of a via the output moved (to a
+        pad's centre, or onto a via reused) moved onto the via; a line left
+        with no length dropped. The tracks had started on the cell, up to
+        half a pitch off the via, and a stub of a mil ran from the pad's
+        centre to the cell."""
+        mp = getattr(self, "_via_snap", {}).get(job.id)
+        if not mp or len(pts) < 1:
+            return list(pts)
+        out = list(pts)
+        for i in (0, len(out) - 1):
+            v = mp.get((round(out[i][0], 3), round(out[i][1], 3)))
+            if v is not None:
+                out[i] = v
+        out = [out[0]] + [q for p_, q in zip(out, out[1:]) if math.dist(p_, q) > EPS]
+        if len(out) >= 2 and math.dist(out[0], out[-1]) <= EPS                 and max(math.dist(out[0], q) for q in out) < 2 * self.pitch:
+            return []       # out to the cell and back onto the via: no copper needed
+        return out if len(out) >= 2 else []
+
+    @staticmethod
+    def _multiple_of_45(a, b) -> bool:
+        if math.dist(a, b) < 0.05:
+            return True
+        ang = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0])) % 45.0
+        return min(ang, 45.0 - ang) <= 0.1
+
+    def _pad_centres(self) -> dict:
+        if getattr(self, "_pad_centre_map", None) is None:
+            self._pad_centre_map = {(round(float(p_.x), 2), round(float(p_.y), 2)): p_
+                                    for p_ in self.board.pads}
+        return self._pad_centre_map
+
+    @staticmethod
+    def _pad_frame(pad: Pad, layer: str):
+        """The pad's two axes and its half-length along each, long first:
+        ((ux, uy), half_long, (vx, vy), half_short)."""
+        sh = pad.shape_on(layer)
+        if sh is None:
+            return None
+        if sh.kind == "poly" and len(sh.pts) == 4:
+            p0, p1, _, p3 = sh.pts
+            la, lb = math.dist(p0, p1), math.dist(p0, p3)
+            if la == 0 or lb == 0:
+                return None
+            ua = ((p1[0] - p0[0]) / la, (p1[1] - p0[1]) / la)
+            ub = ((p3[0] - p0[0]) / lb, (p3[1] - p0[1]) / lb)
+            a, b = la / 2 + sh.r, lb / 2 + sh.r
+        elif sh.kind == "segment":
+            (ax, ay), (bx, by) = sh.pts[0], sh.pts[-1]
+            ll = math.hypot(bx - ax, by - ay)
+            if ll == 0:
+                return None
+            ua = ((bx - ax) / ll, (by - ay) / ll)
+            ub = (-ua[1], ua[0])
+            a, b = ll / 2 + sh.r, sh.r
+        else:
+            r_ = math.radians(pad.rotation or 0.0)
+            ua, ub = (math.cos(r_), math.sin(r_)), (-math.sin(r_), math.cos(r_))
+            a = b = sh.r
+        return (ua, a, ub, b) if a >= b else (ub, b, ua, a)
+
+    def _centre_entries(self, job: NetJob, li: int, pts) -> list:
+        """pad_entry="axis": a line that ends at a pad's centre leaves it
+        straight along the pad's long axis, through the middle of its short
+        edge, until the track is clear of the pad, and only then jogs onto
+        the route (45 or 90 degrees). The grid's cells sit up to half a
+        pitch off a pad's centre: the route came in parallel but offset and
+        cut into the centre at 45 degrees inside the pad, narrowing the
+        mask web to the next pin (owner, 2026-10-18). Checked exactly; the
+        line is kept as it was where the new one does not clear."""
+        if self.pad_entry != "axis" or len(pts) < 2:
+            return list(pts)
+        layer = self.grid.layers[li]
+        out = list(pts)
+        for end in (0, 1):
+            seq = out if end == 0 else out[::-1]
+            new = self._centre_entry(job, li, layer, seq)
+            if new is not None:
+                out = new if end == 0 else new[::-1]
+        return out
+
+    def _centre_entry(self, job: NetJob, li: int, layer: str, seq):
+        c = seq[0]
+        pad = self._pad_centres().get((round(c[0], 2), round(c[1], 2)))
+        if pad is None or pad.net != job.name:
+            return None
+        fr = self._pad_frame(pad, layer)
+        if fr is None:
+            return None
+        ua, a, ub, b = fr
+        m = job.width / 2 + 2.0
+        reach = a + m + job.width / 2 + 2 * self.pitch
+        # the point where the route has got clear of the pad
+        P, k = None, None
+        for i in range(len(seq) - 1):
+            p0, p1 = seq[i], seq[i + 1]
+            d0, d1 = math.dist(c, p0), math.dist(c, p1)
+            if d1 >= reach:
+                seg = math.dist(p0, p1)
+                lo, hi = 0.0, 1.0
+                for _ in range(30):         # where along this piece the distance reaches `reach`
+                    mid = (lo + hi) / 2
+                    q = (p0[0] + (p1[0] - p0[0]) * mid, p0[1] + (p1[1] - p0[1]) * mid)
+                    if math.dist(c, q) < reach:
+                        lo = mid
+                    else:
+                        hi = mid
+                P = (p0[0] + (p1[0] - p0[0]) * hi, p0[1] + (p1[1] - p0[1]) * hi) if seg > EPS else p1
+                k = i + 1
+                break
+        if P is None:
+            # a short line (to a via just off the pad): its far end, if that is past the pad
+            if math.dist(c, seq[-1]) > a + m - EPS:
+                P, k = seq[-1], len(seq)
+            else:
+                return None
+        two_pin = self._is_passive(pad)
+        axes = [(ua, a)] if (a > 1.2 * b and not two_pin) else sorted(
+            [(ua, a), (ub, b)], key=lambda t: -abs((P[0] - c[0]) * t[0][0] + (P[1] - c[1]) * t[0][1]))
+        for (ax, h) in axes:
+            dot = (P[0] - c[0]) * ax[0] + (P[1] - c[1]) * ax[1]
+            sgn = 1.0 if dot >= 0 else -1.0
+            u = (ax[0] * sgn, ax[1] * sgn)
+            e = (c[0] + u[0] * (h + m), c[1] + u[1] * (h + m))
+            du = (P[0] - e[0]) * u[0] + (P[1] - e[1]) * u[1]
+            dv = (P[0] - e[0]) * -u[1] + (P[1] - e[1]) * u[0]
+            vp = (-u[1], u[0])
+            mids = []
+            if du > EPS:
+                if abs(dv) < 0.05:
+                    mids.append([])
+                elif du >= abs(dv):
+                    mids.append([(e[0] + u[0] * (du - abs(dv)), e[1] + u[1] * (du - abs(dv)))])
+                mids.append([(e[0] + u[0] * du, e[1] + u[1] * du)])
+            elif abs(dv) > b + m:
+                # the route heads off sideways: out through the end first, then round
+                mids.append([(e[0] + vp[0] * dv, e[1] + vp[1] * dv)])
+            for mid in mids:
+                head = [c, e] + mid + [P]
+                head = [head[0]] + [q for p_, q in zip(head, head[1:]) if math.dist(p_, q) > EPS]
+                if any(not self._multiple_of_45(p_, q) for p_, q in zip(head, head[1:])):
+                    continue
+                if all(self._piece_clears(job, li, p_, q) for p_, q in zip(head, head[1:])):
+                    rest = [q for q in seq[k:] if math.dist(q, P) > EPS]
+                    return head + rest
         return None
 
     @staticmethod
