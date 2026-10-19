@@ -3462,6 +3462,7 @@ Var
     Matched, UpdatedNames, UpdatedComments : Integer;
     CompName : String;
     NameMark : String;
+    InFilter : Boolean;
 Begin
     Board := Nil;
     Try Board := GetPCBBoardAnywhere(0); Except End;
@@ -3507,25 +3508,29 @@ Begin
                     Comp := Obj;
                     CompName := '';
                     Try CompName := Comp.Name.Text; Except End;
+                    { NO Continue here: a Continue inside this Try advanced the
+                      iterator a second time after the Except, and once past the
+                      last component the iterator wrapped round, so a filtered
+                      call spun forever (live hang 2026-10-19, filter ['C1206']). }
+                    InFilter := True;
                     If HasFilter Then
                     Begin
                         NameMark := '|' + CompName + '|';
-                        If Pos(NameMark, '|' + FilterStr + '|') = 0 Then
+                        InFilter := Pos(NameMark, '|' + FilterStr + '|') > 0;
+                    End;
+                    If InFilter Then
+                    Begin
+                        Inc(Matched);
+                        If SetNames And (Comp.NameOn <> NamesOn) Then
                         Begin
-                            Obj := Iter.NextPCBObject;
-                            Continue;
+                            Comp.NameOn := NamesOn;
+                            Inc(UpdatedNames);
                         End;
-                    End;
-                    Inc(Matched);
-                    If SetNames And (Comp.NameOn <> NamesOn) Then
-                    Begin
-                        Comp.NameOn := NamesOn;
-                        Inc(UpdatedNames);
-                    End;
-                    If SetComments And (Comp.CommentOn <> CommentsOn) Then
-                    Begin
-                        Comp.CommentOn := CommentsOn;
-                        Inc(UpdatedComments);
+                        If SetComments And (Comp.CommentOn <> CommentsOn) Then
+                        Begin
+                            Comp.CommentOn := CommentsOn;
+                            Inc(UpdatedComments);
+                        End;
                     End;
                 Except End;
                 Obj := Iter.NextPCBObject;
