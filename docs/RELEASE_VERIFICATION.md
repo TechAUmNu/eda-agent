@@ -1,35 +1,37 @@
 
-# Release verification: 2026.10.18.02
+# Release verification: 2026.10.25.90
 
-**2026.10.18.02 = `.17.07` plus a via's Tented flags through the generic property path (2026-10-18):** `IsTenting_Top` / `IsTenting_Bottom` read and write on `eViaObject` in `obj_query` / `obj_batch_modify`. Assigning the property was accepted and read back unchanged, so the write calls `SetState_IsTenting_Top/Bottom` explicitly inside the robot BeginModify/EndModify, then reads it back and reports a mismatch as failed. It takes ONLY on a via whose mask expansion is manual: on v0, 2 of 2204 vias took (the two given a manual value earlier) and all 2204 after `pcb_set_via_soldermask_relief`. Live check: on a board with untented vias, run `pcb_set_via_soldermask_relief` then `obj_batch_modify` eViaObject `IsTenting_Top=True|IsTenting_Bottom=True`, and expect `audit_tented_via_ratio` at ratio 1. Measured on v0: 4408/4408 surfaces. Everything below applies unchanged.
+**2026.10.25.90 = carrier-local `.18.02` merged with upstream `.25.4` (2026-10-25):** upstream's 79 commits since 2026-10-13 on top of the carrier-local bridge. Where both sides built the same thing the carrier-local version is kept: the save record (BridgeEditedPaths) over upstream's NoteDocEdited list, with upstream's stop_server rule ported onto it (application.stop_server now writes only modified or recorded documents, as an only_modified pass with clean libraries left alone, then writes the recorded documents that walk cannot reach with app_save_all's record sweep; reply `edited_saved`, `clean_left_alone`); `lib_add_footprint_fills` / `_regions` (component_name, keepout; no arcs, no units on fills); `lib_link_3d_model` (replace=False default); the pad corner and owner-part routes (SetOwnerPart reads nothing inside PreProcess; upstream's SetOwnerPartFrom now takes the part read before the edit); `proj_delete_sheet`, `sch_place_no_erc` pin snapping, the polygon_connect rule (upstream adds plane_connect beside it; its style and relief width are now written through the SetState_ setters upstream proved on that rule kind, because the property spellings it used were unknown identifiers to DelphiScript when upstream tried them). Upstream's AddLibSymbolPrim (a symbol primitive added through the library when its component is the one on screen) now runs after the carrier owner-part write in every lib_add_symbol_* handler, and its decimal-mil conversions, polygon name filters and clean/empty repour, via tenting, footprint bodies/rotate and No-ERC property reads are in. Upstream's "symbol on screen" in a SchLib (#89 the pin toggle; #107 a symbol's parameters and designator in obj_query and obj_modify, and its parameters in obj_delete) is reached through the library iterator's own reference, found by a pointer compare with the editor's selection (`ShownLibComponent`), resolved before the PreProcess, with the held symbol of the same library as the fallback; no member of the selection is read. If that compare never holds live (`shown` always false on a symbol edit, `_symbol` naming the held symbol), all of them act on the held symbol, as carrier-local did. The automatic schematic layout engine is gone, with the carrier-local fixes to it. Upstream's no-fallback rule now covers the carrier-local pre-check in ResolvePCBBoard too: a board_path that cannot be a board (a .SchDoc, or an absolute path neither open nor on disk) answers no board, still without opening anything, instead of the board in front, so the handler refuses rather than editing a board it was not given; only an empty board_path means the board in front. A bare board name (no folder) is still not judged: it keeps the carrier-local open attempt, without upstream's FileExists refusal (which resolved it against Altium's working directory), and the board that comes to the front is matched by file name, because its FileName is always absolute and a whole-path compare never matched. Upstream's new sections 37, 38 and 39 are sections 55, 56 and 57 here, and their risk-table rows likewise (+18, as in the `.13.01` merge); the upstream risk rows for its steps 22 to 36 were already in the table as 40 to 54, with four claims brought up to date (47 and 52 slot writes, 52 body opacity and 54 via hole edge are now also written by upstream's board-side code). NOT YET RUN LIVE as a whole: steps 1 and 2 first.
 
-**2026.10.18.02 = `.17.04` plus `remove_dead` / `remove_islands_by_area` on `pcb.place_polygon` (set before the first pour, since a polygon pours as it is added) and a documented limit (2026-10-17):** `pcb.repour_polygons` is unchanged in behaviour; its source and tool doc now record that an in-place rebuild SHRINKS overlapping pours (each polygon rebuilds around the others' current copper, so a high-priority pour inside a lower-priority flood loses the clearance on every repour; measured: thin buck VIN pours at 0 pieces after two repours, an L5 island split in 5). Rebuild such a board by deleting and re-creating its pours in priority order with `pcb.place_polygon`. Clearing first was tried and dropped: `Poured := False` does not take through the API (33 of 33 read back still poured) and NoHatch leaves outline copper that cuts later pours.
+**2026.10.25.90 = `.17.07` plus a via's Tented flags through the generic property path (2026-10-18):** `IsTenting_Top` / `IsTenting_Bottom` read and write on `eViaObject` in `obj_query` / `obj_batch_modify`. Assigning the property was accepted and read back unchanged, so the write calls `SetState_IsTenting_Top/Bottom` explicitly inside the robot BeginModify/EndModify, then reads it back and reports a mismatch as failed. It takes ONLY on a via whose mask expansion is manual: on v0, 2 of 2204 vias took (the two given a manual value earlier) and all 2204 after `pcb_set_via_soldermask_relief`. Live check: on a board with untented vias, run `pcb_set_via_soldermask_relief` then `obj_batch_modify` eViaObject `IsTenting_Top=True|IsTenting_Bottom=True`, and expect `audit_tented_via_ratio` at ratio 1. Measured on v0: 4408/4408 surfaces. Everything below applies unchanged.
 
-**2026.10.18.02 = `.17.03` plus `pcb.get_polygon_pieces` (2026-10-17):** per poured region of one polygon (index as `pcb_get_polygons`), its bounding box in mils, copper (Area less holes) and hole count, so the small pieces of a split plane can be located. Live check: on a polygon with N copper_pieces, expect N rows whose copper sums to its copper_area_mm2.
+**2026.10.25.90 = `.17.04` plus `remove_dead` / `remove_islands_by_area` on `pcb.place_polygon` (set before the first pour, since a polygon pours as it is added) and a documented limit (2026-10-17):** `pcb.repour_polygons` is unchanged in behaviour; its source and tool doc now record that an in-place rebuild SHRINKS overlapping pours (each polygon rebuilds around the others' current copper, so a high-priority pour inside a lower-priority flood loses the clearance on every repour; measured: thin buck VIN pours at 0 pieces after two repours, an L5 island split in 5). Rebuild such a board by deleting and re-creating its pours in priority order with `pcb.place_polygon`. Clearing first was tried and dropped: `Poured := False` does not take through the API (33 of 33 read back still poured) and NoHatch leaves outline copper that cuts later pours.
 
-**2026.10.18.02 = `.17.02` plus (2026-10-17):** `pcb.place_polygon` - a polygon pour with any outline (`pts` in decimal mils, at least 3 vertices; a non-number refuses the call), net (an unknown net refuses rather than pouring no-net copper), layer, pour_over and `pour_index`, read back; and `pour_index` on `pcb_modify_polygon`, read back. Lower index pours first. Live check: place an L-shaped polygon on an inner layer with pour_index below an overlapping plane, repour, and confirm with `pcb_get_polygons` that both pour and the plane's copper area dropped by the island plus clearance.
+**2026.10.25.90 = `.17.03` plus `pcb.get_polygon_pieces` (2026-10-17):** per poured region of one polygon (index as `pcb_get_polygons`), its bounding box in mils, copper (Area less holes) and hole count, so the small pieces of a split plane can be located. Live check: on a polygon with N copper_pieces, expect N rows whose copper sums to its copper_area_mm2.
 
-**2026.10.18.02 = `.17.01` plus two additions (2026-10-17):** `pcb.place_arcs`, a batch of arcs in DECIMAL mils with a net each (`x_center,y_center,radius,start_angle,end_angle,width,layer,net`; a radius that does not parse fails its entry), for rounded diff-pair corners whose inner and outer radii differ by fractions of a mil; and `pcb_create_design_rule(rule_type='polygon_connect', connect_style='direct'|'relief'|'none')`, built with the rule kind and style as ordinals (20; relief=0, direct=1, none=2) so no enum identifier has to resolve. Live check: create a `polygon_connect` rule scoped `IsVia` with `direct` and read its descriptor with `pcb_get_rule_properties` (expect Direct Connect); place two arcs with nets and read them back with `obj_query eArcObject`. Guard: `tests/test_place_arcs_and_polygon_connect.py`.
+**2026.10.25.90 = `.17.02` plus (2026-10-17):** `pcb.place_polygon` - a polygon pour with any outline (`pts` in decimal mils, at least 3 vertices; a non-number refuses the call), net (an unknown net refuses rather than pouring no-net copper), layer, pour_over and `pour_index`, read back; and `pour_index` on `pcb_modify_polygon`, read back. Lower index pours first. Live check: place an L-shaped polygon on an inner layer with pour_index below an overlapping plane, repour, and confirm with `pcb_get_polygons` that both pour and the plane's copper area dropped by the island plus clearance.
 
-**2026.10.18.02 = `.13.02` plus one fix (2026-10-17):** `pcb.batch_move_components` read x/y with `StrToIntDef(..., 0)`, so a decimal coordinate (7260.6) moved the part to 0 and still counted as applied. It now parses decimal mils (`IsFloatStr` + `StrToFloatDef`), and a field that is not a number fails its entry, named in the new `bad_entries` list. Live check: batch-move one part to a decimal x/y and read it back with `pcb_get_components`; send one entry with x=`abc` and expect `failed`=1 and the designator in `bad_entries`. Guard: `tests/test_batch_move_decimal_mils.py`. Everything below was written for `.13.02` and applies unchanged to this release.
+**2026.10.25.90 = `.17.01` plus two additions (2026-10-17):** `pcb.place_arcs`, a batch of arcs in DECIMAL mils with a net each (`x_center,y_center,radius,start_angle,end_angle,width,layer,net`; a radius that does not parse fails its entry), for rounded diff-pair corners whose inner and outer radii differ by fractions of a mil; and `pcb_create_design_rule(rule_type='polygon_connect', connect_style='direct'|'relief'|'none')`, built with the rule kind and style as ordinals (20; relief=0, direct=1, none=2) so no enum identifier has to resolve. Live check: create a `polygon_connect` rule scoped `IsVia` with `direct` and read its descriptor with `pcb_get_rule_properties` (expect Direct Connect); place two arcs with nets and read them back with `obj_query eArcObject`. Guard: `tests/test_place_arcs_and_polygon_connect.py`.
+
+**2026.10.25.90 = `.13.02` plus one fix (2026-10-17):** `pcb.batch_move_components` read x/y with `StrToIntDef(..., 0)`, so a decimal coordinate (7260.6) moved the part to 0 and still counted as applied. It now parses decimal mils (`IsFloatStr` + `StrToFloatDef`), and a field that is not a number fails its entry, named in the new `bad_entries` list. Live check: batch-move one part to a decimal x/y and read it back with `pcb_get_components`; send one entry with x=`abc` and expect `failed`=1 and the designator in `bad_entries`. Guard: `tests/test_batch_move_decimal_mils.py`. Everything below was written for `.13.02` and applies unchanged to this release.
 
 
-**2026.10.18.02 = `.13.01` plus three fixes measured live on `.13.01` on 2026-10-13** (everything below that names this release applies to it; `.13.01` is named short):
+**2026.10.25.90 = `.13.01` plus three fixes measured live on `.13.01` on 2026-10-13** (everything below that names this release applies to it; `.13.01` is named short):
 
 * **D-A-4, a reload closed the wrong document.** `lib_reload_library library_path=X` with another document Y focused closed Y (an unmodified SchLib): `Lib_ReloadLibrary` ran `WorkspaceManager:CloseObject` with `FileName`=X, and CloseObject acts on the FOCUSED document whatever FileName says. `RefreshSchLibFromDisk` had the same close. Both now close X's own server document through `CloseServerDocByObject` (Application.pas, `App_CloseDocument`'s route: `Client.CloseDocument`, then `Client.GetDocumentByPath` again). The reload refuses `MODIFIED` (nothing closed) when the library reads modified or this bridge edited it and has not written it, answers `CLOSE_FAILED` when it is still open after the close, only opens a library that was not open, and replies `was_open`, `closed` and `other_documents_closed` (open document paths before and after, `OpenDocumentPaths` / `PathsGoneOtherThan`). Probe P54. `tests/test_close_by_object.py`.
 * **D-A-1, generic component creates wrote OwnerPartId -1.** `obj_create` / `obj_batch_create` with `container=component` saved the primitive with `OwnerPartId=-1` (`IsNotAccesible=T`), while `lib_add_symbol_lines` wrote the symbol's current part. Both now read the owner part and display mode from the narrowed component before the PreProcess (`OwnerPartIdOf` / `OwnerDisplayModeOf`, as every `Lib_Add*` does) and write them with `SetOwnerPartUnlessGiven` (Library.pas) before `AddSchObject`, unless the caller's properties set that field.
 * **D-A-2, obj_count ignored a lib_component scope.** `Gen_GetObjectCount` parsed the scope and never called `ApplyLibComponentScope`, so `lib_component:TP` counted whatever symbol was current, not TP. It now applies it exactly as `obj_query` does (same `NOT_FOUND`), and a PCB type with any scope but `active_doc` is refused `SCOPE_NOT_SUPPORTED` as the query refuses it. The second measurement (0 even with TP current and `active_doc`) was D-A-1: the SchLib iterator yields the current part's primitives only, so the -1-owned lines were invisible; D-A-1's fix resolves it. Re-check: `obj_count object_type=eLine scope=lib_component:TP` on a symbol drawn with `obj_create container=component` answers the number drawn.
 
-**`.13.01` = `.12.03` (the carrier-local line: sections 22 to 39, whose numbers are cited elsewhere and are unchanged) merged with upstream `.12.1` (upstream's own sections 22 to 36, renumbered here as sections 40 to 54, in the same order, with every cross-reference to them renumbered too).** Nothing in either line was dropped. The next live run is on 2026.10.18.02: section 39 ("The next live run") first, then the upstream sections 40 to 54 that record no live result.
+**`.13.01` = `.12.03` (the carrier-local line: sections 22 to 39, whose numbers are cited elsewhere and are unchanged) merged with upstream `.12.1` (upstream's own sections 22 to 36, renumbered here as sections 40 to 54, in the same order, with every cross-reference to them renumbered too).** Nothing in either line was dropped. The next live run is on 2026.10.25.90: section 39 ("The next live run") first, then the upstream sections 40 to 54 that record no live result.
 
 `.12.03` was the previous carrier-local release (`.12.02`) plus the fixes from its live run on 2026-10-12 (section 39, "Results 2026-10-12 (the .12.02 build)"):
 
-* **D-F2-1, the P8 halt.** In a freshly restarted Altium with nothing created or selected through the bridge, `lib_add_symbol_lines` with no `component_name` halted the engine ("Undeclared identifier: CurrentPartID", Library.pas `OwnerPartIdOf`) and the loop died. Cause, read from the source (session A below is its live proof): the four held-symbol globals (`LastCreatedLibComponent` and its name, document and path) were never assigned when the pump started. In DelphiScript an unassigned global is Empty, and Empty does NOT compare equal to Nil, so every `= Nil` guard let it through and the member read ran on Empty. A new `ResetSessionGlobals` (StatusForm.pas), called by `StartMCPPump` before anything reads state and by `RunSelfTest` (which runs handlers without the pump), assigns them (through `ForgetRememberedLibComponent`: `:= Nil` / `:= ''`) and EVERY other global the request path reads (`RefreshingLib`, `LastCompiledProject`, `LastCompileTick`, the save-pass counters, `DocNameMemberKeys`, the next-step and property-diagnostic buffers, the status form's in-flight fields and flags, and the four perf lists, which were Nil-tested by `EnsureStatusBuffers` - a test that does nothing on Empty - and created only inside `ShowStatusForm`'s Try), each as a top-level statement. `tests/test_live_fresh_pump_globals.py` executes `StartMCPPump` on a fixture whose globals start Empty-not-Nil, and its guard WALKS `StartMCPPump` in execution order (callees inlined, up to the statement that arms the poll timer): a global read before an unconditional assignment, or assigned only under an If, a loop, a Try body or after a conditional Exit (the `If X = Nil Then X := ...` shape included), fails it; negative tests run the guard on those injected shapes. USER-VISIBLE: a symbol held by `lib_create_symbol` / `lib_set_current_component` no longer survives a StartMCPServer re-run (or an Altium restart), so after a recovery the next nameless symbol edit answers `NO_COMPONENT`: pass `component_name` or call `lib_set_current_component` again. The mechanism is consistent with the 2026-10-11 P8 halt (Library.pas:122) that was blamed on the editor's `CurrentSchComponent`, to be confirmed by session A (P8 on 2026.10.18.02); the editor's-selection diagnosis is now UNPROVEN (the reads of it stay removed: harmless and conservative).
+* **D-F2-1, the P8 halt.** In a freshly restarted Altium with nothing created or selected through the bridge, `lib_add_symbol_lines` with no `component_name` halted the engine ("Undeclared identifier: CurrentPartID", Library.pas `OwnerPartIdOf`) and the loop died. Cause, read from the source (session A below is its live proof): the four held-symbol globals (`LastCreatedLibComponent` and its name, document and path) were never assigned when the pump started. In DelphiScript an unassigned global is Empty, and Empty does NOT compare equal to Nil, so every `= Nil` guard let it through and the member read ran on Empty. A new `ResetSessionGlobals` (StatusForm.pas), called by `StartMCPPump` before anything reads state and by `RunSelfTest` (which runs handlers without the pump), assigns them (through `ForgetRememberedLibComponent`: `:= Nil` / `:= ''`) and EVERY other global the request path reads (`RefreshingLib`, `LastCompiledProject`, `LastCompileTick`, the save-pass counters, `DocNameMemberKeys`, the next-step and property-diagnostic buffers, the status form's in-flight fields and flags, and the four perf lists, which were Nil-tested by `EnsureStatusBuffers` - a test that does nothing on Empty - and created only inside `ShowStatusForm`'s Try), each as a top-level statement. `tests/test_live_fresh_pump_globals.py` executes `StartMCPPump` on a fixture whose globals start Empty-not-Nil, and its guard WALKS `StartMCPPump` in execution order (callees inlined, up to the statement that arms the poll timer): a global read before an unconditional assignment, or assigned only under an If, a loop, a Try body or after a conditional Exit (the `If X = Nil Then X := ...` shape included), fails it; negative tests run the guard on those injected shapes. USER-VISIBLE: a symbol held by `lib_create_symbol` / `lib_set_current_component` no longer survives a StartMCPServer re-run (or an Altium restart), so after a recovery the next nameless symbol edit answers `NO_COMPONENT`: pass `component_name` or call `lib_set_current_component` again. The mechanism is consistent with the 2026-10-11 P8 halt (Library.pas:122) that was blamed on the editor's `CurrentSchComponent`, to be confirmed by session A (P8 on 2026.10.25.90); the editor's-selection diagnosis is now UNPROVEN (the reads of it stay removed: harmless and conservative).
 * **D-TOOL-1.** `last_fault.when` is now the FIRST sighting (`first_seen`); later failed keep-alives move `last_seen` only. `found_by` says how it was found, and a dead loop found by its box carries "script_fatal box seen" with guidance for that case (note the line, press OK, Stop, rerun StartMCPServer) instead of the generic "probably not running". A sighting in a NEW pump session (a newer `_session_start` row in `activity.log`, stored as `session`) starts a new record, so a loop that dies again on the first call after a recovery does not inherit the old incident's time and box guidance.
 * **D-TOOL-2.** `app_read_panel` / `app_list_panels` enumerate EDGE-TAB panels only (`enumerates: edge_tabs_only` in every reply); a panel docked open in a pane group (SCH Library on the left, F2) is not found yet, and the reply now says so instead of reading as "closed". `app_list_panels` no longer raises KeyError (`holder_class`) when panels are listed.
 * **39.3 item 1.** `app_get_preferences` and `app_exit_active_command` report `sch_server_loaded`; on AD 26.10.1.5 the schematic server was already registered in a fresh session with no schematic document (when it loads - at startup, through the Projects panel or through the `Altium_API.PrjScr` script project - was not measured), so `sch_post_process` reads true there (item 1 corrected).
 
-`.12.02` was `.12.01` plus one rename: `Lib_UninstallLibrary`'s local `Stored` (refused by the compiler at StartMCPServer; Delphi reads `stored` as a property directive, like `index`) is `InstalledAs`, and `scripts/altium/lint.py` refuses `Stored` and `Index` as declared names. Where a row below says what 2026.10.18.02 does, the change landed in `.12.01`, `.12.02` or `.12.03` unless it names one of the items above; it is carried unchanged. NAMING: "the .03 build" below is the third 2026-10-11 build (run live early on 2026-10-12), "the .12.02 build" the release before `.12.03`; this release (2026.10.18.02) is always named in full.
+`.12.02` was `.12.01` plus one rename: `Lib_UninstallLibrary`'s local `Stored` (refused by the compiler at StartMCPServer; Delphi reads `stored` as a property directive, like `index`) is `InstalledAs`, and `scripts/altium/lint.py` refuses `Stored` and `Index` as declared names. Where a row below says what 2026.10.25.90 does, the change landed in `.12.01`, `.12.02` or `.12.03` unless it names one of the items above; it is carried unchanged. NAMING: "the .03 build" below is the third 2026-10-11 build (run live early on 2026-10-12), "the .12.02 build" the release before `.12.03`; this release (2026.10.25.90) is always named in full.
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by the linter (and by FPC where a section says so) but **not
@@ -128,7 +130,7 @@ works elsewhere cannot be an undeclared identifier:
 | 46, simulation run | `AddStringParameter` with `ObjectKind=Simulator` | yes, `Proj_UpdatePCB` | medium, a process run rather than a write |
 | 46, results saved | `SetFileName`, `DoFileSave` on the results document | yes, `App_CreateDocument` | low |
 | 46, settings reload | `SupportsReload`, `DoFileLoad`, `UpdateModifiedDate` | no, nowhere | highest, and it can stop the loop |
-| 47, slotted hole | `HoleType`, `HoleWidth` on a library pad | no, nowhere | high, and it can stop the loop |
+| 47, slotted hole | `HoleType`, `HoleWidth` on a library pad | only by `PCBGeneric.pas`, on a board pad, itself new | high, and it can stop the loop |
 | 47, pad mask expansion | `SolderMaskExpansion`, `SolderMaskExpansionValid` on a pad cache | yes, `PCB_SetViaSoldermaskRelief`, on a via's cache | medium, a library pad is new |
 | 47, non-plated hole | `Plated` on a library pad | read in `PCB.pas`, written nowhere else | medium |
 | 47, pad paste expansion | `PasteMaskExpansion`, `PasteMaskExpansionValid`, `SetState_Cache` | yes, `PCB_MakePasteGrid` | low, but now on a library pad |
@@ -147,8 +149,8 @@ works elsewhere cannot be an undeclared identifier:
 | 51, DbLib part | `CurrentPartID` on a placed DbLib part | yes, `SetSchProperty` | low |
 | 51, pad designator | `Name` on a pad, through the generic setter | yes, `PCB_RenumberPads` | low |
 | 51, poll timer | `Enabled` on the poll timer, read back after arming | yes, `StartMCPPump` writes it | low |
-| 52, 3D body opacity | `BodyOpacity3D` on a component body | no, nowhere | high, a wrong member name stops the loop; used by several scripts in reference/ |
-| 52, slot rotation | `HoleRotation` written on a library pad | no, nowhere | medium, read on the board side already |
+| 52, 3D body opacity | `BodyOpacity3D` on a component body | yes, `AddExtrudedBody`, on a new extruded body | high, a wrong member name stops the loop; used by several scripts in reference/ |
+| 52, slot rotation | `HoleRotation` written on a library pad | only by `PCBGeneric.pas`, on a board pad, itself new | medium, read on the board side already |
 | 52, pad copper centre | `BoundingRectangle` on a library pad | yes, `BuildViolationJson`, on any primitive | low |
 | 52, pad setter | `SetState_Cache` on a library pad | yes, `Lib_AddFootprintPads` | low |
 | 52, arc mirror | `StartAngle`, `EndAngle` written on a placed arc | yes, `Lib_AddSymbolArc` | low |
@@ -161,12 +163,28 @@ works elsewhere cannot be an undeclared identifier:
 | 54, settle after an add | `SetState_CurrentComponent` on the footprint already current | yes, `Lib_RedrawAssembly` (upstream cited Lib_Link3DModel and Lib_DeleteFootprintPrimitives; the merge keeps carrier-local's verified CurrentComponent switch in the first and the opt-in park in the second, so neither writes it now) | low, ran after all eight add kinds and survived save and restart |
 | 54, modify bracket | `BeginModify`, `EndModify` round an obj_modify write and a placed body's move | yes, `PCB_SetTrackWidth` | low |
 | 54, mask sides | `UseSeparateExpansions`, `SolderMaskBottomExpansion` on the pad cache | yes, `Lib_SetPadProperties` | medium, missing from the API reference; read and written live on pads and vias |
-| 54, via hole edge | `SolderMaskExpansionFromHoleEdge` written on a via | no, nowhere | high, the expansion assigned straight onto a via faults (measured again); this member and the cache route did not |
+| 54, via hole edge | `SolderMaskExpansionFromHoleEdge` written on a via | only by `PCBGeneric.pas`, through the pad cast, itself new | high, the expansion assigned straight onto a via faults (measured again); this member and the cache route did not |
 | 54, mechanical enabled | `MechanicalLayerEnabled` read on a library layer | yes, `Lib_GetMechLayers` | low |
 | 54, rule gap | `Gap` read on a typed clearance rule | yes, `PCB_SetRuleProperties` | low |
 | 54, designator mirror | `Location` written on a placed designator | yes, `SetSchProperty` | low |
 | 50, footprint on a placed part | `ModelName` on a footprint implementation | yes, `Lib_SetModelName` | medium, now on a placed part rather than a library symbol |
 | 50, footprint link name | `EntityName` on a model datafile link | yes, `Lib_NormalizeImplementations` | low |
+| 55, via tenting | `SetState_IsTenting_Top`, `SetState_IsTenting_Bottom` on a footprint via | yes, `PCB_SetViaTenting` | low, written and read back live both ways; dropped silently unless the mask is manual |
+| 55, paste flag | `SetState_IsTopPasteEnabled` on a library pad | no, nowhere | low, written and read back live both ways; dropped silently unless the paste is manual |
+| 55, manual first | `SolderMaskExpansionValid`, `PasteMaskExpansionValid` set before the flag | yes, `PCB_SetViaSoldermaskRelief` | low |
+| 55, via sizes | `SizeOnLayer` written on a via, `HoleSize` | yes, `PCB.pas` | medium, the size write is new on a via; read back live in mm |
+| 55, grid switches | `SnapGridOn`, `VisibleGridOn` on a schematic | no, nowhere | low, switched off and on live and read back |
+| 55, pin labels | `ShowName`, `ShowDesignator` on a pin | yes, `Library.pas` | low |
+| 55, pin text | `Name_FontMode`, `Name_CustomFontID`, `Name_CustomColor`, `Designator_FontMode`, `Designator_CustomFontID`, `Designator_CustomColor` on a pin | no, nowhere | medium, read live; the writes are not run live |
+| 56, stack-up apply | `CopperThickness`, `DielectricHeight`, `DielectricConstant`, `DielectricType` on a board layer | yes, `PCB_ModifyLayer` | low, the same writes pcb_modify_layer makes, each read back |
+| 57, polygon pour settings | `Grid`, `TrackSize`, `MinTrack`, `ArcApproximation`, `NeckWidthThreshold`, `IslandAreaThreshold`, `PolyHatchStyle`, `PourOver`, `UseOctagons` on a polygon | only by `PCBGeneric.pas`, itself new | low, read and written back live on AD 26.11 |
+| 57, keepout restrictions | `IsKeepoutForCopper`, `IsKeepoutForTrack`, `IsKeepoutForVia`, `IsKeepoutForSMDPad`, `IsKeepoutForTHPad` | only by `PCBGeneric.pas`, itself new | low, written and read back live on keep-out tracks |
+| 57, primitive net | `AddPCBObject` on a net | yes, `BindPrimitiveToNet` | low |
+| 57, region arcs | `ShapeSegmentCount`, `UpdateContourFromShape` on a board region | yes, `PCB_ApplyFreePrimitives` | low |
+| 57, entry font | `TextFontID` on a sheet entry | no, nowhere | low, read and written back live on AD 26.11 |
+| 57, display mode | `DisplayMode` on a placed part | yes, `Library.pas`, on a library part | low, refused out of range and written live |
+| 57, pin map | `MapAsString` on a footprint model | no, nowhere | low, written, read back and restored live |
+| 57, footprint choice | `IsCurrent` on a placed part's footprint model | yes, `Library.pas` | medium, not yet run on a part with several models |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -382,8 +400,8 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.18.02`, `version_match` =
-`true`, and `mcp_server_version` = `0.6.1`. On a freshly started loop
+Expect `altium_script_version` = `2026.10.25.90`, `version_match` =
+`true`, and `mcp_server_version` = `0.7.1`. On a freshly started loop
 `caught_exceptions` is `0` and `last_caught` null (section 39): note both,
 since every later section is read against them.
 
@@ -1330,7 +1348,7 @@ that they arrived:
   there because `LayerObj.Net` on a stack layer faulted live as an
   undeclared identifier. `pcb_set_plane_net` no longer touches
   `LayerObj.Net` at all (since the first 2026-10-11 build). Since the
-  2026.10.18.02 merge it writes the board's `InternalPlaneNetName` and
+  2026.10.25.90 merge it writes the board's `InternalPlaneNetName` and
   reads it back (section 51 item 4); when that does not read back it
   answers `success: false`, `applied: false` and a note pointing at the
   Layer Stack Manager, and raises no dialog. Tying a plane through the
@@ -2190,7 +2208,7 @@ sheets, `A`, `B` and `STUBS`, all saved and loaded, plus one open
 library `<lib>` (a scratch copy) that has not been edited. Confirm
 `app_ping` answers after each call.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.18.02`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.25.90`.
 
 2. **The default save-all leaves an unedited library alone.** Note
    `<lib>`'s mtime. `app_save_all` with no arguments. Expect
@@ -2358,7 +2376,7 @@ compile is what is new.
 Work on the live project only if the .PrjPcb is committed (the check is a
 `git diff`), or on a copy. Focus some other sheet `A` first.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.18.02`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.25.90`.
 
 2. **A default add writes the project.** Note the .PrjPcb's mtime and two
    SchDoc mtimes. `proj_add_sheet name=ZZ33`. Expect `success: true,
@@ -2443,7 +2461,7 @@ confirm it) and write the project only for a sheet that is on disk.
 
 Focus some other sheet `A` of the focused project first.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.18.02`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.25.90`.
 
 2. **The add still takes the document save.** `proj_add_sheet name=ZZ35`:
    as step 33's step 2, plus `project_save_route: document_save`.
@@ -2516,7 +2534,7 @@ after `MarkDocDirtyByPath`. They now answer `saved: false` with
 `marked_modified`, `pending_save` and `written_to_disk: false` (the fields
 `lib_delete_footprint` already uses). No Altium call changed; only the reply.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.18.02`.
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.25.90`.
 2. **The reply is honest.** Focus a sheet, `obj_modify` a net label to its
    own current text. Expect `saved: false, marked_modified: true,
    pending_save: true, written_to_disk: false`, and the sheet's mtime
@@ -2573,7 +2591,7 @@ only from the new handler, and every sender reports its absence (the tool as
 a `warning`, the plan paths as a note), so step 2 below detects a stale
 script by itself.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.18.02`
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.25.90`
    (the 2026-10-08 build is the one the results below were measured on),
    `version_match` true.
 2. **Exact values.** On a scratch sheet with a placed part (say `R1`) that has
@@ -2760,7 +2778,7 @@ section): the heights reach the file and the discard reply holds, but
 (section 38). On any re-run, run 37.6 FIRST: it is the step that can stop
 the loop.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.18.02`,
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.25.90`,
    `version_match` true.
 2. **Heights survive the save.** On a COPY of a .PcbLib with at least three
    footprints, focus footprint A, then `lib_set_footprint_height` on B and C
@@ -2883,7 +2901,7 @@ this build: section 38.
 
 ---
 
-## 38. A dirty mark that says whether it took, and a save-all that writes what the bridge edited (run live 2026-10-11 on the first 2026-10-11 build and re-checked 2026-10-12 on the .03 build, results at the end; re-check on 2026.10.18.02)
+## 38. A dirty mark that says whether it took, and a save-all that writes what the bridge edited (run live 2026-10-11 on the first 2026-10-11 build and re-checked 2026-10-12 on the .03 build, results at the end; re-check on 2026.10.25.90)
 
 Found by section 37's live run (2026-10-10, the 2026-10-10 build): the
 library's modified flag read false after every `lib_set_footprint_height`
@@ -3091,13 +3109,13 @@ finding, sharing `tests/live_2026_10_11.py`):
 The steps below are the 2026-10-11 procedure with the second-build
 expectations, unchanged on the .03 build (its re-check on the second
 build never started: the loop was dead, see the section 39 results).
-SCRIPT_VERSION is `2026.10.18.02`. Use scratch copies only:
+SCRIPT_VERSION is `2026.10.25.90`. Use scratch copies only:
 a scratch sheet opened as a free document, a scratch PROJECT copy with at
 least one sheet, a byte copy of one of that project's sheets saved under the
 SAME FILE NAME in another folder (opened as a free document), and a byte copy
 of a .PcbLib opened on its own.
 
-1. **Version.** `app_ping`: `altium_script_version` = `2026.10.18.02`,
+1. **Version.** `app_ping`: `altium_script_version` = `2026.10.25.90`,
    `version_match` true.
 2. **Read-back on a FREE document.** On the free scratch sheet (focused),
    `obj_modify` one property (say a part's `Location.X`). Expect
@@ -3419,11 +3437,11 @@ Notes, no code change: a NO-argument save-all rewrites every clean open
 document by design (it rewrote another segment's scratch board five
 times); `proj_save` with the default `only_modified=false` rewrites clean
 members (use `only_modified=true`). Nothing in this section changed in
-2026.10.18.02: re-run steps 1-3 as the smoke check only.
+2026.10.25.90: re-run steps 1-3 as the smoke check only.
 
 ---
 
-## 39. Popup-free run (run live 2026-10-11 on the first and second 2026-10-11 builds and 2026-10-12 on the .03 and .12.02 builds, results at the end; re-check on 2026.10.18.02)
+## 39. Popup-free run (run live 2026-10-11 on the first and second 2026-10-11 builds and 2026-10-12 on the .03 and .12.02 builds, results at the end; re-check on 2026.10.25.90)
 
 **Why.** Altium's script engine shows an exception as a modal "press OK"
 dialog BEFORE the surrounding `Try/Except` runs, and the polling loop
@@ -3449,10 +3467,10 @@ cause found is an UNASSIGNED global: the held symbol was never assigned at
 pump start, an unassigned DelphiScript global is Empty, and Empty is not
 Nil, so the guards passed it and the member read ran on Empty. That
 is read from the source and is CONSISTENT WITH both P8 halts, to be
-confirmed by session A (P8 on 2026.10.18.02); blaming the editor's
+confirmed by session A (P8 on 2026.10.25.90); blaming the editor's
 selection is UNPROVEN. A
 member read on an unassigned (Empty) Variant is the same fatal class as a
-member the runtime object does not publish, and 2026.10.18.02 assigns
+member the runtime object does not publish, and 2026.10.25.90 assigns
 every global the request path reads when the pump starts. The .03 build reads no member of that reference anywhere,
 and none of the IPCB_Rule constraint read in `PCB_NormalizeVias` (P23). For
 every site still counted below, "0 catches" means only "no ordinary
@@ -3576,7 +3594,7 @@ Each must answer with no dialog and leave `caught_exceptions` unchanged.
    are therefore NOT reachable by restarting Altium (they stay as the
    guard for a build that loads the server lazily; executed offline in
    `tests/test_popup_free_core.py`). `sch_server_loaded` (new in
-   2026.10.18.02) reports the Nil test on its own, so "server present, no
+   2026.10.25.90) reports the Nil test on its own, so "server present, no
    current schematic document" (`sch_server_loaded: true`, `"schematic":
    null`) can be told from "no server" (`false`, `null`).
 2. **A board path that cannot be a board.** `pcb_place_components` with
@@ -3699,7 +3717,7 @@ the same way: that outcome is a dead loop, never a count.
 | P5 | `ReadMechKind:Kind` | Only on a build below AD19: `pcb_get_mech_layer_names` | kinds read -1 and nothing is counted (the read is gated off below 19) |
 | P6 | `App_CreateDocument:DoFileSave`, `App_CreateDocument:SaveObject` | 39.3 item 5, and the same with a folder that exists but is read-only | 0 confirms the folder test is the whole story; a count means a save raises in an existing folder |
 | P6b | `ResolvePCBBoard:OpenDocument`, `GetPCBBoardAnywhere:OpenDocument` | FIRST the positive controls in 39.3 item 2 (a closed HEALTHY board must still open). Then a 0-byte file renamed `scratch.PcbDoc`: pass it as `pcb_place_components` `board_path`, then list it in a scratch project and run `app_get_preferences` with a sheet focused | THREE possible outcomes for a broken file, not two: 0 = Altium answers Nil; 1 = it raises (counted); and the THIRD, the one measured on the .02b run: an UNCOUNTED Altium modal ("Warning", "File type not recognised.", class (c)) blocking ~13 s, then a NON-Nil BLANK document - `pcb_place_components` placed its part into it and `app_get_preferences` reported its settings. On the .03 build neither call reaches the open: `pcb_place_components` (and `pcb_focus_board`) are refused `BOARD_FILE_UNREADABLE` (the message names the path and says "Nothing was opened or changed"), and `app_get_preferences` answers `"pcb": null` (or another open board), with no dialog, 0 catches, and `scratch.PcbDoc` still closed and still 0 bytes. A box = the pre-open file test (`FileLooksLoadable`) let it through: record the file's size and first bytes |
-| P7 | `Lib_Link3DModel:ModelFactory_FromFilename`, `PCB_Place3DBody:ModelFactory_FromFilename`, `PCB_Place3DBody:RemovePCBObject` | `pcb_place_3d_body` and `lib_link_3d_model` with a `.wrl`, an `.igs` and an `.stl` model, then with a renamed `.dat` file; count the bodies on the board (and on the footprint) before and after each call | `Model3DExtMayLoad` is a DENY-list, so each of these reaches the loader. An empty model (no readable box AND an overall height of 0) is `MODEL_LOAD_FAILED` "loaded as an empty model". BOARD half: the body is taken off the board in the same transaction (PASS on the .03 run: counts unchanged). LIBRARY half, CORRECTED for 2026.10.18.02 (the .03 run FAILED here: the footprint-only undo left the empty body LISTED on the footprint - 2 bodies, 7 after four empty loads - and `lib_save_library` wrote it into the file): the undo now makes ONE footprint removal by address (`RemoveLibBodyByAddress`: at most two `RemovePCBObject` calls on the body, `Body3D_RemoveAll`'s documented limit - a third sighting means the removal is silently refused) and reads the footprint again; only if the footprint no longer lists the body AND is current does it try the library board (`LibBoardRemoveEntries`, rule 4), then reads both again. The error's `details` carry `footprint_still_lists`, `board_still_lists`, `footprint_remove_rounds`, `footprint_current`, `board_removal` and `removed_from_both`. EXPECT THE LIKELY OUTCOME, the .03 one made honest: `footprint_still_lists: true`, `footprint_remove_rounds: 1`, `board_removal: {requested: false}`, `removed_from_both: false`, and the message saying "could NOT be taken off" and "Do NOT save this library" (the .03 removal answered True and the body stayed listed, and repeating it is not a fix). Record it, do NOT save, `lib_reload_library`, and count the bodies again (the count from before the call). That outcome is the evidence that the real fix is judging the model BEFORE the add ("Still open" below). If instead `footprint_still_lists: false` and `board_still_lists: 0` ("taken off the footprint and off the library board"), MEASURE THE FILE: `lib_save_library` on the scratch copy, `lib_read_pcblib_file` on that footprint: no extra body. If `board_still_lists` reads 1 (section 31 measured a board removal on a PAD that did not take; no run has removed a component body from the board) the message says "Do NOT save": record it and do not save. The renamed STEP and a real `.step` still place. Do NOT add an extension to the deny-list: the content decides |
+| P7 | `Lib_Link3DModel:ModelFactory_FromFilename`, `PCB_Place3DBody:ModelFactory_FromFilename`, `PCB_Place3DBody:RemovePCBObject` | `pcb_place_3d_body` and `lib_link_3d_model` with a `.wrl`, an `.igs` and an `.stl` model, then with a renamed `.dat` file; count the bodies on the board (and on the footprint) before and after each call | `Model3DExtMayLoad` is a DENY-list, so each of these reaches the loader. An empty model (no readable box AND an overall height of 0) is `MODEL_LOAD_FAILED` "loaded as an empty model". BOARD half: the body is taken off the board in the same transaction (PASS on the .03 run: counts unchanged). LIBRARY half, CORRECTED for 2026.10.25.90 (the .03 run FAILED here: the footprint-only undo left the empty body LISTED on the footprint - 2 bodies, 7 after four empty loads - and `lib_save_library` wrote it into the file): the undo now makes ONE footprint removal by address (`RemoveLibBodyByAddress`: at most two `RemovePCBObject` calls on the body, `Body3D_RemoveAll`'s documented limit - a third sighting means the removal is silently refused) and reads the footprint again; only if the footprint no longer lists the body AND is current does it try the library board (`LibBoardRemoveEntries`, rule 4), then reads both again. The error's `details` carry `footprint_still_lists`, `board_still_lists`, `footprint_remove_rounds`, `footprint_current`, `board_removal` and `removed_from_both`. EXPECT THE LIKELY OUTCOME, the .03 one made honest: `footprint_still_lists: true`, `footprint_remove_rounds: 1`, `board_removal: {requested: false}`, `removed_from_both: false`, and the message saying "could NOT be taken off" and "Do NOT save this library" (the .03 removal answered True and the body stayed listed, and repeating it is not a fix). Record it, do NOT save, `lib_reload_library`, and count the bodies again (the count from before the call). That outcome is the evidence that the real fix is judging the model BEFORE the add ("Still open" below). If instead `footprint_still_lists: false` and `board_still_lists: 0` ("taken off the footprint and off the library board"), MEASURE THE FILE: `lib_save_library` on the scratch copy, `lib_read_pcblib_file` on that footprint: no extra body. If `board_still_lists` reads 1 (section 31 measured a board removal on a PAD that did not take; no run has removed a component body from the board) the message says "Do NOT save": record it and do not save. The renamed STEP and a real `.step` still place. Do NOT add an extension to the deny-list: the content decides |
 
 The rows below are the per-file stages' sites (Library, Generic, PCB,
 Project), filled in at integration. A `<prop>` / `<id>` in a `where` is
@@ -3708,20 +3726,20 @@ row itself names the pair that popped.
 
 | Probe | Site (`where`) | Setup and call | What settles it |
 |---|---|---|---|
-| P8 | (none: nothing is read off the editor's selection any more, and the held-symbol globals are assigned at pump start - D-F2-1) | **FATAL-IF-WRONG. The FIRST call of a fresh session** (restart Altium, StartMCPServer, nothing else through the bridge). If it passes, the session may continue with non-fatal sections; no other FATAL-IF-WRONG probe in that session. Open a SchLib by hand (a symbol is selected in the editor; nothing created through the bridge). WITHOUT component_name: `lib_add_symbol_lines lines=[{x1:0,y1:0,x2:100,y2:0}]`, `lib_add_pins` (two pins), `lib_add_symbol_rectangle`, `lib_get_pin_list`, `lib_split_pin_functions`, `obj_create object_type=eLine container=component`, `lib_link_footprint footprint_name=X` | Every one answers `NO_COMPONENT` (the edits' message names component_name and lib_set_current_component), no dialog, no count, the library file unchanged and not marked modified. On the second 2026-10-11 build the first call halted the loop ("Undeclared identifier: CurrentPartID", Library.pas:122), and on the .12.02 build again (Library.pas:146, `OwnerPartIdOf`; D-F2-1: the held global was Empty, not Nil, because the pump never assigned it). 2026.10.18.02 assigns it at pump start. A box now is class (b): stop the run and record the unit and line the Script IDE shows |
+| P8 | (none: nothing is read off the editor's selection any more, and the held-symbol globals are assigned at pump start - D-F2-1) | **FATAL-IF-WRONG. The FIRST call of a fresh session** (restart Altium, StartMCPServer, nothing else through the bridge). If it passes, the session may continue with non-fatal sections; no other FATAL-IF-WRONG probe in that session. Open a SchLib by hand (a symbol is selected in the editor; nothing created through the bridge). WITHOUT component_name: `lib_add_symbol_lines lines=[{x1:0,y1:0,x2:100,y2:0}]`, `lib_add_pins` (two pins), `lib_add_symbol_rectangle`, `lib_get_pin_list`, `lib_split_pin_functions`, `obj_create object_type=eLine container=component`, `lib_link_footprint footprint_name=X` | Every one answers `NO_COMPONENT` (the edits' message names component_name and lib_set_current_component), no dialog, no count, the library file unchanged and not marked modified. On the second 2026-10-11 build the first call halted the loop ("Undeclared identifier: CurrentPartID", Library.pas:122), and on the .12.02 build again (Library.pas:146, `OwnerPartIdOf`; D-F2-1: the held global was Empty, not Nil, because the pump never assigned it). 2026.10.25.90 assigns it at pump start. A box now is class (b): stop the run and record the unit and line the Script IDE shows |
 | P9 | (none) | Same session, after P8. `lib_add_pins component_name=<the selected symbol>` with two pins, one carrying `owner_part_id=0`; then `lib_add_symbol_lines` and `lib_get_pin_list` WITHOUT a name; then `obj_batch_create component_name=<another symbol> operations=[two eLine items with container=component]` | The pins land on that symbol (visible in the editor without reselecting it: `MarkLibDirtyComp` redraws the component the edit wrote into), the symbol is now current, the explicit pin reads `owner_part_id` 0 and the other the symbol's CURRENT part, its `CurrentPartID` (1 on a single-part symbol, never 0: a symbol that reported part 0 is moved to part 1, display mode 0, as `lib_set_current_component` does; on a multi-part symbol `CurrentPartID` can differ from the part the editor's spinner shows, so check the owner part, not the picture); the nameless calls act on the same symbol (it is now held). The batch answers `created: 2` on the other symbol (it resolves through an `ISch_Lib` local: the first .03 draft passed its `ISch_Document`), the library reads modified afterwards and the two lines are drawn without reselecting the symbol (`MarkLibDirtyComp`, as every `Lib_Add*` handler; before the review the component-container create paths flagged nothing). `obj_create object_type=eLine container=component component_name=<another symbol>` the same. No dialog, no count. `NO_COMPONENT` for a name that exists = the index and the walk both missed it (record whether `lib_set_current_component` finds it) |
 | P10 | (none: the held component's liveness) | `lib_create_symbol X`, then close and reopen that SchLib in the UI, then `lib_add_pins` without a name; then a by-name edit of ANOTHER symbol in that library: `lib_set_component_description component_name=<another symbol> description=p10`, and `lib_batch_set_params` on it | `NO_COMPONENT` for the nameless add, no dialog, no count: the held component was dropped when its library closed (`LastCreatedLibIsLive`), and the editor's selection is no longer a fallback. The by-name edits succeed with no dialog whatever the liveness answer: `MarkLibDirty` touches no component (the first .03 draft invalidated the held one on every edit). **FATAL-IF-WRONG**: a dialog on the nameless add = `Client.GetDocumentByPath` hands back the same interface after a reopen, so the freed held component was used (record which 39.5 class, and whether two lookups return the same object) |
-| P11 | `ApplyLabelFormat:write` | Scratch SchLib: `lib_set_label_formats ops=[{target: designator, orientation: 90}]`, then `[{target: designator, justification: 12}]`, then the in-range `[{target: designator, orientation: 1, justification: 4}]` | SETTLED on the .03 run (DEFECT): no raise, the values were STORED as given and the save wrote `Orientation=90\|Justification=12` into the file. 2026.10.18.02: the first two are refused `INVALID_ARGUMENT` by the Python tool (naming `ops[0].orientation=90` and the range 0..3 / 0..8), nothing sent, the library unmodified and its file unchanged; the third applies. A stale client reaching the handler gets the same refusal from `LabelOrdinalProblem`, before any focus or PreProcess |
-| P12 | `Lib_InstallLibrary:InstallLibrary`, `Lib_UninstallLibrary:UnInstallLibrary` | Install and uninstall a real scratch `.SchLib`; then install a RELATIVE name that does not exist; then uninstall a name that is installed under another spelling of its path (forward slashes, other case) | The .03 run (DEFECT): the relative name answered `installed: true` and the respelled uninstall `uninstalled: true` while the list did not change. 2026.10.18.02 reads the installed list before and after: the real file `installed: true` with `added` naming it, then `uninstalled: true` with `removed` naming it; the relative name `installed: false` with a reason ("the installed list did not change"); the respelled path `uninstalled: false`, the reason naming the installed spelling, the library still installed. `lib_get_installed_libraries` agrees with every reply. 0 catches |
-| P13 | (none since `.13.01`: neither handler asks `GetPCBLibraryByPath` or loads in the background any more) | `lib_copy_footprint` and `lib_move_footprints` into a destination `.PcbLib` that exists on disk but is NOT open; then a copy into a 0-byte `.PcbLib` and into a relative missing name | SETTLED on the .03 run: the lookup answered Nil (0 catches) and the background load ran - and the copy reported success into a library no document owns: not in the file, `lib_save_library` `NOT_LOADED` (DEFECT). 2026.10.18.02 loads NOTHING in the background and never asks `GetPCBLibraryByPath` in these two handlers: every library, source or destination, read or edited, is taken from its open DOCUMENT (opened first with WorkspaceManager:OpenObject when closed - only an absolute path to an existing, readable `.PcbLib` - then focused and read with `GetCurrentPCBLibrary`, the route every lib_ edit uses). EXPECT the library to appear as an open document, the copy to answer `dest_opened: true`, `marked_modified: true`, `pending_save: true`, and after `lib_save_library` (`bridge_edited` true, `file_age_changed` true) the footprint IN THE FILE (`lib_read_pcblib_file`). The 0-byte and relative cases: `DEST_NOT_OPEN`, "Nothing was changed", the message saying whether an open was tried, no dialog. A move with the default `delete_from_source` and a closed source opens the source too (or `SOURCE_NOT_OPEN`), deletes only footprints whose NEW copy the destination lists, and both libraries save. THEN THE STALE-INSTANCE SEQUENCE (the review's case; run it in a session where the .03 build never loaded these files): copy-only out of a CLOSED X (`lib_move_footprints delete_from_source=false`), then `lib_copy_footprint` and `lib_move_footprints` (default delete) INTO X, then `lib_save_library` X and `lib_read_pcblib_file` X: every footprint reported moved or copied must be IN THE FILE, and the moved ones gone from their source's file. A footprint reported but missing from X's file = the edit went to a library the document does not own: record it, it is a defect. `DEST_NOT_OPEN` "could not be taken from the document" = the focus did not land (click the tab, retry, record it) |
+| P11 | `ApplyLabelFormat:write` | Scratch SchLib: `lib_set_label_formats ops=[{target: designator, orientation: 90}]`, then `[{target: designator, justification: 12}]`, then the in-range `[{target: designator, orientation: 1, justification: 4}]` | SETTLED on the .03 run (DEFECT): no raise, the values were STORED as given and the save wrote `Orientation=90\|Justification=12` into the file. 2026.10.25.90: the first two are refused `INVALID_ARGUMENT` by the Python tool (naming `ops[0].orientation=90` and the range 0..3 / 0..8), nothing sent, the library unmodified and its file unchanged; the third applies. A stale client reaching the handler gets the same refusal from `LabelOrdinalProblem`, before any focus or PreProcess |
+| P12 | `Lib_InstallLibrary:InstallLibrary`, `Lib_UninstallLibrary:UnInstallLibrary` | Install and uninstall a real scratch `.SchLib`; then install a RELATIVE name that does not exist; then uninstall a name that is installed under another spelling of its path (forward slashes, other case) | The .03 run (DEFECT): the relative name answered `installed: true` and the respelled uninstall `uninstalled: true` while the list did not change. 2026.10.25.90 reads the installed list before and after: the real file `installed: true` with `added` naming it, then `uninstalled: true` with `removed` naming it; the relative name `installed: false` with a reason ("the installed list did not change"); the respelled path `uninstalled: false`, the reason naming the installed spelling, the library still installed. `lib_get_installed_libraries` agrees with every reply. 0 catches |
+| P13 | (none since `.13.01`: neither handler asks `GetPCBLibraryByPath` or loads in the background any more) | `lib_copy_footprint` and `lib_move_footprints` into a destination `.PcbLib` that exists on disk but is NOT open; then a copy into a 0-byte `.PcbLib` and into a relative missing name | SETTLED on the .03 run: the lookup answered Nil (0 catches) and the background load ran - and the copy reported success into a library no document owns: not in the file, `lib_save_library` `NOT_LOADED` (DEFECT). 2026.10.25.90 loads NOTHING in the background and never asks `GetPCBLibraryByPath` in these two handlers: every library, source or destination, read or edited, is taken from its open DOCUMENT (opened first with WorkspaceManager:OpenObject when closed - only an absolute path to an existing, readable `.PcbLib` - then focused and read with `GetCurrentPCBLibrary`, the route every lib_ edit uses). EXPECT the library to appear as an open document, the copy to answer `dest_opened: true`, `marked_modified: true`, `pending_save: true`, and after `lib_save_library` (`bridge_edited` true, `file_age_changed` true) the footprint IN THE FILE (`lib_read_pcblib_file`). The 0-byte and relative cases: `DEST_NOT_OPEN`, "Nothing was changed", the message saying whether an open was tried, no dialog. A move with the default `delete_from_source` and a closed source opens the source too (or `SOURCE_NOT_OPEN`), deletes only footprints whose NEW copy the destination lists, and both libraries save. THEN THE STALE-INSTANCE SEQUENCE (the review's case; run it in a session where the .03 build never loaded these files): copy-only out of a CLOSED X (`lib_move_footprints delete_from_source=false`), then `lib_copy_footprint` and `lib_move_footprints` (default delete) INTO X, then `lib_save_library` X and `lib_read_pcblib_file` X: every footprint reported moved or copied must be IN THE FILE, and the moved ones gone from their source's file. A footprint reported but missing from X's file = the edit went to a library the document does not own: record it, it is a defect. `DEST_NOT_OPEN` "could not be taken from the document" = the focus did not land (click the tab, retry, record it) |
 | P14 | (none: the reader's source) | Save a SchLib, add a symbol through the bridge WITHOUT saving, then `lib_get_component_details` on it by index | The new symbol is absent = the component reader reads the FILE, as the `LibFileMissing` guards assume; present = it reads the open document, and those guards would lose components of an unsaved library |
-| P15 | `GetSchProperty:<prop>:<id>`, `SetSchProperty:<prop>:<id>`, `GetSchVertexProperty:VerticesCount:<id>` | **FATAL-IF-WRONG**, ONE pair per fresh session, human present. Only pairs the 2026.10.18.02 allowlists ADMIT but no live run has proven. THE COMPLETE LIST (shrink the allowlists from this evidence): **eParameterSet** - `Name`, `FontId`, `LineWidth`, `Style`, `Alignment`, `TextColor`, `Justification`, `Width`, `IsSolid`, `IsMirrored`, `Orientation` (port-like AND label-like members on one type, and the class is measured to lack `Text`, the sweep marks `ParamSet.Name` UNKNOWN - P44: the riskiest row, run it first); `Name` on eProbe, eHarnessConnector; `FontId` on ePort, ePowerObject, eLabel, eSheetEntry, eTextFrame, eNote, eProbe, eCrossSheetConnector; `LineWidth` on ePort, eBus, eBusEntry, eSheetSymbol, eImage, eTextFrame, eNote, eProbe, eHarnessConnector; `Style` on eSheetEntry, eNoERC, eProbe, eHarnessConnector, eCrossSheetConnector; `IOType` on eSheetEntry, eHarnessConnector; `Alignment` on eSheetEntry, eTextFrame, eNote, eProbe, eHarnessConnector; `TextColor` on every type it admits (ePort, eSheetSymbol, eSheetEntry, eTextFrame, eNote, eProbe, eHarnessConnector); `Justification` on eNetLabel, ePort, ePowerObject, eLabel, eTextFrame, eNote, eProbe, eCrossSheetConnector; `Width` on eSheetEntry, eTextFrame, eNote, eProbe, eHarnessConnector; `IsSolid` on eSheetSymbol, eImage, eTextFrame, eNote, eProbe, eHarnessConnector; `IsMirrored` on eNetLabel, ePowerObject, eParameter, eLabel (P17). eCompileMask is in no allowlist (the identifier itself has never been evaluated live). `obj_query` the one pair on a scratch sheet | CORRECTED: this row used to say "each row names a pair to add" - it assumed a missing member is COUNTED. It is the engine's halt (P21): the first gap ends the session. A pair OUTSIDE the allowlists is never asked any more: `obj_query eNetLabel properties=Name` (zero-risk, run it in any session) answers `""` listed under `properties.unreadable`, no dialog. A box on an admitted pair = drop that type from that name's allowlist |
+| P15 | `GetSchProperty:<prop>:<id>`, `SetSchProperty:<prop>:<id>`, `GetSchVertexProperty:VerticesCount:<id>` | **FATAL-IF-WRONG**, ONE pair per fresh session, human present. Only pairs the 2026.10.25.90 allowlists ADMIT but no live run has proven. THE COMPLETE LIST (shrink the allowlists from this evidence): **eParameterSet** - `Name`, `LineWidth`, `Style`, `Alignment`, `TextColor`, `Justification`, `Width`, `IsSolid`, `IsMirrored`, `Orientation` (port-like AND label-like members on one type, and the class is measured to lack `Text`, the sweep marks `ParamSet.Name` UNKNOWN - P44: the riskiest row, run it first); `Name` on eProbe, eHarnessConnector; `FontId` on ePort, eLabel, eTextFrame, eNote, eCrossSheetConnector, eSheetName, eSheetFileName (since the 2026-10-25 merge ONE list, SchObjectHasFontId's: eNetLabel and eParameter are proven here, ePowerObject and eDesignator were read live upstream, and eSheetEntry, eProbe and eParameterSet are no longer admitted); `LineWidth` on ePort, eBus, eBusEntry, eSheetSymbol, eImage, eTextFrame, eNote, eProbe, eHarnessConnector; `Style` on eSheetEntry, eNoERC, eProbe, eHarnessConnector, eCrossSheetConnector; `IOType` on eSheetEntry, eHarnessConnector; `Alignment` on eSheetEntry, eTextFrame, eNote, eProbe, eHarnessConnector; `TextColor` on every type it admits (ePort, eSheetSymbol, eSheetEntry, eTextFrame, eNote, eProbe, eHarnessConnector); `Justification` on eNetLabel, ePort, ePowerObject, eLabel, eTextFrame, eNote, eProbe, eCrossSheetConnector; `Width` on eSheetEntry, eTextFrame, eNote, eProbe, eHarnessConnector; `IsSolid` on eSheetSymbol, eImage, eTextFrame, eNote, eProbe, eHarnessConnector; `IsMirrored` on eNetLabel, ePowerObject, eParameter, eLabel (P17). eCompileMask is in no allowlist (the identifier itself has never been evaluated live). `obj_query` the one pair on a scratch sheet | CORRECTED: this row used to say "each row names a pair to add" - it assumed a missing member is COUNTED. It is the engine's halt (P21): the first gap ends the session. A pair OUTSIDE the allowlists is never asked any more: `obj_query eNetLabel properties=Name` (zero-risk, run it in any session) answers `""` listed under `properties.unreadable`, no dialog. A box on an admitted pair = drop that type from that name's allowlist |
 | P16 | `Gen_HighlightNet:Selection:<id>`, `Gen_ClearHighlights:Selection:<id>`, `SetSchProperty:Selection:<id>` | **FATAL-IF-WRONG** (a type without `Selection` is the halt, not a count): one session, last. `obj_select` on ePin, eSheetEntry and eParameter; `obj_highlight_net` on a net that reaches a sheet entry; `obj_clear_highlights` on a sheet with parts | No box. A box names a type without `Selection`: skip it in the loops (and in `Gen_CopyObjects`, which sets Selection with no Try) |
 | P17 | `SetSchProperty:IsMirrored:<id>` | **FATAL-IF-WRONG**, one pair per session, last: `obj_modify set='IsMirrored=false'` on eLabel, eNetLabel, eParameter, eParameterSet (the non-component types the allowlist still admits) | No box. eNoERC, eLine, eImage, eTextFrame are no longer written at all (`SchObjectLacksIsMirrored` is an allowlist): zero-risk, nothing touched, and the reply lists `IsMirrored` under `failed` (it used to claim the write). A box on an admitted type = drop it from the allowlist |
 | P18 | `Gen_WriteProjectFile:DM_ProjectFullPath`, `Gen_AddSheet:DM_ProjectFullPath`, `Gen_DeleteSheet:DM_ProjectFullPath`, `Gen_DeleteSheet:FocusedProjectFullPath` | With ONLY free documents open: `proj_add_sheet`, `proj_delete_sheet` with no `project_path`, and a sheet delete that refocuses | 0 = fault-only (expected). If `proj_add_sheet` builds its path from the text `Free Documents`, that is a separate correctness bug |
 | P19 | `Gen_GetConstraintGroups:DM_ConstraintGroupCount`, `Gen_GetConstraintGroups:DM_ConstraintGroups`, `Gen_GetConstraintGroups:DM_ConstraintCount`, `Gen_GetConstraintGroups:DM_Constraints`, `Gen_GetConstraintGroups:DM_Kind`, `Gen_GetConstraintGroups:DM_Data`, `Gen_GetConstraintGroups:DM_TargetKindString`, `Gen_GetConstraintGroups:DM_TargetId` | `sch_get_constraint_groups` on a sheet, then on a sheet that has constraint groups | No dialog (it used to raise on EVERY call: an ISch_Document has no DM_ members). On the second sheet the group and constraint reads had NEVER run before this build: 0 = they answer; each row names a member `IConstraintGroup` / `IConstraint` lacks (one dialog per group or constraint), to drop from the read |
-| P20 | `Gen_PlaceHarnessConnector:HarnessType` | `sch_place_harness_connector` with `harness_type` set, then `obj_query object_type=eHarnessConnector properties=HarnessType` | SETTLED on the .03 run: the write RESOLVES (no box, no count). The stored value was unverified because `GetSchProperty` had no branch; 2026.10.18.02 reads it on eHarnessConnector only. EXPECT the `harness_type` you passed. The read is a getter of the member the write proved, on the same type, but it has never run: run the query LAST in its session (**FATAL-IF-WRONG**) |
-| P21 | (none: the write is gone) | `sch_place_cross_sheet_connector` with `side=left`, then `side=right`, then with no `side` and `net=P21` | SETTLED FATAL on the .03 run (2026-10-12 02:51): "Undeclared identifier: Side", Generic.pas line 8307, inside an open PreProcess, loop dead. The cross-sheet connector publishes no `Side`, and the line before it (`Conn.Text`, through the SAME base-typed local) ran - so the declared type of a local is not what the engine resolves against. 2026.10.18.02: any non-empty `side` is refused `NOT_SCRIPTABLE` by the Python tool (nothing sent) and by the handler (a stale client), before anything is created. ZERO-RISK NOW: no dialog, no count, nothing placed; the no-side call places the connector named P21 |
+| P20 | `Gen_PlaceHarnessConnector:HarnessType` | `sch_place_harness_connector` with `harness_type` set, then `obj_query object_type=eHarnessConnector properties=HarnessType` | SETTLED on the .03 run: the write RESOLVES (no box, no count). The stored value was unverified because `GetSchProperty` had no branch; 2026.10.25.90 reads it on eHarnessConnector only. EXPECT the `harness_type` you passed. The read is a getter of the member the write proved, on the same type, but it has never run: run the query LAST in its session (**FATAL-IF-WRONG**) |
+| P21 | (none: the write is gone) | `sch_place_cross_sheet_connector` with `side=left`, then `side=right`, then with no `side` and `net=P21` | SETTLED FATAL on the .03 run (2026-10-12 02:51): "Undeclared identifier: Side", Generic.pas line 8307, inside an open PreProcess, loop dead. The cross-sheet connector publishes no `Side`, and the line before it (`Conn.Text`, through the SAME base-typed local) ran - so the declared type of a local is not what the engine resolves against. 2026.10.25.90: any non-empty `side` is refused `NOT_SCRIPTABLE` by the Python tool (nothing sent) and by the handler (a stale client), before anything is created. ZERO-RISK NOW: no dialog, no count, nothing placed; the no-side call places the connector named P21 |
 | P22 | `ProcessSchDocObjects:owner-remove` | `obj_delete object_type=eSheetEntry` with a filter matching one entry on a hierarchical sheet | 0 and the entry gone = removal through the owning symbol works; 1 = the owner refused and the document-level fallback ran |
 | P23 | (the rule read is no longer counted; since the `.13.01` merge, which brought upstream's via template and annular-ring work (section 41), the per-via filter and write are: `PCB_NormalizeVias:ViaPassesFilter`, `PCB_NormalizeVias:SetViaGeometry` - a count on either = that via skipped (`filtered`) or `failed`, the rest of the run stands; record the `last_caught`) | **FATAL-IF-WRONG (one unproven identifier left: `Board.FindDominantRuleForObject`, unchanged since before 2026-10-11 and never yet run).** First, zero-risk: `pcb_get_rule_properties name=RoutingVias` and record `rule_kind` and `descriptor`. Then `pcb_normalize_vias` on a scratch board with one free via and only the default RoutingVias rule; then on a board whose only vias are inside a component | Record the reply. Every rule is now asked only `Name` and `Descriptor` (both proven), the values are parsed from the descriptor (`PreferedWidth=` / `PreferedHoleWidth=`, mil or mm), and the kind is the LITERAL 11 (the second 2026-10-11 build read `PreferedWidth` off the dominant `IPCB_Rule`; the first .03 draft read it through an `IPCB_RoutingViaStyleRule` iterator local, with `eRule_RoutingViaStyle` - all never run, for every rule on every board). Numeric descriptor and `rule_kind` 11: `free: 1`, `changed: 1`, `via_rule_values` >= 1, `no_rule_values: 0`, the via at the rule's preferred size and hole. Template descriptor ("Templates Used To Check Via: ..."): `via_rule_values: 0`, `no_rule_values: 1`, `changed: 0` - not a defect, it records that the values must come from elsewhere. `rule_kind` not 11 with `via_rule_values` >= 1 and `no_rule_values: 1` = the literal is wrong (record the number). The component-only board: `free: 0`, nothing read, nothing changed, the board NOT marked modified (it is marked only when `changed` > 0). ORDER MATTERS: the zero-risk `pcb_get_rule_properties` step first, so the ordinal is known before the unproven call runs; the dominant-rule lookup is made only when some rule gave values (a template-form board never makes it), and it runs in a read-only pass BEFORE `PCBServer.PreProcess`, so a halt there leaves no PreProcess open. A box = class (b) on `FindDominantRuleForObject`; it CANNOT tell an unknown identifier from a refused Integer kind argument (the 11 is passed in an Integer variable; Integer-for-enum precedent exists only for other parameters), and either one means the call must change - record the line the Script IDE shows |
 | P24 | `PCB_PlaceEmbeddedBoard:XLocation`, `PCB_PlaceEmbeddedBoard:YLocation`, `PCB_PlaceEmbeddedBoard:DocumentPath`, `PCB_PlaceEmbeddedBoard:RowCount`, `PCB_PlaceEmbeddedBoard:ColCount`, `PCB_PlaceEmbeddedBoard:RowSpacing`, `PCB_PlaceEmbeddedBoard:ColSpacing`, `PCB_PlaceEmbeddedBoard:MirrorFlag` | **FATAL-IF-WRONG**: one `pcb_place_embedded_board` call on a scratch board, last in its session | No box. A box names a member `IPCB_EmbeddedBoard` lacks (it is the halt, not a count); for the locations, position the board with `MoveByXY` from its bounding rectangle instead |
@@ -3754,7 +3772,7 @@ unproven read is gone, so it is an ordinary check.
 The rows below are the 2026-10-12 base-typed sweep's UNKNOWN sites: a
 member reached in normal use on a runtime type it has never run on, the
 SDK suggesting it is present. Nothing was guessed for them in
-2026.10.18.02; each is **FATAL-IF-WRONG**: one per fresh session, LAST,
+2026.10.25.90; each is **FATAL-IF-WRONG**: one per fresh session, LAST,
 human present. Where a box would also leave a transaction open, the row
 says so (after the restart, `app_exit_active_command`).
 
@@ -3762,7 +3780,7 @@ says so (after the restart, `app_exit_active_command`).
 |---|---|---|---|
 | P41 | `PCB_ReplicateLayout` (`Prim.ReplicateWithChildren`, inside `PCBServer.PreProcess`) | `pcb_replicate_layout` on a scratch board whose source channel holds a polygon pour, then (another session) one holding a region, each on an internal net | No box, the pour / region copied. A box = the member is absent on that type: regions go back to the proven `Replicate`, polygons are skipped with a count. A box ALSO leaves the PCB PreProcess open (every PCB save refused until `app_exit_active_command` after the restart) |
 | P42 | `Library.pas SetOwnerPart` on a polygon (`OwnerPartId` / `OwnerPartDisplayMode`, inside PreProcess) | `lib_add_symbol_polygon` on a held scratch symbol | No box, the polygon on the symbol's current part. The polygon class is measured to lack the BASE member `Location`, so a base member is not enough here. A box = move the call before the PreProcess and drop the part stamp for polygons |
-| P43 | `Audit_FindBadConnections` (`TearDrop` on tracks and arcs) | `audit_find_bad_connections` on a scratch routed board | No box. A box = drop the TearDrop test (teardrop copper then joins the candidates) |
+| P43 | `Audit_FindBadConnections` (`TearDrop` on tracks and arcs); since the 2026-10-25 merge also `GetPCBProperty:TearDrop`, gated to tracks, arcs and regions (upstream's geometry map writes and reads `Region.TearDrop`) | `audit_find_bad_connections` on a scratch routed board; then `obj_query object_type=eTrackObject properties=TearDrop` and the same for `eRegionObject` on a board with teardrops | No box. A box = drop the TearDrop test (teardrop copper then joins the candidates), and drop the type the query boxed on from the `GetPCBProperty` gate |
 | P44 | `Gen_GetDirectives` / `Gen_PlaceDirective` (`ParamSet.Name`, `ParamSet.Location` on eParameterSet) | `sch_get_directives` on a scratch sheet with one directive, then (another session) `sch_add_directive` | No box, the directive named. The parameter-set class is already measured to lack `Text`. A box = take the name from the child parameter and drop the `ParamSet.Name` write |
 | P45 | `PCB_AddTestpointsForNetClass` (`IsTestpoint_*` / `IsAssyTestpoint_*` on a VIA, inside PreProcess) | `pcb_add_testpoints_for_net_class` on a scratch board whose class has a via | No box. A box = test pads only; it also leaves the PreProcess open |
 | P46 | `SetSchProperty:UniqueId` (`SetState_UniqueId` with no ObjectId gate) | `obj_modify object_type=eSheetSymbol set='UniqueId=ABCDEFGH'` on a scratch sheet | No box. A box = gate the write to eSchComponent (release step 17's scope) |
@@ -3787,7 +3805,18 @@ this section.
 | P51 | `App_CreateDocument:ShowDocument` (`Client.ShowDocument` on the new document) | `app_create_document` of a scratch schematic into an existing folder while a board is focused | `saved: true`, `focused: true`, the new document in front, the count unchanged. `focused: false` with no count = the request was made and did not take: record it |
 | P52 | `App_SaveDocument:SetModified`, `App_SaveDocument:DoFileSave` (on the server document of an open file) | `app_save_document` on a scratch schematic edited through the bridge, then on one that is open and clean | Both save (`file_age_changed` / `saved` true, the file on disk newer), no dialog, the count unchanged. A script unit (`.pas`) is refused `SCRIPT_UNIT` before either member is reached |
 | P53 | `Gen_SimCfgDocument:SupportsReload` (`SupportsReload` on the open `.simcfg`'s server document, then `DoFileLoad` / `UpdateModifiedDate`, uncounted) | Section 46 item 3: `sim_setup_analysis` on a scratch project whose settings file is open, LAST in a fresh session, human present | `reloaded` true, no "Reload?" prompt, the count unchanged. Unlike P50-P52 these members are called NOWHERE else (the section 1 table's "46, settings reload" row): **FATAL-IF-WRONG**, a halt means one of them is not published on the runtime server document. A count with no halt = `RELOAD_UNSUPPORTED` came back; record the `last_caught` |
-| P54 | `CloseServerDocByObject:CloseDocument` (`Client.CloseDocument` on the named library's server document, then `Client.GetDocumentByPath` again; called by `Lib_ReloadLibrary` and `RefreshSchLibFromDisk` since 2026.10.18.02, D-A-4) | Open a scratch SchLib and a scratch PcbLib, both saved and clean, FOCUS the SchLib, then `lib_reload_library library_path=<the PcbLib>`; then edit the PcbLib through the bridge and call it again | First call: `reloaded: true`, `was_open: true`, `closed: true`, `other_documents_closed: []`, the SchLib still open (`app_list_documents`), the count unchanged. Second call: `MODIFIED`, nothing closed. `Client.CloseDocument` is already called by `App_CloseDocument`, so this is not FATAL-IF-WRONG. A count = the close raised and `closed` reads false (`CLOSE_FAILED`); record the `last_caught` |
+| P54 | `CloseServerDocByObject:CloseDocument` (`Client.CloseDocument` on the named library's server document, then `Client.GetDocumentByPath` again; called by `Lib_ReloadLibrary` and `RefreshSchLibFromDisk` since 2026.10.25.90, D-A-4) | Open a scratch SchLib and a scratch PcbLib, both saved and clean, FOCUS the SchLib, then `lib_reload_library library_path=<the PcbLib>`; then edit the PcbLib through the bridge and call it again | First call: `reloaded: true`, `was_open: true`, `closed: true`, `other_documents_closed: []`, the SchLib still open (`app_list_documents`), the count unchanged. Second call: `MODIFIED`, nothing closed. `Client.CloseDocument` is already called by `App_CloseDocument`, so this is not FATAL-IF-WRONG. A count = the close raised and `closed` reads false (`CLOSE_FAILED`); record the `last_caught` |
+
+Two more UNKNOWN sites arrived with the 2026-10-25 merge: upstream code
+that reads or writes a member on runtime types this build has never run
+it on (tests/test_member_on_base_typed_reference.py names each site).
+Like P41-P49 each is **FATAL-IF-WRONG**: one per fresh session, LAST,
+human present.
+
+| Probe | Site | Setup and call | What settles it |
+|---|---|---|---|
+| P55 | `PCBGeneric.pas` union index: `GetPCBProperty:UnionIndex` (`Obj.UnionIndex` on any primitive), `PCBSetUnion` (`SetState_UnionIndex` on any primitive) and `PCBSetComponentUnion` (`SetState_UnionIndex` on the component, its name and comment texts and EVERY child: pads, tracks, bodies, texts; each inside a `Try`, which does not stop a halt) | On a scratch board with one footprint that carries a 3D body: `obj_query object_type=eComponentBodyObject properties=UnionIndex`, then `obj_modify object_type=eComponentObject` on that one component with `set='UnionIndex=1'`, then the query again | No box, the body reads `1` after the write, the count unchanged. A box = limit the read and the write to the types this probe proved (component, body) and refuse `UnionIndex` on the rest |
+| P56 | Sheet frame members on a schematic: `Gen_SetSheetSize` (`UseCustomSheet`, `UpdateDocumentProperties`, `GetState_CustomX` / `GetState_CustomY`) and `Gen_GetSheetFrame` (the same reads plus `BorderOn`, `GetState_TemplateFileName`); upstream ran them on AD 26.11 (its ExtractTemplate.pas), this build never has | On a scratch sheet: `sch_set_sheet_size` with a custom width and height, then `sch_audit_outside_sheet` (which reads `generic.get_sheet_frame`), then `sch_set_sheet_size` back to a standard style | No box, `use_custom` and the custom size read back as written, `border_on` and `template` present, the count unchanged. A box = drop the custom-size route and the frame fields that halted (report them null) |
 
 ### 39.5 If a dialog does appear
 
@@ -3959,7 +3988,7 @@ folder (99 of 99) and the scripts folder (15 of 15) unchanged at every
 checkpoint, including while the fatal box was up. Counters 0 / 0 / null
 around every step up to P21.
 
-| Item | Verdict | What happened | Since (.12.02, carried into 2026.10.18.02) |
+| Item | Verdict | What happened | Since (.12.02, carried into 2026.10.25.90) |
 |---|---|---|---|
 | Section 38 (incl. N2 step 14, N4 step 15) | PASS | see the section 38 results | unchanged |
 | N1 (P6b both halves, 0-byte and text `.PcbDoc`, 0-byte `.SchDoc` member) | PASS | `BOARD_FILE_UNREADABLE` in ~16 ms, nothing opened; `"pcb": null`; the 0-byte sheet `failed` 1 | unchanged |
@@ -3978,7 +4007,7 @@ around every step up to P21.
 | Sections 2, 7, 9; P8, P9; 39.3 item 1 | NOT RUN | three agents died on a network error before reaching them | run them FIRST (below) |
 | 39.3 items 6, 7; P1; P6 second half; positive control (c) | OWNER-GATED | restarts, a config edit, a read-only folder, an ASCII fixture | owner sessions |
 
-Fixed since the .03 build (in .12.01 / .12.02, carried into 2026.10.18.02),
+Fixed since the .03 build (in .12.01 / .12.02, carried into 2026.10.25.90),
 each with an executed test that fails on the .03 build (`tests/test_live_03_findings.py`), plus the sweep's guard
 (`tests/test_member_on_base_typed_reference.py`):
 
@@ -4007,7 +4036,7 @@ the bridge. The carrier folder unchanged throughout; the scripts folder
 unchanged within each session (its baseline re-taken after the .12.02
 deploy). Counters 0 / 0 / null and no dialog around every step up to P8.
 
-| Item | Verdict | What happened | In 2026.10.18.02 |
+| Item | Verdict | What happened | In 2026.10.25.90 |
 |---|---|---|---|
 | 39.1 (F1 and F2) | PASS | version matched, `caught_exceptions` 0, `cast_errors` 0, `last_caught` null, `in_flight` [], `last_fault` null (the .03 run's dead loop no longer showing) | unchanged |
 | 39.3 item 1 (F1) | PASS, expectation corrected | `app_get_active_document` answered the Home page; `app_get_preferences` `"schematic": null` and the board's settings (the board loaded in the background, the Home page kept focus); `app_exit_active_command` `pcb_post_process: true`, **`sch_post_process: true`**, dirty 0 / 0, no box, no count. True means `SchServer` is registered with no schematic document open | item 1 now expects true; `sch_server_loaded` added to both replies |
@@ -4019,7 +4048,7 @@ deploy). Counters 0 / 0 / null and no dialog around every step up to P8.
 | `last_fault` after the halt | DEFECT (tool) | `when` moved with every failed keep-alive; the guidance was the generic dead-loop text although the box had been seen | **D-TOOL-1**: `first_seen` kept, `last_seen` moves, `found_by` "script_fatal box seen" with its own guidance |
 | P8's remaining calls, P9, sections 2, 7, 9, P32, S1-S3, P23 | NOT RUN | the loop was dead | the next run, below |
 
-### The next live run (2026.10.18.02), in this order
+### The next live run (2026.10.25.90), in this order
 
 Done on the .12.02 build and not repeated: 39.1, 39.3 items 1, 6 and 7,
 P1. Every session starts with a restart of Altium and StartMCPServer.
@@ -4041,7 +4070,8 @@ P1. Every session starts with a restart of Altium and StartMCPServer.
    `pcb_normalize_vias`), human present; the session ends after it.
 3. **Each other FATAL-IF-WRONG probe in a later session of its own, ONE
    per session, human present:** P20's read-back, P10, P15 (one admitted
-   pair), P16, P17, P24, P26, P28, P29, P35, P37-P40, then P41-P49. After
+   pair), P16, P17, P24, P26, P28, P29, P35, P37-P40, then P41-P49, P53,
+   P55 and P56. After
    any box: 39.5 (b), restart, `app_exit_active_command`, next session.
 
 
@@ -4686,6 +4716,12 @@ Scratch documents only.
    report's modified time is now. If the second run reads false, check
    that Create Report File is ticked in the checker before suspecting
    the code.
+   Then `pcb_run_drc` with no arguments: no dialog appears
+   (`app_list_open_dialogs` reads none), `mode` "batch", `drc_confirmed`
+   true, `report_path` in the bridge workspace, the focus unchanged, and
+   the report's Rule Violations total equals `violation_count`. Recorded
+   2026-10-23 on AD 26.11.1.5, scratch board: 0.45 s, 3 violations
+   (Un-Routed Net), report 14 KB HTML.
 2. **Managed (Workspace) placement.** Needs a signed-in Workspace and
    an open sheet that already carries one managed part, since the
    Workspace name is read off open sheets. `lib_get_vault_name`:
@@ -4772,6 +4808,18 @@ documents only.
     ProcName form `Dispatcher.pas>StartMCPServer` is the one Altium's own
     menu files use; if the script does not start, record what Altium
     showed.
+11. **Several sessions.** Two sessions, A on a scratch board and B on a
+    scratch library. B focuses its library; A then reads its board's
+    nets without focusing anything: A's reply carries
+    `session_document.restored` naming the board, and the nets are the
+    board's. Click a third document by hand, then call a tool from A: the
+    board comes back. `app_get_active_document` from B answers what is
+    really in front; with `session=true` it brings the library back.
+    Close A's board and call A again: `session_document.missing`, and the
+    command runs on what is in front. Then, with both sessions sending
+    reads, run `eda-agent relaunch --restart`: neither session reports a
+    timeout, the trace shows `POLL_QUEUED ... restart`, and a session
+    whose server started before the deploy gets `server_outdated` once.
 
 Offline only, already covered by tests: the wheel carries the EasyEDA
 extension source and `eda-agent easyeda-extension path|build` finds or
@@ -4870,7 +4918,7 @@ screen (a temporary one in a single-footprint library, removed again),
 removes each match while its iterator is still open, and shows the
 target again after a temporary holder. `was_current` reports the switch.
 
-MERGED BEHAVIOUR (2026.10.18.02). Upstream parked always and freed each
+MERGED BEHAVIOUR (2026.10.25.90). Upstream parked always and freed each
 removed primitive; the merge keeps carrier-local's park as opt-in
 (`park_current`, which `lib_delete_footprint_primitives` sends by default
 unless `remove_from_board` is set), parks on another footprint first
@@ -4969,6 +5017,144 @@ old. Item 6: two vias, 3 mil both sides from the hole edge, kept through
 save and restart. Item 8: 3 mm and then 2.5 mm read back. Item 9: the
 arc bubble moved from 210 to -210 mil about the part and back, and a
 90..270 degree arc became 270..90. Item 5 by mouse is not run.
+
+## 55. Field-report fixes #74 to #89, and one spelling per file path
+
+New: `lib_add_footprint_via` (#79), `lib_set_via_properties` (#84),
+`lib_count_layer_objects` (#81), `lib_get_library_origin` (#83),
+`keep_layers` on `lib_move_bodies_to_layer` (#82), `paste_top_enabled` on
+`lib_set_pad_properties` (#80), and the grid switches on `obj_set_grid`
+(#78). Fixes, measured on AD 26.11.1.5:
+
+* via tenting and the top paste flag are accepted and silently dropped
+  while the matching expansion follows the rules, and kept once it is
+  manual. Both writers make it manual first, at the value it holds, and
+  say so (`mask_made_manual`, `note`);
+* Altium keys an open document by the path text it was opened with, so
+  `C:/dir\x.PcbLib` and `C:\dir\x.PcbLib` were two open documents. A focus
+  by the other spelling loaded a second copy from disk, the edit went to
+  the stale copy, and the next one raised "Object accessed after being
+  destroyed" in ADVPCB. Every `*path` parameter now arrives with one
+  spelling, and focus checks compare the same way;
+* `Name` on a type without one stopped the bridge (#74); a pin's
+  `Description` wrote the component field and raised (#75); the bare and
+  Altium ellipse names did not resolve (#76); pin text settings were
+  unreachable (#77); a SchLib component query and the pin toggle in a
+  SchLib found nothing (#87, #89);
+* a by-name symbol lookup that missed saved, closed and reopened the
+  SchLib, every time (#88). It now answers from memory only and a miss is
+  `COMPONENT_NOT_FOUND`; `lib_get_components` adds `unsaved_symbols` and
+  `saved_names_not_in_open_library` when the library is open; a part
+  suffix that cannot be reached puts the editor back on part 1.
+
+1. **Path spelling.** Open a PcbLib as `C:/...\x.PcbLib`, add a pad, then
+   `lib_set_pad_properties` with the backslash path: the pad is found,
+   and the open document list holds the library once.
+2. **Tenting.** On a fresh footprint via, `lib_set_via_properties
+   tenting_top=true`: `tenting_top` reads true and `mask_made_manual`
+   true. Then false reads false.
+3. **Paste flag.** On a fresh SMD pad, `paste_top_enabled=false`, then
+   `true`: `lib_get_pad_geometry` reads each, `paste_expansion_source`
+   manual.
+4. **Via lookup.** `units=mm`, a via 0.5 mm from the given point is not
+   found (the window is 1 mil); hole and size written in mm read back.
+5. **Wrong library.** Any of the four new library tools with another
+   library's path: `WRONG_LIBRARY`, nothing changed.
+6. **Pins.** In a SchLib symbol: `obj_modify ePin set=Name=A`,
+   `ShowName=false` and `Description=X` read back; `sch_toggle_pin_visibility
+   show_name=true` reports every pin of the symbol on screen.
+7. **Names that would fault.** `Name` read and written on a net label:
+   empty and `unknown`, and `app_ping` still answers.
+8. **Grid.** `obj_set_grid snap_grid_on=false visible_grid_on=false`, read
+   back by `obj_get_document_info`, then on again.
+9. **Keep layers.** `lib_move_bodies_to_layer layer=Mechanical13
+   keep_layers=Mechanical15`: the body on Mechanical15 stays, the others
+   move; an unknown keep layer refuses and moves nothing.
+10. **No save on a miss.** In an open SchLib, `lib_get_pin_list` on a name
+    that is not there: `COMPONENT_NOT_FOUND` at once, and the file's
+    modified time does not change. A symbol created earlier in the session
+    (not the last one) is still found.
+11. **Unsaved names.** Create a symbol and do not save: `lib_get_components`
+    lists it in `unsaved_symbols`.
+12. **Unreachable part.** `obj_query` with `scope=lib_component:<one-part
+    symbol>@2`: not found, and the editor shows part 1.
+
+Recorded on AD 26.11.1.5 with the three builds before this one, scratch
+documents: items 1 to 9, except the pin `Description` write in item 6
+(the build before this one wrote and read it back; earlier ones
+reported it `unknown` without a fault). Before item 10's fix, the miss
+took 6.6 s and saved the file, while two symbols created earlier in the
+session were found in 0.05 s without a save. Item 1 left one open copy; before the fix the same steps left two
+and the pad was "not found". Items 2 and 3 were also read with the flag
+written back the other way. Nothing here was saved and reopened.
+
+## 56. Fab stack-ups, applied and checked
+
+New: `pcb_check_stackup` and `pcb_apply_stackup_template`, over the
+stack-ups in `design_list_stackups` (JLCPCB's 36, parsed from its
+impedance page). No script change: both use `pcb.get_layer_stackup` and
+`pcb.modify_layer`, which already reads every field back. Use a scratch
+4-layer board and make sure it is the only board open, since both act on
+the board Altium resolves as current.
+
+1. **Dry run.** `pcb_apply_stackup_template template=JLC04161H-7628A`:
+   four calls, the top gap 11.59 mil (0.218 + 0.0764 mm summed) with Dk
+   4.27, and the board unchanged (`pcb_get_layer_stackup` before and after).
+2. **Apply.** The same with `dry_run=false`: `changed` names all four
+   layers, `not_changed` is empty, and `pcb_check_stackup` with the same
+   template reports `matches: true`.
+3. **A real difference.** `pcb_check_stackup template=JLC04161H-3313`:
+   findings for the dielectric heights and Dk, each with the board's and
+   the template's value.
+4. **Wrong count.** On a 2-layer scratch board, apply refuses naming the
+   Layer Stack Manager, and check reports one copper-count finding.
+
+Not yet run live: the documents open on the test machine at the time
+included unsaved boards that were not ours to risk.
+
+## 57. Property layer, decimal mils, fonts and footprint models
+
+Run live on AD 26.11 with upstream `.25.4` on a scratch copy of a two-layer
+round board project, pinging after every step. All passed.
+
+1. **Polygon pour settings (#125).** `obj_query` on `polygon` reads Grid
+   20, TrackSize 8, MinTrack 3, ArcApproximation 0.5, NeckWidthThreshold
+   5, IslandAreaThreshold 2500, PolyHatchStyle 5, PourOver 1, PourIndex,
+   Poured. Grid 5.5, IslandAreaThreshold 1234.5 and a new Name write and
+   read back; PourOver 3 is refused and unchanged.
+2. **Keepout restrictions (#131).** The five restrictions read true on the
+   board-outline keep-out tracks and arcs; IsKeepoutForTrack false, then
+   true, on six tracks; asked of 279 vias the read is blank and the loop
+   stays up.
+3. **Region arcs and net (#119, #126).** `pcb_place_region` with one
+   vertex swept 180 degrees reports `arc_edges` 1 and the shape read back;
+   Net=GND joins the GND net, Net=NO_SUCH_NET is refused, Net= leaves it
+   on no net.
+4. **Decimal corners (#124, #130).** `pcb_place_polygon_rect` at
+   20000.25, 20000.5 to 20960.6299, 20500.75 reads those bounds back
+   exactly.
+5. **Footprint selection (#120).** `lib_select_footprint_primitives` on a
+   PcbLib footprint selects one pad by name, two pads by type, and clears
+   with a set that matches nothing.
+6. **FontId gate.** FontId reads on net labels, power objects, parameters
+   and designators; on wires, pins and components it is reported
+   unreadable instead of raising. On a sheet entry FontId is refused and
+   `TextFontId` reads 1, writes 12 and reads 12.
+7. **Display mode and pin map.** A one-mode part refuses DisplayMode 1 and
+   takes 0. FootprintPinMap reads "(1:1),(2:2)", takes "1:2;2:1" and reads
+   "(1:2),(2:1)", takes the original back, and refuses "1-2".
+8. **Footprint by name.** A placement naming a model the symbol lacks is
+   placed on the library's model and listed in `footprint_issues` with the
+   model it carries; naming that model in lower case counts in
+   `footprints_chosen`; the Footprint key on the placed part is applied
+   through the choice, not a rename.
+9. **One path spelling.** WorkspaceManager:OpenObject with a forward-slash
+   FileName for an open SchLib leaves one copy open (22 documents before
+   and after).
+
+Not run live: a part with several PCB models (the scratch library's parts
+carry one each), so the clear-then-set order and the restore after a
+failed choice are covered only by the source checks.
 
 ---
 

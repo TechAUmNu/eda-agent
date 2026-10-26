@@ -187,7 +187,19 @@ def test_drc_is_confirmed_by_a_fresh_report_not_an_old_one():
     """
     text = _decommented(_src("PCB.pas"))
     assert "Result := FileAge(ReportPath)" in _body(text, "DrcReportAge")
-    body = _body(text, "PCB_RunDRC")
+    whole = _body(text, "PCB_RunDRC")
+    # The batch check (the default) writes its own report in the workspace
+    # and deletes the old one FIRST, so there a report present afterwards
+    # is this run's, and existence is the right test. Only after that
+    # branch's Exit does the dialog route, where an old report proves
+    # nothing, begin.
+    batch_start = whole.index("If Not AllowModal Then")
+    batch_end = whole.index("Exit;", batch_start)
+    batch = whole[batch_start:batch_end]
+    assert batch.index("DeleteFile(ReportPath)") < batch.index(
+        "Board.RunBatchDesignRuleCheck(") < batch.index(
+        "ReportPresent := FileExists(ReportPath)")
+    body = whole[batch_end:]
     run = body.index("RunProcess('PCB:DesignRuleCheck')")
     before = body.index("ReportBefore := DrcReportAge(")
     after = body.index("ReportAfter := DrcReportAge(")
@@ -290,10 +302,53 @@ def test_batch_failures_say_which_item_and_why():
 def test_the_measured_modal_tools_are_declared_modal():
     """Published as silent, each one blocks the bridge on a dialog."""
     from eda_agent.tools.metadata import INTERACTION_OVERRIDES, MODAL
-    for name in ("pcb_run_drc", "proj_export_pdf", "proj_run_output",
+    for name in ("proj_export_pdf", "proj_run_output",
                  "lib_reload_library", "proj_remove_document", "proj_close"):
         assert INTERACTION_OVERRIDES.get(name) == MODAL, (
             f"{name} was measured raising a modal that blocks the bridge")
+
+
+def test_drc_runs_without_its_dialog_unless_asked():
+    """pcb_run_drc's default is the batch check, measured with no dialog;
+    the Design Rule Checker dialog is only reached with allow_modal."""
+    import asyncio
+    from eda_agent.tools import pcb as pcb_tools
+    from eda_agent.tools.metadata import INTERACTION_OVERRIDES, SILENT
+
+    assert INTERACTION_OVERRIDES.get("pcb_run_drc") == SILENT
+    sent = []
+
+    class _Bridge:
+        async def send_command_async(self, command, params=None, timeout=None):
+            sent.append((command, dict(params or {})))
+            return {}
+
+    class _Mcp:
+        def __init__(self):
+            self.tools = {}
+
+        def tool(self, *a, **k):
+            def reg(fn):
+                self.tools[fn.__name__] = fn
+                return fn
+            return reg
+
+    import pytest
+    mp = pytest.MonkeyPatch()
+    try:
+        mp.setattr(pcb_tools, "get_bridge", lambda: _Bridge())
+        mcp = _Mcp()
+        pcb_tools.register_pcb_tools(mcp)
+        asyncio.run(mcp.tools["pcb_run_drc"]())
+        asyncio.run(mcp.tools["pcb_run_drc"](allow_modal=True))
+    finally:
+        mp.undo()
+    assert sent == [("pcb.run_drc", {}), ("pcb.run_drc", {"allow_modal": "true"})]
+    body = _body(_decommented(_src("PCB.pas")), "PCB_RunDRC")
+    batch = body.index("Board.RunBatchDesignRuleCheck(ReportPath, 0, False, False)")
+    assert batch < body.index("RunProcess('PCB:DesignRuleCheck')")
+    assert "WorkspaceDir + 'drc_batch_report.html'" in body, (
+        "the batch report belongs in the workspace, not the project folder")
 
 
 def test_the_press_tool_can_answer_a_handleless_dialog():
@@ -490,17 +545,16 @@ def test_every_bridge_call_watches_for_a_modal_while_it_waits():
     assert every <= 5.0, f"dialog re-check every {every}s, too slow"
 
 
-def test_a_library_lookup_rereads_the_document_as_a_last_resort():
-    """Saving is NOT enough to make a new symbol findable by name.
+def test_an_explicit_refresh_saves_then_rereads_the_document():
+    """A refresh the caller asks for saves, closes and reopens.
 
-    MEASURED in order: lib_create_symbol succeeded and resolved its own
-    symbol inside the creating command; app_save_all reported
-    still_dirty 0 and the saved file provably contained the symbol;
-    every by-name lookup still missed; CloseObject then OpenObject and
-    the name resolved again.
-
-    So the reopen is the step that matters, and it belongs in the
-    save/read path rather than in the caller's head.
+    MEASURED earlier: saving alone did not make a new symbol findable by
+    name; CloseObject then OpenObject did. That reopen used to run on every
+    by-name miss. MEASURED 2026-10-18 on Altium 26.11: symbols created
+    earlier in the session are found in memory, and the automatic reopen
+    saved the user's library on every miss (#88), so the lookup no longer
+    calls it (test_library_lookup_never_saves). The reopen stays for a
+    caller that asks for it, and when it runs it must save first.
     """
     text = _decommented(_src("Library.pas"))
     assert "Function RefreshSchLibFromDisk" in text
@@ -514,11 +568,8 @@ def test_a_library_lookup_rereads_the_document_as_a_last_resort():
         "the focused document, whatever FileName says), then reopens it")
 
     lookup = _body(text, "LookupLibComponent")
-    assert "RefreshSchLibFromDisk" in lookup, (
-        "the lookup must re-read the document when index and walk both "
-        "miss, which is the only thing measured to work")
-    assert "RefreshingLib" in lookup, (
-        "the reopen retry must be guarded against re-entering")
+    assert "RefreshSchLibFromDisk" not in lookup, (
+        "a by-name lookup must not save and reopen the user's library")
 
 
 def test_sim_run_runs_the_simulator_output_and_checks_for_results():
@@ -558,5 +609,7 @@ def test_a_footprint_stamp_counts_only_when_it_reads_back():
         branch = branch[:branch.index("Else")]
         assert "SetPlacedFootprintName(" in branch, (
             f"{func} must write the footprint, not skip it")
-        assert "If SetPlacedFootprintName(" in branch, (
-            f"{func} must count the footprint only on read-back")
+        counted = ("If SetPlacedFootprintName(" in branch
+                   or ("FpOk := SetPlacedFootprintName(" in branch
+                       and "If FpOk Then Inc(" in branch))
+        assert counted, f"{func} must count the footprint only on read-back"

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """COM apartments for UI work run off the event-loop thread.
 
 MEASURED 2026-10-05 on a fresh MCP server process: the IPC batch form's

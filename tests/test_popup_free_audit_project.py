@@ -628,6 +628,11 @@ class _Client:
     def GetDocumentByPath(self, p):
         return _ServerDoc(self, p) if p.upper() in self.open else None
 
+    # upstream's outjob route (2026.10.25 merge) shows the document after
+    # opening it; the focus itself is recorded by _ServerDoc.Focus.
+    def ShowDocument(self, doc):
+        return None
+
     def OpenDocument(self, kind, p):
         self.opened.append(p)
         if p.upper() not in self.open and not self.fs.FileExists(p):
@@ -662,8 +667,11 @@ def _project_world(rec, fs, client, workspace=None):
     ns.update(file_reader())
     main = load(_ALTIUM / "Main.pas", minimum=40)
     utils = load(_ALTIUM / "Utils.pas", minimum=40)
+    # SaveProjectFile / IsScriptProject: upstream's project save
+    # (2026.10.25 merge), which Proj_ImportDocument persists through.
     build(main, ["DocumentPresent", "FileLooksLoadable",
-                 "UnopenedFileUnloadable", "OpenDocumentIfPresent"], ns)
+                 "UnopenedFileUnloadable", "OpenDocumentIfPresent",
+                 "IsScriptProject", "SaveProjectFile"], ns)
     build(utils, ["TargetDirExists"], ns)
     return ns
 

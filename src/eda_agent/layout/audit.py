@@ -719,6 +719,26 @@ def plane_region_audit(board: LayoutBoard, limit: int = LIMIT) -> dict:
 # ---------------------------------------------------------------------------
 
 #: Every check ``run_audits`` knows, by the name a gate uses for it.
+def _loop_audit(board: LayoutBoard, limit: int = LIMIT) -> dict:
+    """Circuit loops (hot, gate drive, decoupling, crystal, feedback, Kelvin)
+    measured on the placement and ranked; advisory, see layout/loop_audit."""
+    from eda_agent.layout.loop_audit import loop_audit
+    return loop_audit(board, limit=limit)
+
+
+def _pad_entry_audit(board: LayoutBoard, limit: int = LIMIT) -> dict:
+    """How traces enter pads: off-axis, off-centre, wider than the pad,
+    crowded, crossing a pad, unbalanced two-pin parts; see
+    layout/pad_entry."""
+    from eda_agent.layout.pad_entry import pad_entry_audit
+    return pad_entry_audit(board, limit=limit)
+
+
+def _rotation_audit(board: LayoutBoard, limit: int = LIMIT) -> dict:
+    from .rotation_audit import rotation_audit
+    return rotation_audit(board, limit=limit)
+
+
 CHECKS: dict[str, Callable[..., dict]] = {
     "placement_audit": placement_audit,
     "connectivity_summary": connectivity_summary,
@@ -726,6 +746,9 @@ CHECKS: dict[str, Callable[..., dict]] = {
     "corner_audit": corner_audit,
     "return_via_audit": return_via_audit,
     "plane_region_audit": plane_region_audit,
+    "loop_audit": _loop_audit,
+    "pad_entry_audit": _pad_entry_audit,
+    "rotation_audit": _rotation_audit,
 }
 
 
@@ -744,15 +767,26 @@ def run_audits(board: LayoutBoard, checks: Optional[list[str]] = None, *,
     unknown = [n for n in names if n not in CHECKS]
     if unknown:
         raise ValueError(f"unknown check(s) {unknown}; known: {list(CHECKS)}")
+    import logging
+    import time
+
     results: dict[str, dict] = {}
+    seconds: dict[str, float] = {}
     for name in dict.fromkeys(names):
+        t0 = time.perf_counter()
         if name == "return_via_audit":
             results[name] = return_via_audit(board, nets, max_distance_mils, limit)
         else:
             results[name] = CHECKS[name](board, limit=limit)
+        seconds[name] = round(time.perf_counter() - t0, 2)
+    # A take's audit of the round LED board took 4.5 min in the server; the
+    # same board read back takes 4.5 s outside it. Logged per check so the
+    # next slow run says where the time went.
+    logging.getLogger(__name__).info("layout audit %s: %s", board.name, seconds)
     return {
         "board": board.name,
         "pass": all(r["pass"] for r in results.values()),
         "summary": {n: {"pass": r["pass"], **r["counts"]} for n, r in results.items()},
         "checks": results,
+        "seconds": seconds,
     }

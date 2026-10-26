@@ -45,7 +45,10 @@ _EDGE = [_tab("Properties", 1), _tab("Comments", 2),
 def _patch(monkeypatch):
     monkeypatch.setattr(panels, "_frame_controls", lambda pid: list(_EDGE))
     monkeypatch.setattr(panels, "available", lambda: True)
-    monkeypatch.setattr(uiauto, "_altium_pid", lambda: (4242, None))
+    # reads_only: upstream's kill-switch exemption for tools that only look
+    # (issue #94, 2026.10.25 merge); app_list_panels passes it.
+    monkeypatch.setattr(uiauto, "_altium_pid",
+                        lambda reads_only=False: (4242, None))
 
 
 def _tools():

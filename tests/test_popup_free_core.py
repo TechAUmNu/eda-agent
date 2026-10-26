@@ -271,7 +271,12 @@ def _board_ns(client, **extra):
 
 def _resolve(client):
     ns = _board_ns(client, GetPCBBoardAnywhere=lambda d: "ANYWHERE")
-    build(_main(), ["LooksAbsolutePath", "DocumentPresent", "PcbPathOpenable",
+    # Upstream's body (2026-10-25 merge): no workspace here, so no board is
+    # "in a project", and the board in front is compared by path key (by
+    # file name for a bare board_path).
+    ns.setdefault("GetWorkspace", None)
+    build(_main(), ["LooksAbsolutePath", "DocPathKey", "DocNameKey",
+                    "DocumentPresent", "PcbPathOpenable",
                     "FileLooksLoadable", "UnopenedFileUnloadable",
                     "ResolvePCBBoard"], ns)
     return ns
@@ -279,11 +284,15 @@ def _resolve(client):
 
 @pytest.mark.parametrize("path", [r"C:\nope.PcbDoc", r"C:\x\sheet.SchDoc",
                                   r"\\srv\gone.PcbDoc"])
-def test_resolve_pcb_board_falls_back_without_opening_what_cannot_be_a_board(
+def test_resolve_pcb_board_answers_nil_without_opening_what_cannot_be_a_board(
         path):
+    """Nothing that cannot be a board is opened. Since the 2026-10-25 merge
+    such a path answers Nil instead of the board in front (upstream's rule:
+    a named board that does not resolve never falls back to another board,
+    which an edit would then have landed on)."""
     client = _Client(on_disk={r"C:\x\sheet.SchDoc", r"C:\x\lib.PcbLib"})
     ns = _resolve(client)
-    assert ns["ResolvePCBBoard"](path) == "ANYWHERE"
+    assert ns["ResolvePCBBoard"](path) is None
     assert client.opened == [], "OpenDocument was handed " + path
 
 
@@ -315,6 +324,31 @@ def test_resolve_pcb_board_keeps_todays_attempt_for_a_bare_board_name():
     ns = _resolve(client)
     assert ns["ResolvePCBBoard"]("b.PcbDoc").FileName == "b.PcbDoc"
     assert ns["ResolvePCBBoard"]("") == "ANYWHERE"
+
+
+class _ResolvingClient(_Client):
+    """Altium opens a bare name as a full path, so the board that comes to
+    the front carries an ABSOLUTE FileName."""
+
+    def __init__(self, resolve):
+        super().__init__()
+        self.resolve = resolve
+
+    def OpenDocument(self, kind, p):
+        self.opened.append((kind, p))
+        return _SrvDoc(self.resolve[p])
+
+
+def test_a_bare_board_name_is_matched_by_name_against_the_absolute_board():
+    """2026-10-25 merge: upstream's last check compared the whole path of
+    the board in front with board_path, which a bare name can never match
+    live (the board's FileName is absolute), so every bare board_path
+    answered Nil. A bare name is compared by file name; a board of another
+    name in front still answers Nil, never that board."""
+    ns = _resolve(_ResolvingClient({"b.PcbDoc": r"C:\work\b.PcbDoc"}))
+    assert ns["ResolvePCBBoard"]("b.PcbDoc").FileName == r"C:\work\b.PcbDoc"
+    ns = _resolve(_ResolvingClient({"b.PcbDoc": r"C:\work\other.PcbDoc"}))
+    assert ns["ResolvePCBBoard"]("b.PcbDoc") is None
 
 
 class _Doc:
@@ -541,11 +575,33 @@ def test_the_purge_count_counts_only_files_that_went(name, pattern):
               out.extend(listing) if pat == pattern else None),
           "DeleteFile": lambda p: (deleted.append(p) or True)
           if "locked" not in p else False,
-          "AppendLog": logged.append, "FormatLogStamp": lambda d: "T"}
+          "AppendLog": logged.append, "FormatLogStamp": lambda d: "T",
+          # Upstream's restart guard (2026-10-25 merge): no restart is
+          # pending here (the restart case is the test below).
+          "FileExists": lambda p: False}
     build(_main(), [name], ns)
     ns[name](0)
     assert len(deleted) == 2
     assert logged and "count=2," in logged[-1], logged
+
+
+def test_a_pending_restart_keeps_the_requests_and_says_so():
+    """Upstream's restart guard (2026-10-25 merge): with maintenance.json in
+    the workspace the startup purge deletes no request, because a restart
+    hands them to the next pump, and the log says why nothing went."""
+    logged: list = []
+    deleted: list = []
+    ns = {"WorkspaceDir": "W\\",
+          "TStringList": SimpleNamespace(Create=_Files()),
+          "FindFiles": lambda d, pat, attrs, rec, out: out.extend(
+              ["W\\a.json"]),
+          "DeleteFile": lambda p: deleted.append(p) or True,
+          "AppendLog": logged.append, "FormatLogStamp": lambda d: "T",
+          "FileExists": lambda p: p == "W\\maintenance.json"}
+    build(_main(), ["CleanupOrphanRequests"], ns)
+    ns["CleanupOrphanRequests"](0)
+    assert deleted == []
+    assert logged and "kept for restart" in logged[-1], logged
 
 
 # ---------------------------------------------------------------------------
@@ -577,7 +633,10 @@ def _ping(**state):
                  LastCaughtRequestId="",
                  # App_Ping lists the open script projects (no workspace
                  # here, so the field is empty and nothing is caught).
-                 GetWorkspace=None)
+                 GetWorkspace=None,
+                 # Upstream's workspace_dir field (issue #94, 2026-10-25
+                 # merge).
+                 WorkspaceDir="W\\")
     ns.update(state)
     build(_app(), ["App_Ping"], ns)
     return json.loads(ns["App_Ping"]("rid"))
@@ -587,6 +646,7 @@ def test_ping_reports_the_caught_exception_count_and_the_last_one():
     quiet = _ping()
     assert quiet["caught_exceptions"] == 0 and quiet["last_caught"] is None
     assert quiet["cast_errors"] == 1 and quiet["pong"] is True
+    assert quiet["workspace_dir"] == "W\\"
     busy = _ping(CaughtExceptionCount=3, LastCaughtStamp="2026-10-11 10:00",
                  LastCaughtWhere="dispatcher",
                  LastCaughtCommand="application.save_all",
@@ -720,6 +780,11 @@ class _CreateClient:
         self.disk: set = set()
         self.focused = ""
 
+    # upstream's ALREADY_OPEN guard (2026.10.25 merge): nothing is open at
+    # the target path here.
+    def GetDocumentByPath(self, p):
+        return None
+
     def OpenNewDocument(self, kind, path, name, reuse):
         return _NewDoc(self)
 
@@ -745,7 +810,10 @@ def _create(params, dirs, seen=None):
                  ResetParameters=lambda: None,
                  AddStringParameter=lambda k, v: None,
                  RunProcess=run_process,
-                 CurrentFocusedDocPath=lambda dummy: client.focused)
+                 CurrentFocusedDocPath=lambda dummy: client.focused,
+                 # upstream's member_of (issue #94, 2026.10.25 merge): no
+                 # workspace here, so no project holds the new file.
+                 ProjectsHoldingJson=lambda p: "")
     build(_utils(), ["TargetDirExists"], ns)
     build(_app(), ["App_CreateDocument"], ns)
     if seen is not None:
@@ -864,7 +932,10 @@ def _dispatch(handler):
           "EndProgress": lambda rid: None, "AppendLog": lambda line: None,
           "FormatLogStamp": lambda d: "T",
           "AppendLogLine": lambda *a: None, "ResetInFlight": lambda d: None,
-          "CurrentCommand": "", "CurrentRequestId": ""}
+          "CurrentCommand": "", "CurrentRequestId": "",
+          # upstream's session focus (2026.10.25 merge): the request names
+          # no session document, so nothing is restored and no note added.
+          "SessionFocus": lambda pin: ""}
     build(_form(), ["ProcessSingleRequest"], ns)
     assert ns["ProcessSingleRequest"](0) is True
     return ns, seen
@@ -916,18 +987,47 @@ def test_selftest_no_longer_runs_stop_server_live():
 
 
 def test_the_stop_server_branch_saves_and_stops():
-    """The Case branch, executed: the offline twin of the removed live step."""
-    body = _app()["HandleApplicationCommand"]
-    m = re.search(r"'stop_server'\s*:\s*(Begin\b.*?\bEnd)\s*;", body, re.S)
-    assert m, "stop_server branch not found in HandleApplicationCommand"
-    src = ("Function StopServerBranch(RequestId : String) : String;\n"
-           "Begin\n" + m.group(1) + ";\nEnd;")
-    saved: list = []
-    ns = {"SaveAllDirty": lambda d: saved.append(d), "Running": True,
-          "BuildSuccessResponse": lambda rid, data: rid + "|" + data}
-    build({"StopServerBranch": src}, ["StopServerBranch"], ns)
-    assert ns["StopServerBranch"]("r1") == 'r1|{"stopped":true}'
-    assert saved == [0] and ns["Running"] is False
+    """The Case branch, executed: the offline twin of the removed live step.
+
+    Since the 2026-10-25 upstream merge the branch calls App_StopServer
+    (upstream's "detach rewrites nothing clean", ported onto this fork's
+    save record): the save pass runs with BOTH skip flags armed, so only a
+    document that reads modified or is on the bridge's record is written;
+    the flags are put back to False before anything else can inherit them;
+    the record entries the walk did not reach are swept; the loop stops.
+    The reply carries the counts."""
+    app = _app()
+    assert re.search(r"'stop_server'\s*:\s*Result\s*:=\s*App_StopServer\("
+                     r"RequestId\)\s*;", app["HandleApplicationCommand"]), (
+        "stop_server is not dispatched to App_StopServer")
+    seen: list = []
+    ns: dict = {"Running": True, "SaveSkipCleanLibs": False,
+                "SaveSkipCleanSheets": False,
+                "IntToStr": lambda n: str(int(n)),
+                "BuildSuccessResponse": lambda rid, data: rid + "|" + data,
+                "WorkspaceDocPaths": lambda d: r"C:\p\a.SchDoc"}
+
+    def save_all_dirty(d):
+        seen.append(("walk", d, ns["SaveSkipCleanLibs"],
+                     ns["SaveSkipCleanSheets"]))
+        ns["SaveAttempts"] = 2
+        ns["SaveSkipped"] = 5
+
+    def sweep(paths):
+        seen.append(("sweep", paths, ns["SaveSkipCleanLibs"],
+                     ns["SaveSkipCleanSheets"]))
+        ns["SaveAttempts"] += 1
+        return 1
+
+    ns.update(SaveAllDirty=save_all_dirty, SaveBridgeRecordSweep=sweep)
+    build(app, ["App_StopServer"], ns)
+    out = ns["App_StopServer"]("r1")
+    assert out == 'r1|{"stopped":true,"edited_saved":3,"clean_left_alone":5}'
+    assert seen == [("walk", 0, True, True),
+                    ("sweep", r"C:\p\a.SchDoc", False, False)]
+    assert ns["Running"] is False
+    assert ns["SaveSkipCleanLibs"] is False
+    assert ns["SaveSkipCleanSheets"] is False
 
 
 # ---------------------------------------------------------------------------

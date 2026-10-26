@@ -198,6 +198,9 @@ def _ns(popups, **extra):
         "RecordCaughtException": caught.append,
         "MilsToCoord": lambda m: int(m) * 10000,
         "CoordToMils": lambda c: int(c) // 10000,
+        # Upstream's decimal-mil conversions (Utils.pas, 2026.10.25 merge).
+        "MilsToCoordF": lambda m: round(float(m) * 10000),
+        "CoordToMilsF": lambda c: c / 10000,
         "StrToFloatDef": lambda s, d: float(s) if s else d,
         "Abs": abs,
         "MkSet": lambda *a: set(a),
@@ -342,6 +345,26 @@ def test_get_property_counts_the_catch_of_an_unproven_connection_member():
                              "GetPCBProperty:Mode"]
 
 
+def test_teardrop_is_asked_only_of_the_objects_teardrops_are_made_of():
+    """Upstream's TearDrop read (2026.10.25 merge) asked Obj.TearDrop of any
+    primitive. The name is resolved on the object at run time (IsKeepoutFor*
+    on a via raised 'Undeclared identifier', AD 25.8), so it is asked only of
+    tracks and arcs (probe P43) and regions (the geometry map's
+    Region.TearDrop); anything else answers '' without the read."""
+    popups = Popups()
+    ns = _get_property_ns(popups)
+    _run(["GetPCBProperty"], ns)
+    for oid in ("ePadObject", "eViaObject", "eTextObject", "eFillObject",
+                "eComponentBodyObject"):
+        obj = Fx(popups, ["TearDrop"], ObjectId=OIDS[oid])
+        assert ns["GetPCBProperty"](obj, "TearDrop") == "", oid
+    assert popups == [], f"TearDrop was asked of {popups}"
+    for oid in ("eTrackObject", "eArcObject", "eRegionObject"):
+        obj = Fx(popups, ObjectId=OIDS[oid], TearDrop=True)
+        assert ns["GetPCBProperty"](obj, "TearDrop") == "true", oid
+    assert popups == [] and ns["_caught"] == []
+
+
 def test_set_property_counts_the_catch_of_the_unproven_region_kind_write():
     popups = Popups()
     ns = _get_property_ns(popups)
@@ -453,8 +476,11 @@ def test_room_rules_report_the_box_and_names_from_the_narrowed_rule():
     other = Fx(popups, RuleKind="clear")
     board = Fx(popups, BoardIterator_Create=_Iter([other, room]),
                BoardIterator_Destroy=lambda i: None)
+    # FloatToStr's spelling (a whole mil reads "1", not "1.0"), so the box
+    # asserted is the reply byte for byte since the decimal-mil merge.
     ns = _ns(popups, eRule_ConfinementConstraint="conf", eConfineIn="in",
-             GetPCBBoardAnywhere=lambda d: board)
+             GetPCBBoardAnywhere=lambda d: board,
+             FloatToJsonStr=lambda f: "%.15g" % float(f))
     _run(["PCB_GetRoomRules"], ns)
     kind, data = ns["PCB_GetRoomRules"]({}, "r1")
     assert kind == "OK" and popups == []

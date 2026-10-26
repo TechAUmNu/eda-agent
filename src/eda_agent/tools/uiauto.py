@@ -21,6 +21,7 @@ nobody reaches one by accident while looking for the other.
 from __future__ import annotations
 
 import asyncio
+import sys
 from typing import Any
 
 from ..ui import controls, dialog_driver, dialog_report, menu, windows
@@ -61,12 +62,18 @@ def _dialog_state(hwnd):
         (c.class_name, c.text, c.enabled, c.visible) for c in window.controls))
 
 
-def _altium_pid():
+def _altium_pid(reads_only: bool = False):
     """(pid, None) or (None, error-dict).
 
     Resolved through the bridge's process scan, NOT through IPC, so it
     still answers while Altium is blocked on a modal. Every tool in
     this module needs it and each used to inline the same six lines.
+
+    ``reads_only`` is for a call that only looks: listing dialogs,
+    reading a panel or window, a screenshot. Those stay available with
+    automation off, as docs/ui-automation.md says. Refusing them too
+    left no way to see why Altium was stuck once input was turned off
+    (issue #94).
     """
     from ..bridge import get_bridge
     from ..ui import windows as _win
@@ -74,12 +81,16 @@ def _altium_pid():
     # THE KILL SWITCH IS CHECKED HERE because every tool in this module
     # calls this first, so one check covers the whole surface. The
     # primitives check again for anything reaching past the tools.
-    if not _win.automation_enabled():
+    if not reads_only and not _win.automation_enabled():
         return None, {"ok": False, "reason": (
             f"UI automation is disabled by {_win.UI_AUTOMATION_ENV}. It is "
             f"on by default; unset that variable, or set it to 1, to allow "
             f"it. See docs/ui-automation.md for what it is for and what it "
             f"can do")}
+
+    # Before any rectangle is read: see windows._make_dpi_aware.
+    if _win.available():
+        _win._make_dpi_aware()
 
     status = get_bridge().get_altium_status()
     # Before the not-running check, because an ambiguous status also has
@@ -89,7 +100,21 @@ def _altium_pid():
                       "candidate_pids": status.get("candidate_pids", [])}
     if not status.get("running") or not status.get("pid"):
         return None, {"ok": False, "reason": "Altium is not running"}
+    _trace_ui_call(sys._getframe(1).f_code.co_name)
     return int(status["pid"]), None
+
+
+def _trace_ui_call(name: str) -> None:
+    """Log a UI tool in bridge_trace.log, which only bridge commands
+    reached before. A hidden Altium window followed a menu walk once, and
+    the FRAME_SHOWN line can only point at what the trace holds."""
+    from ..bridge import get_bridge
+    from ..bridge.altium_bridge import _trace_log
+
+    try:
+        _trace_log(get_bridge().config.workspace_dir, f"UI tool={name}")
+    except Exception:                            # noqa: BLE001
+        pass
 
 
 def _resolve_dialog_control(pid, control_label: str, dialog_title: str,
@@ -169,71 +194,32 @@ def register_uiauto_tools(mcp):
     ) -> dict[str, Any]:
         """Drive Tools > Update From Libraries, ECO included.
 
-        THIS PRESSES BUTTONS IN THE GUI. Update From Libraries has no
-        API: Altium documents it as a dialog, there is no process that
-        launches it, and the operation ends in an Engineering Change
-        Order that only a click can execute. So this matches windows
-        belonging to the Altium process and presses named buttons on
-        them.
-
-        WHAT IT WILL DO AT THE END. The last steps press Validate
-        Changes and then EXECUTE CHANGES on the ECO. That applies every
-        pending change to the design and is not undoable through this
-        channel. Take ``app_checkpoint`` first.
-
-        WHAT IT CANNOT TELL YOU. While the wizard is open Altium's
-        script engine is blocked, so the bridge cannot be asked
-        anything, and an ECO's pending changes sit in a grid that
-        exposes no text to Windows. The reply records the windows and
-        buttons seen; it does NOT contain the change list. Read the
-        Messages panel afterwards for that.
-
-        NOTHING IS SCRIPTED. There is no list of expected dialogs. Each
-        one that appears is read, classified, and answered by the ROLE
-        of the buttons it offers, then the screen is read again. That is
-        deliberate: a scripted version failed on live Altium because the
-        editor legitimately shows dialogs no list contained, and waited
-        for a change order that was never coming while an unlisted modal
-        blocked the session.
-
-        It STOPS rather than guessing when a dialog reports an error,
-        asks a question it was not sent to answer, or offers no button
-        whose meaning is recognised.
-
-        RUN IT DRY FIRST, WHICH IS THE DEFAULT. A dry run reads the
-        first dialog, reports what it is and what it would press, and
-        presses nothing.
-
-        LAUNCHING. ``already_open`` (the default) attaches to a wizard
-        you have opened yourself, which avoids depending on a menu path
-        nobody has verified. ``menu`` asks the bridge to fire the menu
-        first; that request will not return until the wizard closes,
-        which is expected and is why it is issued without waiting.
+        THIS PRESSES BUTTONS IN THE GUI: the wizard has no API. Each
+        dialog is read and answered by the role of its buttons; it STOPS
+        on an error, an unexpected question or unknown buttons. The end
+        presses EXECUTE CHANGES on the ECO, which is not undoable here:
+        take app_checkpoint first, and run dry (the default) first. The
+        reply lists dialogs and buttons, not the change list; read the
+        Messages panel for that.
 
         Args:
-            target: ``schematic`` for Tools > Update From Libraries, or
-                ``pcb`` for Tools > Update From PCB Libraries.
-            launch: ``already_open`` or ``menu``.
-            dry_run: report without pressing. Default true.
-            confirm_execute_eco: must be true for a real run, and it is
-                named for the specific consequence rather than being a
-                general "confirm", because the irreversible part is the
-                ECO and not the wizard.
-            answer_confirmations: answer routine "carry on?" prompts.
-                Altium asks "Continue and create ECO?" before every
-                change order, so with this off the run stops there and
-                can never finish. A confirmation mentioning anything
-                irreversible (delete, overwrite, cannot be undone) is
-                still left alone whatever this is set to.
-            first_step_timeout: seconds to wait for the FIRST dialog to
-                appear. Raise it when launching by menu on a large
-                project.
+            target: "schematic" (Update From Libraries) or "pcb" (Update
+                From PCB Libraries).
+            launch: "already_open" (default; attach to a wizard you
+                opened) or "menu" (open it via the menu bar).
+            dry_run: Report what it would press, press nothing (default).
+            confirm_execute_eco: Must be True for a real run.
+            answer_confirmations: Answer routine "continue?" prompts,
+                needed to finish; prompts about deleting or overwriting
+                are never answered.
+            menu_may_steal_focus: Required for launch="menu", which brings
+                Altium to the front and moves the pointer.
+            first_step_timeout: Seconds to wait for the first dialog.
 
         Returns:
-            Dict with ``ok``, ``dry_run``, ``committed``,
-            ``stopped_for_a_human``, ``finished`` explaining how the run
-            ended, and ``steps``: for every dialog, what it was, what it
-            said, what it offered, what was pressed and WHY.
+            ``ok``, ``dry_run``, ``committed``, ``stopped_for_a_human``,
+            ``finished`` (how it ended) and ``steps`` (each dialog, what it
+            offered, what was pressed and why).
         """
         if target not in _MENUS:
             return {"ok": False, "reason": (
@@ -319,38 +305,21 @@ def register_uiauto_tools(mcp):
         dialog_title: str = "",
         list_only: bool = False,
     ) -> dict[str, Any]:
-        """Read or CHANGE a control inside whatever dialog is open.
+        """Read or change a checkbox, radio, field or list row in the open
+        dialog, found by its label (e.g. ``"Include Variants"``). Buttons
+        are pressed by the dialog driver instead.
 
-        The other half of driving a dialog. Buttons are pressed by the
-        dialog driver; this is for the checkboxes, radios and fields
-        that decide what those buttons will DO.
-
-        FIND BY LABEL, not position. ``"Include Variants"``. Positions
-        move between versions and contexts, captions do not.
-
-        EVERY CHANGE IS VERIFIED. The new state is read back, and a
-        click that silently did nothing is reported as a failure rather
-        than as success. That matters here more than anywhere: a caller
-        that believes an option was applied will go on to press
-        something irreversible.
-
-        IT REFUSES RATHER THAN GUESSING when a control is DISABLED
-        (Altium greys options that do not apply, and clicking one is at
-        best a no-op), and when asked to switch a radio button OFF,
-        which is not a thing a radio does.
-
-        SETTING IS NOT A TOGGLE. Asking for a state the control is
-        already in reports ``changed: false`` and clicks nothing, so
-        calling twice is safe.
+        Every change is read back; a click that did nothing is a
+        failure. It refuses a disabled control and a request to switch
+        a radio off. Asking for the current state clicks nothing
+        (``changed: false``), so repeating a call is safe.
 
         Args:
             control_label: the control's visible label.
             checked: desired state for a checkbox.
             text: desired contents for an edit field.
             select_row: for a list, grid or tree, the row to select by
-                name. Rows are matched by name for the same reason menu
-                items are: positions shift and an index would pick the
-                wrong one the first time the contents changed.
+                name.
             dialog_title: substring to pick one dialog when several are
                 open. Empty uses the first.
             list_only: change nothing, just report every control in the
@@ -430,57 +399,33 @@ def register_uiauto_tools(mcp):
                              may_steal_focus: bool = False,
                              list_only: bool = False,
                              expect_dialog: str = "") -> dict[str, Any]:
-        """Invoke ANY Altium menu command by path, by driving the menu.
+        """Invoke ANY Altium menu command by clicking the real menu. Unlike
+        ``app_run_menu``, which can report success for commands it never
+        ran, this either runs the command or says why not. A last resort:
+        try ``tool_guide`` first.
 
-        Use this when ``app_run_menu`` will not do, which is more often
-        than it looks: that tool reports success for commands it never
-        invokes, because the process ids it dispatches cannot report
-        failure and some of them are not real (task #83). This one
-        clicks the actual menu, so a command either runs or the reply
-        says why not.
-
-        PATH BY NAME. ``"Design|Rules..."``, ``"Tools|Update From
-        Libraries..."``. Accelerator markers and a trailing ellipsis are
-        ignored, so ``"Design|Rules"`` works too. Nested submenus work
-        by adding levels. Names are used rather than positions because
-        entries move with context and separators are invisible.
-
-        IT NEEDS THE FOREGROUND. Altium has no Win32 menu and its
-        DevExpress bars expose no working accessible action, so the only
-        thing that opens them is real input: this brings Altium to the
-        front and briefly moves the pointer, putting it back afterwards.
-        Every other press in this package is addressed to a window
-        handle and depends on none of that, which is why this one is
-        gated behind ``may_steal_focus`` and never happens by default.
-
-        THE MENU BAR IS PER EDITOR. With a board focused you get the PCB
-        menus, with a schematic the schematic ones. Focus the matching
-        document first, or the reply will tell you the item was not
-        there and list what was.
-
-        WHAT HAPPENS NEXT IS NOT THIS TOOL'S JOB. Many commands open a
-        dialog. Read it with ``app_list_open_dialogs``; the dialog
-        drivers handle the rest.
+        Path by name, e.g. "Design|Rules" (accelerators and "..."
+        ignored). Give the English names on any language: a translated
+        Altium's own captions are matched from its install, and the
+        reply's ``ui_language`` says which it was. It needs the
+        foreground: it brings Altium forward and
+        briefly moves the pointer, so ``may_steal_focus`` must be True.
+        The menu bar depends on the focused editor, so focus the right
+        document first. Read any dialog it opens with
+        ``app_list_open_dialogs``.
 
         Args:
-            menu_path: pipe-separated path, top level first.
-            may_steal_focus: required to actually click anything.
-            list_only: do not invoke. Reports the top-level menus
-                currently on screen, which is the way to find out what
-                this editor context offers.
-            expect_dialog: part of the title of the dialog the command
-                should open. Then ``ok`` means that dialog appeared; any
-                other dialog, or none, fails and names what did open.
+            menu_path: Pipe-separated path, top level first.
+            may_steal_focus: Required to click anything.
+            list_only: Only list the top-level menus on screen.
+            expect_dialog: Part of the title the command should open;
+                ``ok`` then means that dialog appeared.
 
         Returns:
-            Dict with ``ok`` and ``opened`` (titles of dialogs that
-            appeared); on failure ``reason`` and ``offered`` listing what
-            that level actually contained. A path that leaves the menu
-            open (it ended at a submenu, or the click did not land) is a
-            failure: no command ran. A level that reads empty, or without
-            the entry asked for, is walked once more before failing
-            (``retried``); ``first_read`` then says what the first read
-            found, and both reads are in ``reason`` when both fail.
+            ``ok``, ``opened`` (dialog titles); on failure ``reason`` and
+            ``offered`` (what that level contained). A path ending at a
+            submenu is a failure. ``retried`` and ``first_read`` show a
+            level read twice.
         """
         if not menu.available():
             return {"ok": False, "reason": (
@@ -513,47 +458,31 @@ def register_uiauto_tools(mcp):
                 "and briefly moving the pointer. Pass "
                 "may_steal_focus=True if that is acceptable now.")}
 
-        return await loop.run_in_executor(
+        out = await loop.run_in_executor(
             None, lambda: menu.click_path(pid, menu_path, expect_dialog=expect_dialog))
+        if isinstance(out, dict) and menu.ui_language():
+            out["ui_language"] = menu.ui_language()
+        return out
 
     @mcp.tool()
     async def app_list_open_dialogs() -> dict[str, Any]:
         """What Altium has on screen, what it says, and if it is stuck.
 
-        THE TOOL TO REACH FOR WHEN THE BRIDGE GOES QUIET. A silent
-        bridge looks identical whether Altium is showing a modal, busy
-        compiling, or dead. This answers it directly: ``blocked`` is
-        read from the main window being disabled, which is what Windows
-        does while a modal is up, and it works precisely when no other
-        tool can because it does not use the bridge at all. It reads the
-        Win32 process, so a blocked Altium answers it normally.
+        The tool for a quiet bridge: it reads the Windows process, not
+        the bridge, so it answers while a modal blocks everything else.
+        ``blocked`` means the main window is disabled; ``blocked: false``
+        does not prove the UI is alive (a crashed UI read that way).
 
-        ``blocked: false`` ONLY MEANS THE MAIN WINDOW IS NOT DISABLED. It
-        does not mean the UI is alive. After Altium's UI crashed with the
-        process still running, this was reported reading a live pid,
-        blocked false and no dialogs. When the bridge is silent and this
-        says not blocked, look at the screen before calling it a livelock.
-
-        FOR EACH DIALOG you get the caption, the message text, every
-        button with its enabled state, and a ``kind``:
-
-        * ``error`` / ``warning`` / ``confirm`` -- something went wrong
-          or a decision is being asked. These set ``needs_a_human``.
-        * ``nothing_to_do`` -- the operation completed with no work, for
-          instance "Comparator Results (No Differences)" when the
-          schematic and board already agree. A success, not a failure.
-        * ``engineering_change_order`` -- an ECO awaiting Validate and
-          Execute.
-        * ``wizard`` / ``progress`` / ``unknown``.
-
-        WHAT IT STILL CANNOT READ. Grids and owner-drawn lists hold
-        their content internally and expose no window text, so an ECO's
-        pending-change list is not readable. That is reported per dialog
-        as ``has_unreadable_content`` rather than being passed off as a
-        dialog with nothing in it. Read the Messages panel for the
-        change list.
-
-        Reads only. Presses nothing.
+        Per dialog: caption, message, buttons and a ``kind``: ``error``,
+        ``warning`` or ``confirm`` (set ``needs_a_human``),
+        ``nothing_to_do`` (a success with no work, e.g. "No
+        Differences"), ``engineering_change_order``, ``wizard``,
+        ``progress`` or ``unknown``. Grids and owner-drawn lists can't be
+        read (``has_unreadable_content``). Presses nothing.
+        ``needs_a_human`` means no driver answers it blindly: read the
+        message and press the answer the task calls for with
+        app_press_dialog_button. Ask the user only when the choice is
+        theirs, never to click a button for you.
 
         Returns:
             Dict with ``blocked``, ``dialog_count``, ``dialogs``,
@@ -564,52 +493,41 @@ def register_uiauto_tools(mcp):
                 "pywin32 is not importable, so no dialog can be inspected "
                 "from this host")}
 
-        pid, problem = _altium_pid()
+        pid, problem = _altium_pid(reads_only=True)
         if problem:
             return problem
 
         return dialog_report.report(pid)
 
     @mcp.tool()
-    async def app_press_dialog_button(button_caption: str,
+    async def app_press_dialog_button(button_caption: str = "",
                                       dialog_title: str = "",
-                                      allow_irreversible: bool = False
+                                      allow_irreversible: bool = False,
+                                      button: str = "",
                                       ) -> dict[str, Any]:
         """Press ONE named button in an open Altium dialog.
 
-        The missing primitive. Dialogs could be listed, read and their
-        checkboxes set, but the only code that pressed anything was
-        buried inside a single task-specific driver, so answering an
-        arbitrary dialog meant writing a script.
-
-        BY CAPTION, not position. Accelerator ampersands and a trailing
-        ellipsis are ignored, so "Report Changes" finds
-        "&Report Changes...".
-
-        IT WORKS WHILE ALTIUM IS BLOCKED, because it addresses the
-        button's window handle over Win32 and never touches the bridge.
-        That is the whole point: when a modal has the scripting engine
-        stuck, this is what gets it unstuck.
-
-        IRREVERSIBLE PRESSES ARE GATED. A caption that commits a change
-        order or applies a wizard is refused unless
-        ``allow_irreversible`` is set, so a driver walking an unfamiliar
-        dialog cannot execute one by reflex.
-
-        For a whole sequence rather than one press, use
-        ``app_drive_dialogs``, which decides each step from what is on
-        screen instead of from a script.
+        By caption, ignoring ampersands and a trailing ellipsis ("Report
+        Changes" finds "&Report Changes..."). It works while a modal
+        blocks the bridge, since it presses through Win32. A caption that
+        commits a change order or applies a wizard needs
+        ``allow_irreversible``. For a sequence use ``app_drive_dialogs``.
 
         Args:
             button_caption: the visible caption.
             dialog_title: substring picking one dialog when several are
                 open. Empty uses the first.
             allow_irreversible: permit a committing press.
+            button: the same as ``button_caption``, the name clients reach
+                for first.
 
         Returns:
             ``ok``, the dialog and button actually matched, and whether
             the dialog closed afterwards.
         """
+        button_caption = button_caption or button
+        if not button_caption:
+            return {"ok": False, "reason": "give the button's caption"}
         pid, problem = _altium_pid()
         if problem:
             return problem
@@ -777,23 +695,14 @@ def register_uiauto_tools(mcp):
                                 budget: float = 300.0) -> dict[str, Any]:
         """Answer dialogs reactively until none is left.
 
-        The reactive driver, which existed but was reachable only
-        through the one wizard tool that used it. It reads whatever is
-        on screen, classifies it, decides a press from that, and
-        repeats. There is no scripted sequence, so a dialog appearing in
-        a different order, or not at all, is handled rather than
-        breaking a plan.
+        Reads what is on screen, classifies it, decides a press and
+        repeats, so dialogs in any order are handled. It STOPS on a
+        dialog it cannot classify or one that needs a person. Dry run by
+        default: it reports each decision and presses nothing.
 
-        IT STOPS RATHER THAN GUESSING on a dialog it cannot classify,
-        and on anything that needs a human. ``dry_run`` is the DEFAULT:
-        it reports every decision and presses nothing, which is how to
-        see what a sequence would do before letting it.
-
-        THE TWO GATES ARE SEPARATE ON PURPOSE. ``allow_confirm`` answers
-        a yes/no question that moves an operation along;
-        ``allow_commit`` permits the press that changes the design.
-        Named for their consequences, because a caller reaching for one
-        rarely means the other.
+        Two separate gates: ``allow_confirm`` answers a yes/no that moves
+        an operation along; ``allow_commit`` permits the press that
+        changes the design.
 
         Args:
             intent: "proceed" to carry the operation forward, or
@@ -833,25 +742,13 @@ def register_uiauto_tools(mcp):
                                  wait_first: float = 30.0,
                                  budget: float = 300.0,
                                  expect_dialog: str = "") -> dict[str, Any]:
-        """Invoke a menu command AND answer the dialogs it raises.
+        """Invoke a menu command and answer the dialogs it raises, in one
+        call (a modal blocks the scripting engine, so the two cannot be
+        separate bridge calls). Prefer an API tool when one exists.
 
-        The composite, and usually the one to reach for. Firing a menu
-        command that opens a modal blocks Altium's scripting engine, so
-        the two halves cannot be separate bridge calls: the second would
-        never be answered. Both halves here are Win32, so they run in
-        one call and the modal is no obstacle.
-
-        Doing this by hand meant arming a watcher process before firing
-        the command, which is not something a caller should have to
-        assemble.
-
-        THE GATES ARE THE DIALOG DRIVER'S. ``allow_confirm`` defaults ON
-        because a command invoked deliberately usually needs its "yes,
-        go ahead" answered, while ``allow_commit`` defaults OFF, so a
-        change order is presented rather than executed. ``dry_run``
-        defaults OFF here, unlike ``app_drive_dialogs``: naming a
-        command to run and having nothing happen is not what the caller
-        asked for.
+        The gates are app_drive_dialogs': confirmations are answered by
+        default, a design-changing press (a change order) is not, and
+        unlike app_drive_dialogs ``dry_run`` defaults off.
 
         Args:
             menu_path: pipe-separated, for example
@@ -933,7 +830,8 @@ def register_uiauto_tools(mcp):
         """
         from ..ui import panels
 
-        pid, problem = _altium_pid()
+        # offered_too clicks a menu, so only the plain listing is a read.
+        pid, problem = _altium_pid(reads_only=not offered_too)
         if problem is not None:
             return problem
         if not panels.available():
@@ -1014,7 +912,7 @@ def register_uiauto_tools(mcp):
         """
         from ..ui import panels
 
-        pid, problem = _altium_pid()
+        pid, problem = _altium_pid(reads_only=True)
         if problem is not None:
             return problem
         return panels.read_panel(pid, name)
@@ -1108,25 +1006,17 @@ def register_uiauto_tools(mcp):
     ) -> dict[str, Any]:
         """Type into one cell of a grid, and read it back.
 
-        ALTIUM'S RULE AND PROPERTY EDITORS TAKE THEIR INPUT THIS WAY.
-        Selecting a row was possible before; changing anything in it was
-        not.
-
-        A grid cell is not an edit control until it is being edited, so
-        the cell is activated first and the text goes to whatever editor
-        the grid puts there. The value is then read back off the CELL,
-        because the editor disappears when the edit commits.
+        How Altium's rule and property editors take input. The cell is
+        activated, typed into, and read back from the cell itself.
 
         Args:
             control_label: the grid's label.
             row: the row, matched by name.
-            column: the column name, or a numeric index. These grids
-                leave many cells unnamed, and an index is then the only
-                handle there is.
+            column: the column name, or an index for unnamed cells.
             text: what to type.
             dialog_title: which dialog, when several are open.
-            list_only: report the row's cells and change nothing. Worth
-                doing first, since it shows which columns have names.
+            list_only: report the row's cells and change nothing; do it
+                first to see the column names.
 
         Returns:
             ``{"ok": true, "row": ..., "column": ..., "value": ...}``,
@@ -1161,10 +1051,11 @@ def register_uiauto_tools(mcp):
             "ctrl+s"              a chord
             "tab tab enter"       three in order
 
-        Modifiers: ctrl, alt, shift. Keys: enter, escape, tab, space,
-        backspace, delete, the arrows, home, end, pageup, pagedown and
-        F1 to F12. An unknown name is refused and the known ones listed,
-        rather than sent as nothing.
+        Modifiers: ctrl, alt, shift. Keys: letters a to z, digits 0 to
+        9, enter, escape, tab, space, backspace, delete, insert, the
+        arrows, home, end, pageup, pagedown and F1 to F12. An unknown
+        name is refused and the known ones listed, rather than sent as
+        nothing. For literal text use app_type_text.
 
         THIS GOES WHEREVER FOCUS IS. Establish focus first, with
         app_click_menu or app_open_panel, and check the result
@@ -1259,7 +1150,7 @@ def register_uiauto_tools(mcp):
         a menu dropped as a result, since many toolbar buttons open one
         rather than acting.
         """
-        pid, problem = _altium_pid()
+        pid, problem = _altium_pid(reads_only=not name)
         if problem is not None:
             return problem
         if name:
@@ -1280,7 +1171,7 @@ def register_uiauto_tools(mcp):
         """
         from ..ui import controls as ctl
 
-        pid, problem = _altium_pid()
+        pid, problem = _altium_pid(reads_only=not name)
         if problem is not None:
             return problem
         open_dialogs = windows.dialogs(pid)
@@ -1374,7 +1265,7 @@ def register_uiauto_tools(mcp):
 
         from ..ui import ocr
 
-        pid, problem = _altium_pid()
+        pid, problem = _altium_pid(reads_only=True)
         if problem is not None:
             return problem
         if not ocr.available():
@@ -1400,9 +1291,13 @@ def register_uiauto_tools(mcp):
             from ..config import get_config
             path = os.path.join(str(get_config().workspace_dir),
                                 f"altium_{int(_time.time())}.png")
+        folder = os.path.dirname(os.path.abspath(path))
+        created_folder = not os.path.isdir(folder)
+        os.makedirs(folder, exist_ok=True)
         if not ocr.capture_png(target, path):
             return {"ok": False, "reason": "capture failed", "path": path}
         return {"ok": True, "path": path, "hwnd": target,
+                "created_folder": created_folder,
                 "note": "read the file to look at it"}
 
     @mcp.tool()
@@ -1449,7 +1344,7 @@ def register_uiauto_tools(mcp):
         to be safe, which is the pattern this layer spent the day
         removing everywhere else.
         """
-        pid, problem = _altium_pid()
+        pid, problem = _altium_pid(reads_only=True)
         if problem is not None:
             return problem
         if not windows.available():
@@ -1471,7 +1366,7 @@ def register_uiauto_tools(mcp):
         because reading it needs no click; menu contents are not,
         because opening one does.
         """
-        pid, problem = _altium_pid()
+        pid, problem = _altium_pid(reads_only=True)
         if problem is not None:
             return problem
         if not windows.available():
@@ -1541,7 +1436,7 @@ def register_uiauto_tools(mcp):
         """
         from ..ui import uia
 
-        pid, problem = _altium_pid()
+        pid, problem = _altium_pid(reads_only=True)
         if problem is not None:
             return problem
         if not uia.available():
@@ -1575,20 +1470,11 @@ def register_uiauto_tools(mcp):
                                  expand: str = "") -> dict[str, Any]:
         """Press, set or expand an element through UI Automation patterns.
 
-        PATTERNS ARE NOT A SIMULATED CLICK. MSAA offers little beyond a
-        default action, which is why the rest of this layer falls back to
-        moving a real mouse. UIA exposes what a control actually
-        implements: Invoke to press, Value to set text, ExpandCollapse to
-        open a node. Those are supported operations, so they move no
-        pointer, take no focus, and cannot land on whatever happens to be
-        under the cursor.
-
-        That makes this the right tool for a WPF dialog, and for anything
-        you want done while the user keeps working.
-
-        A CLIENT THAT DOES NOT LIST THIS TOOL can still reach it through
-        the dispatcher: ``tool_invoke(name="app_invoke_element",
-        arguments={"name": "OK", "dialog_title": "Silkscreen"})``.
+        Not a simulated click: Invoke presses, Value sets text and
+        ExpandCollapse opens a node, so no pointer moves, no focus is
+        taken and nothing under the cursor is hit. The right tool for WPF
+        dialogs and for work while the user keeps working. A client that
+        does not list it can call it through ``tool_invoke``.
 
         Args:
             name: the element's name or automation id. A Button of that

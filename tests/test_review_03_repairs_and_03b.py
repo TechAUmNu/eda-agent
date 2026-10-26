@@ -431,7 +431,7 @@ def _close_world(extra_member=None):
         BuildErrorResponse=lambda rid, code, msg: {"error": code})
     _with(w, ["IsScriptUnitDoc", "IsSaveableDesignDoc", "SaveOneDocByDocRef",
               "SaveProjectMembers", "AgesForPaths", "CountChangedAges",
-              "BridgeRecordKeysIn"])
+              "BridgeRecordKeysIn", "SaveProjectFile"])
     build(_PROJECT, [n for n in (
         "DirtyProjectMembers", "ClearDocModifiedByPath", "DiscardProjectMembers",
         "PipePathsToJsonArray", "OpenProjectPaths", "PathsGoneOtherThan",

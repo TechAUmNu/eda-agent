@@ -678,7 +678,8 @@ class AltiumSimulator:
         # spin forever -- reporting an error response, so the caller
         # learns the reason rather than waiting out the deadline.
         try:
-            content = request_path.read_text(encoding="utf-8")
+            # utf-8-sig, as LoadFromStream does: the bridge writes a mark.
+            content = request_path.read_text(encoding="utf-8-sig")
         except (IOError, OSError, UnicodeDecodeError) as exc:
             key = str(request_path)
             attempts = self._read_failures.get(key, 0) + 1
@@ -1318,6 +1319,20 @@ class AltiumSimulator:
                                              "No schematic library is active")
             return _build_success_response(rid, '{"success":true}')
 
+        elif action == "add_symbol_polygon":
+            # Mirrors Lib_AddSymbolPolygon: a library must be active and
+            # the vertex list must hold at least three points.
+            if not self.lib_has_schlib:
+                return _build_error_response(rid, "NO_SCHLIB",
+                                             "No schematic library is active")
+            coords = [c for c in str(params.get("vertices", "")).split(",")
+                      if c.strip()]
+            if len(coords) < 6:
+                return _build_error_response(
+                    rid, "INVALID_PARAMS", "At least 3 vertices are required")
+            return _build_success_response(
+                rid, '{"success":true,"vertices":%d}' % (len(coords) // 2))
+
         elif action == "add_symbol_line":
             if not self.lib_has_schlib:
                 return _build_error_response(rid, "NO_SCHLIB",
@@ -1355,9 +1370,33 @@ class AltiumSimulator:
             if not model_name:
                 model_path = params.get("model_path", "")
                 model_name = model_path.rsplit("\\", 1)[-1] if "\\" in model_path else model_path.rsplit("/", 1)[-1]
+            bodies = self.__dict__.setdefault("lib_bodies", {})
+            fp = params.get("component_name", "")
+            bodies[fp] = bodies.get(fp, 0) + 1
             return _build_success_response(
                 rid,
                 '{"success":true,"model":"' + _escape_json_string(model_name) + '"}'
+            )
+
+        elif action == "delete_footprint_primitives":
+            # Mirrors Lib_DeleteFootprintPrimitives for 3D bodies, the only
+            # kind the simulator tracks: confirm required, then matched,
+            # removed and leftover counted.
+            fp = params.get("footprint_name", "")
+            if str(params.get("confirm", "")).lower() != "true":
+                return _build_error_response(rid, "CONFIRM_REQUIRED",
+                                             "Pass confirm=true")
+            kind = str(params.get("object_type", "")).lower().replace("_", "")
+            bodies = self.__dict__.setdefault("lib_bodies", {})
+            matched = bodies.get(fp, 0) if kind in ("componentbody", "body") else 0
+            if matched:
+                bodies[fp] = 0
+            return _build_success_response(
+                rid,
+                '{"library":"","footprint":"' + _escape_json_string(fp) + '",'
+                '"matched":' + str(matched) + ',"removed":' + str(matched) + ','
+                '"leftover":0,"hint":"","examined":' + str(matched) + ','
+                '"layers":[],"pads_included":false,"was_current":false}'
             )
 
         elif action == "get_components":
@@ -1640,6 +1679,15 @@ class AltiumSimulator:
             return _build_success_response(
                 rid, '{"action":"' + zoom_action + '"}'
             )
+        elif action == "zoom_to_xy":
+            # Gen_ZoomToXY: x and y required; the reply echoes them.
+            x, y = params.get("x", ""), params.get("y", "")
+            if x == "" or y == "":
+                return _build_error_response(
+                    rid, "MISSING_PARAMS", "x and y parameters are required")
+            return _build_success_response(
+                rid, '{"success":true,"x":' + str(x) + ',"y":' + str(y)
+                + ',"context":"pcb"}')
         else:
             return _build_error_response(
                 rid, "UNKNOWN_ACTION",

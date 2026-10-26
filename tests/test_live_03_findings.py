@@ -93,7 +93,8 @@ def _common(extra=None):
     ns.update(_NB)
     if extra:
         ns.update(extra)
-    build(_MAIN, ["LooksAbsolutePath", "DocPathKey", "DocNameKey"], ns)
+    build(_MAIN, ["LooksAbsolutePath", "DocPathKey", "DocNameKey",
+                  "CanonicalPathValue"], ns)
     return ns
 
 
@@ -154,6 +155,12 @@ def _cross_sheet(params):
     ns = _common({
         "SchServer": Server(), "ExtractJsonValue": lambda p, k: params.get(k, ""),
         "MilsToCoord": lambda m: m, "Point": lambda x, y: (x, y),
+        # Upstream's decimal mils (2026.10.25 merge): x / y are parsed as
+        # decimals and echoed through FloatToJsonStr.
+        "StrToFloatDef": lambda s, d: float(s) if str(s).strip() else d,
+        "MilsToCoordF": lambda m: m,
+        "FloatToJsonStr":
+            lambda v: str(int(v)) if float(v) == int(v) else repr(float(v)),
         "SchRegisterObject": lambda d, o: None,
         "MarkDocDirtyByPath": lambda p: None,
         "eCrossSheetConnector": 33, "eCreate_Default": 0,
@@ -356,6 +363,28 @@ def test_the_allowed_pairs_still_read_and_write():
     assert get(wire, "VerticesCount") == "2"
     assert put(port, "Name", "Q") == 1 and port.Name == "Q"
     assert ctx.modals == [] and ctx.caught == []
+
+
+def test_one_list_governs_name_and_fontid_never_reaches_a_sheet_entry():
+    """2026.10.25 merge: ours' SchPropAbsentOn and upstream's
+    SchObjectHasName both gated Name, so only their INTERSECTION was asked
+    and the declared PS / PR / HC (ours) and DE (upstream) went unreadable.
+    The Name branch now delegates, so the two can never disagree. FontId
+    on a sheet entry stopped the polling loop (upstream, AD 25.8), so ours'
+    FontId list no longer admits it."""
+    ctx, ns = _prop_ns()
+    absent, has = ns["SchPropAbsentOn"], ns["SchObjectHasName"]
+    for t in sorted(ctx.ids):
+        o = SchObj(ctx, t)
+        assert absent(o, "Name") is (not has(o)), t
+    for t in ("ePort", "ePin", "eSheetEntry", "eParameter", "eParameterSet",
+              "eProbe", "eHarnessConnector", "eDesignator"):
+        assert has(SchObj(ctx, t)), t
+    for t in ("eNetLabel", "eLabel", "eNote", "eTextFrame", "eSheetName",
+              "eSheetFileName", "eSchComponent"):
+        assert not has(SchObj(ctx, t)), t
+    assert absent(SchObj(ctx, "eSheetEntry"), "FontId") is True
+    assert ctx.modals == []
 
 
 class _Unregistered:

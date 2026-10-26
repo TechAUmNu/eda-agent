@@ -49,7 +49,8 @@ them), and each test fails on 3aca481.
 * PCB_NormalizeVias reads no constraint member off any rule (values from
   the Descriptor; tests/test_popup_free_pcb.py has the full set).
 * A static guard: no unit reads, copies or passes the CurrentSchComponent
-  GETTER (only setters and Nil compares remain), and no IPCB_Rule-typed
+  GETTER (only setters, Nil compares and pointer compares against a bare
+  reference remain), and no IPCB_Rule-typed
   variable, parameter or rule-returning call is read past the base
   interface.
 """
@@ -113,6 +114,18 @@ class EditLib(SchLib):
     def GraphicallyInvalidate(self):
         self.events.append("lib_invalidate")
 
+    def RegisterSchObjectInContainer(self, obj):
+        """Upstream's library route (AddLibSymbolPrim, the symbol on
+        screen): the object is filed on the editor's CURRENT component, and
+        MEASURED on AD 26.11 its owner is overwritten with the part on
+        screen (1 here), so the helper's put-back is what the owner tests
+        see. Only ever reached when the current component compared equal to
+        the narrowed target, so it is a narrowed NComp here."""
+        cur = self.CurrentSchComponent
+        cur.events.append(f"add:{cur.LibReference}")
+        cur.added.append(obj)
+        obj.OwnerPartId = 1
+
 
 class NComp(Comp):
     """A NARROWED component (the factory, the index or the iterator handed
@@ -167,9 +180,12 @@ class Server:
         self.destroyed = []
 
     def SchObjectFactory(self, kind, mode):
+        # The style fields a factory object starts with: the symbol shape
+        # replies read them back (SchRectStyleJson, SchPolygonStyleJson).
         p = Prim(kind=kind, I_ObjectAddress=f"prim{len(self.made)}",
                  Location=SimpleNamespace(X=0, Y=0),
-                 Corner=SimpleNamespace(X=0, Y=0), Vertex={})
+                 Corner=SimpleNamespace(X=0, Y=0), Vertex={},
+                 Color=0, AreaColor=0, LineWidth=0, IsSolid=False)
         self.made.append(p)
         return p
 
@@ -212,7 +228,12 @@ _HANDLERS = {
 _LIB_HELPERS = ["SetOwnerPart", "OwnerPartIdOf", "OwnerDisplayModeOf",
                 "NoEditComponentMessage", "ResolveEditLibComponent",
                 "MarkLibDirty", "MarkLibDirtyComp", "SetParamOwnerPart",
-                "SetOwnerPartUnlessGiven"]
+                "SetOwnerPartUnlessGiven",
+                # Upstream's, merged 2026-10-25: owner_part_id / line_width
+                # on the symbol shapes, their style replies, and the library
+                # route for the symbol on screen (AddLibSymbolPrim).
+                "SetOwnerPartFrom", "SchLineWidthParam", "SchRectStyleJson",
+                "SchPolygonStyleJson", "AddLibSymbolPrim"]
 
 
 def _edit_ns(lib, client, queue=None):
@@ -227,16 +248,26 @@ def _edit_ns(lib, client, queue=None):
     def next_op(_remaining):
         return ops.pop(0) if ops else ""
 
+    recorded: list[str] = []
     ns = _ns(client)
     ns.update({
         "SchServer": server,
         "Application": SimpleNamespace(ProcessMessages=None),
         "NoteNextStep": notes.append,
+        # Main.pas's save record (MarkLibDirty records the edited library,
+        # the 2026-10-25 port of upstream's NoteDocEdited call site).
+        "RecordBridgeEdit": recorded.append,
         "ExtractJsonValue": lambda p, k: p.get(k, ""),
         "BuildErrorResponse": lambda rid, code, msg: ("ERR", code, msg),
         "BuildSuccessResponse": lambda rid, data: ("OK", data),
         "EscapeJsonString": lambda s: s,
         "MilsToCoord": lambda m: int(m) * 10000,
+        # Utils.pas, modelled: decimal mils (Round(Mils * 10000)), the JSON
+        # spellings and the integer test the merged handlers call.
+        "MilsToCoordF": lambda m: int(round(float(m) * 10000)),
+        "BoolToJsonStr": lambda b: "true" if b else "false",
+        "FloatToJsonStr": lambda f: repr(float(f)),
+        "IsIntStr": lambda s: str(s).strip().lstrip("-").isdigit(),
         "StrToFloatDef": lambda s, d: float(s) if s else d,
         "Point": lambda x, y: (x, y),
         "StrToPinElectrical": lambda s: 0,
@@ -247,9 +278,10 @@ def _edit_ns(lib, client, queue=None):
         "eLine": E_LINE, "ePin": E_PIN, "eRectangle": E_RECT, "eArc": E_ARC,
         "ePolygon": E_POLY, "eLabel": E_LABEL, "eCreate_Default": 0,
         "eSmall": 1, "SCHM_PrimitiveRegistration": 1,
-        "_notes": notes, "_server": server,
+        "SCHM_BeginModify": 2, "SCHM_EndModify": 3,
+        "_notes": notes, "_server": server, "_recorded": recorded,
     })
-    build(_MAIN, ["SchRegisterObject"], ns)
+    build(_MAIN, ["SchRegisterObject", "SchBeginModify", "SchEndModify"], ns)
     build(_LIB, _have(_LIB, _LIB_HELPERS), ns)
     return ns
 
@@ -437,6 +469,9 @@ def test_mark_lib_dirty_never_touches_the_editor_selection():
     ns["MarkLibDirty"](lib)
     assert events == ["lib_invalidate"]
     assert client.docs[A.upper()].modified == 1
+    # Upstream's intent, kept by the merge: the edited library goes on the
+    # bridge's save record, so stop_server writes it.
+    assert ns["_recorded"] == [A]
 
 
 def test_mark_lib_dirty_never_dereferences_the_held_component():
@@ -487,6 +522,7 @@ def _gen_ns(lib, client):
         "UnsupportedSchProperty": lambda o, p: "",
         "ApplySetProperties": lambda o, p: None,
         "MarkDocDirtyByPath": dirty.append,
+        "ApplyNoErcDefaults": lambda o: None,
         "IntToStr": lambda n: str(int(n)),
     })
     return ns
@@ -595,11 +631,15 @@ def test_obj_batch_create_resolves_the_component_once_before_preprocess():
 
 
 def _lib_branch(ns):
+    """DeleteParametersAnyOwner's library branch. LibComp is the symbol the
+    caller (ProcessSchDocObjects' delete branch) resolved before its
+    PreProcess; section 6c runs that pick."""
     body = strip_comments(_GENERIC["DeleteParametersAnyOwner"])
     start = body.index("If IsLib Then")
     end = body.index("If (OwnerDesig <> '') Or (ReducedFilter <> '') Then")
     src = ("Procedure LibBranch(SchDoc : ISch_Document; "
-           "ReducedFilter : String);\nVar\n    Comp : ISch_Component;\n"
+           "ReducedFilter : String; LibComp : ISch_Component);\n"
+           "Var\n    Comp : ISch_Component;\n"
            "    IsLib : Boolean;\nBegin\n    IsLib := True;\n"
            + body[start:end] + "End;\n")
     got: list = []
@@ -614,7 +654,11 @@ def test_library_parameter_delete_with_nothing_held_matches_nothing_and_says_why
     lib = EditLib(A)
     ns = _edit_ns(lib, _client())
     got = _lib_branch(ns)
-    ns["LibBranch"](lib, "Name=Value")
+    # The caller's fallback when nothing is on screen: nothing is held, so
+    # the symbol handed on is Nil.
+    held = ns["ResolveEditLibComponent"](lib, "")
+    assert held is None
+    ns["LibBranch"](lib, "Name=Value", held)
     assert got == []
     assert any("lib_component" in n for n in ns["_notes"]), ns["_notes"]
 
@@ -873,26 +917,363 @@ def test_the_footprint_default_paths_go_through_the_iterator():
 
 
 # ---------------------------------------------------------------------------
+# 6c. The symbol on screen, narrowed (2026-10-25 upstream merge)
+# ---------------------------------------------------------------------------
+#
+# Upstream's #89 (sch_toggle_pin_visibility in a SchLib) and #107 (a
+# symbol's parameters / designator in obj_query / obj_modify) act on the
+# symbol open in the editor, the held one only as the fallback; upstream got
+# it by copying CurrentSchComponent and calling members on the copy. The
+# merge keeps the intent through Library.pas ShownLibComponent: the library
+# iterator's own reference, found by a POINTER compare with the editor's
+# selection, which here is Dead (any member read fails the test).
+
+E_SCHCOMPONENT, E_PARAMETER = 7, 8
+
+
+class _SchIter:
+    def __init__(self, items, log=None):
+        self.items, self.i, self.log = list(items), 0, log
+
+    def AddFilter_ObjectSet(self, s):
+        if self.log is not None:
+            self.log.append(("filter", sorted(s)))
+
+    @property
+    def FirstSchObject(self):
+        self.i = 0
+        return self.items[0] if self.items else None
+
+    @property
+    def NextSchObject(self):
+        self.i += 1
+        return self.items[self.i] if self.i < len(self.items) else None
+
+
+class ShownAs(NComp):
+    """A narrowed library symbol the engine's pointer compare finds EQUAL to
+    the editor's selection ``selection`` (identity on both sides: nothing of
+    the selection is read). Its children are ``children``."""
+
+    def __init__(self, name, events, selection=None, children=()):
+        super().__init__(name, events)
+        object.__setattr__(self, "_selection", selection)
+        object.__setattr__(self, "children", list(children))
+        object.__setattr__(self, "walked", 0)
+
+    def __eq__(self, other):
+        return other is self or (
+            other is not None
+            and other is object.__getattribute__(self, "_selection"))
+
+    __hash__ = object.__hash__
+
+    @property
+    def SchIterator_Create(self):
+        object.__setattr__(self, "walked", self.walked + 1)
+        self.events.append(f"walk:{self.LibReference}")
+        return _SchIter(self.children)
+
+    def SchIterator_Destroy(self, it):
+        pass
+
+
+class IterLib(EditLib):
+    """EditLib whose library iterator walks its symbols in order."""
+
+    def __init__(self, name, comps=(), current=None, events=None):
+        super().__init__(name, comps=comps, current=current, events=events)
+        self.order = list(comps)
+        self.walks = 0
+
+    @property
+    def SchLibIterator_Create(self):
+        self.walks += 1
+        return _SchIter(self.order)
+
+    def SchIterator_Destroy(self, it):
+        pass
+
+
+def _shown_ns(lib, client=None):
+    ns = _gen_ns(lib, client or _client())
+    ns.update({"MkSet": lambda *a: set(a), "eSchComponent": E_SCHCOMPONENT,
+               "eParameter": E_PARAMETER, "eDesignator": 9})
+    build(_LIB, ["ShownLibComponent", "SchLibIsAtPath"], ns)
+    return ns
+
+
+def test_shown_lib_component_is_the_library_iterators_reference():
+    events: list[str] = []
+    sel = Dead()
+    other, shown = NComp("A", events), ShownAs("B", events, sel)
+    lib = IterLib(A, comps=[other, shown], current=sel, events=events)
+    ns = _shown_ns(lib)
+    assert ns["ShownLibComponent"](lib) is shown
+    lib.order = [other]
+    assert ns["ShownLibComponent"](lib) is None, "no match: Nil, not the selection"
+    lib.CurrentSchComponent = None
+    walks = lib.walks
+    assert ns["ShownLibComponent"](lib) is None
+    assert lib.walks == walks, "nothing on screen: the library is not walked"
+    assert ns["ShownLibComponent"](None) is None
+
+
+def test_the_helper_never_copies_the_getter():
+    body = strip_comments(_LIB["ShownLibComponent"])
+    assert "Result := LibComp;" in body
+    assert not re.search(r":=\s*SchLib\.CurrentSchComponent", body)
+
+
+def _toggle(lib, ns, params):
+    build(_GENERIC, ["TogglePinsOnComponent", "Gen_TogglePinVisibility"], ns)
+    return ns["Gen_TogglePinVisibility"](params, "r")
+
+
+def _pin(n):
+    return Prim(I_ObjectAddress=f"pin{n}", ShowName=True, ShowDesignator=True)
+
+
+def test_the_schlib_pin_toggle_acts_on_the_symbol_on_screen():
+    events: list[str] = []
+    sel = Dead()
+    pins = [_pin(1), _pin(2)]
+    shown = ShownAs("ON_SCREEN", events, sel, children=pins)
+    held = ShownAs("HELD", events, children=[_pin(3)])
+    lib = IterLib(A, comps=[held, shown], current=sel, events=events)
+    ns = _shown_ns(lib)
+    _held(ns, lib, held, "HELD")
+    reply = _toggle(lib, ns, {"show_name": "false"})
+    assert reply[0] == "OK", reply
+    assert '"pins_modified":2' in reply[1]
+    assert [p.ShowName for p in pins] == [False, False]
+    assert held.walked == 0, "the held symbol was edited, not the one on screen"
+    assert events.index("walk:ON_SCREEN") > events.index("pre")
+    assert events.count("pre") == events.count("post") == 1
+
+
+def test_the_schlib_pin_toggle_falls_back_to_the_held_symbol_only():
+    events: list[str] = []
+    sel = Dead()                       # on screen, but matches no symbol
+    held_pins = [_pin(1)]
+    held = ShownAs("HELD", events, children=held_pins)
+    lib = IterLib(A, comps=[held], current=sel, events=events)
+    ns = _shown_ns(lib)
+    _held(ns, lib, held, "HELD")
+    reply = _toggle(lib, ns, {"show_designator": "false"})
+    assert reply[0] == "OK", reply
+    assert held_pins[0].ShowDesignator is False
+
+    # Held from ANOTHER library, nothing matched on screen: NO_COMPONENT,
+    # before any PreProcess (upstream handed the raw global on).
+    events2: list[str] = []
+    other = ShownAs("ELSEWHERE", events2, children=[_pin(9)])
+    lib2 = IterLib(A, current=Dead(), events=events2)
+    ns2 = _shown_ns(lib2)
+    _held(ns2, EditLib(B), other, "ELSEWHERE")
+    reply2 = _toggle(lib2, ns2, {"show_name": "true"})
+    assert reply2[:2] == ("ERR", "NO_COMPONENT"), reply2
+    assert other.walked == 0 and "pre" not in events2
+
+
+def _pick_symbol(focused):
+    """ProcessSchDocObjects' symbol pick and iterator choice, executed as a
+    routine of its own (the whole routine takes a Var parameter, outside the
+    evaluator's subset): from ``ParamsOfSymbol := False;`` up to the filter
+    on the chosen iterator, the modify PreProcess included. Answers the
+    symbol whose children were chosen ('' for the document's own walk)."""
+    body = strip_comments(_GENERIC["ProcessSchDocObjects"])
+    start = body.index("ParamsOfSymbol := False;")
+    end = body.index("Iterator.AddFilter_ObjectSet(MkSet(ObjTypeInt));", start)
+    src = ("Function PickSymbol(SchDoc : ISch_Document; ObjTypeInt : Integer;"
+           " Mode : String) : String;\nVar\n    LibComp : ISch_Component;\n"
+           "    ParamsOfSymbol, IsLibDoc : Boolean;\n    SchLibDoc : ISch_Lib;\n"
+           "    SymbolRef : String;\n    Iterator : ISch_Iterator;\nBegin\n"
+           + body[start:end] + "    Result := SymbolRef;\nEnd;\n")
+    ns = _shown_ns(focused)
+    build({"PickSymbol": src}, ["PickSymbol"], ns)
+    return ns
+
+
+class _LoggingLib(IterLib):
+    @property
+    def SchLibIterator_Create(self):
+        self.events.append("libwalk")
+        return IterLib.SchLibIterator_Create.fget(self)
+
+
+def test_a_schlib_parameter_query_walks_the_symbol_on_screen():
+    events: list[str] = []
+    sel = Dead()
+    shown = ShownAs("ON_SCREEN", events, sel)
+    held = ShownAs("HELD", events)
+    lib = _LoggingLib(A, comps=[held, shown], current=sel, events=events)
+    ns = _pick_symbol(lib)
+    _held(ns, lib, held, "HELD")
+    assert ns["PickSymbol"](lib, E_PARAMETER, "query") == "ON_SCREEN"
+    assert shown.walked == 1 and held.walked == 0
+    assert "pre" not in events
+
+
+def test_a_schlib_parameter_modify_resolves_before_the_preprocess():
+    events: list[str] = []
+    held = ShownAs("HELD", events)
+    lib = _LoggingLib(A, comps=[held], current=Dead(), events=events)
+    ns = _pick_symbol(lib)
+    _held(ns, lib, held, "HELD")
+    assert ns["PickSymbol"](lib, E_PARAMETER, "modify") == "HELD", (
+        "nothing matched on screen: the held symbol is the fallback")
+    assert events.index("libwalk") < events.index("pre"), (
+        "the symbol was resolved inside the PreProcess window")
+    assert events.index("walk:HELD") > events.index("pre")
+
+
+def test_a_schlib_component_query_walks_the_library_not_a_symbol():
+    events: list[str] = []
+    lib = _LoggingLib(A, comps=[ShownAs("X", events)], current=Dead(),
+                      events=events)
+    ns = _pick_symbol(lib)
+    assert ns["PickSymbol"](lib, E_SCHCOMPONENT, "query") == ""
+    assert events == ["libwalk"], "issue #87: the library's own iterator"
+
+
+def test_a_schlib_reached_by_path_while_another_is_focused_is_not_guessed():
+    """doc: scope to a library that is not the focused one: the server's
+    current document is the OTHER library, so neither its symbol on screen
+    nor a symbol held there is used (SchLibIsAtPath); the document walks
+    its own iterator, as before #87/#107."""
+    events: list[str] = []
+    sel = Dead()
+    focused = _LoggingLib(B, comps=[ShownAs("ON_B", events, sel)],
+                          current=sel, events=events)
+    target = EditLib(A, events=events)
+    target.SchIterator_Create = _SchIter([])
+    held = ShownAs("HELD", events)
+    ns = _pick_symbol(focused)
+    _held(ns, target, held, "HELD")
+    assert ns["PickSymbol"](target, E_PARAMETER, "query") == ""
+    assert held.walked == 0 and "libwalk" not in events
+
+
+def _pick_delete(focused):
+    """ProcessSchDocObjects' delete branch up to the parameter hand-off,
+    executed as a routine of its own: the symbol pick, the delete's
+    PreProcess and the DeleteParametersAnyOwner call (recorded, not run).
+    Answers the symbol handed on, or None."""
+    body = strip_comments(_GENERIC["ProcessSchDocObjects"])
+    start = body.index("If Mode = 'delete' Then")
+    start = body.index("LibComp := Nil;", start)
+    call = "DeleteParametersAnyOwner(SchDoc, FilterStr, LibComp, TotalMatched);"
+    end = body.index(call, start) + len(call)
+    src = ("Function PickDelete(SchDoc : ISch_Document; ObjTypeInt : Integer;"
+           " FilterStr : String) : Integer;\nVar\n"
+           "    LibComp : ISch_Component;\n    IsLibDoc : Boolean;\n"
+           "    SchLibDoc : ISch_Lib;\n    TotalMatched : Integer;\nBegin\n"
+           "    TotalMatched := 0;\n" + body[start:end] + "\n    End;\n"
+           "    Result := TotalMatched;\nEnd;\n")
+    ns = _shown_ns(focused)
+    handed: list = []
+
+    def delete_params(doc, flt, comp, total):
+        focused.events.append("delete")
+        handed.append(comp)
+
+    ns["DeleteParametersAnyOwner"] = delete_params
+    ns["_handed"] = handed
+    build({"PickDelete": src}, ["PickDelete"], ns)
+    return ns
+
+
+def test_a_schlib_parameter_delete_acts_on_the_symbol_on_screen():
+    """#107 for the delete: the symbol a query of the same filter reads (the
+    one on screen), not the held one, resolved before the PreProcess."""
+    events: list[str] = []
+    sel = Dead()
+    shown = ShownAs("ON_SCREEN", events, sel)
+    held = ShownAs("HELD", events)
+    lib = _LoggingLib(A, comps=[held, shown], current=sel, events=events)
+    ns = _pick_delete(lib)
+    _held(ns, lib, held, "HELD")
+    ns["PickDelete"](lib, E_PARAMETER, "Name=Value")
+    assert ns["_handed"] == [shown], "the held symbol took the delete"
+    assert events.index("libwalk") < events.index("pre") < events.index("delete")
+    assert shown.walked == 0 and held.walked == 0
+
+
+def test_a_schlib_parameter_delete_falls_back_to_the_held_symbol_of_this_library():
+    events: list[str] = []
+    held = ShownAs("HELD", events)
+    lib = _LoggingLib(A, comps=[held], current=Dead(), events=events)
+    ns = _pick_delete(lib)
+    _held(ns, lib, held, "HELD")
+    ns["PickDelete"](lib, E_PARAMETER, "Name=Value")
+    assert ns["_handed"] == [held]
+
+    # Held from ANOTHER library, nothing on screen matched: nothing handed
+    # on (the branch then matches nothing and says why).
+    events2: list[str] = []
+    lib2 = _LoggingLib(A, current=Dead(), events=events2)
+    ns2 = _pick_delete(lib2)
+    _held(ns2, EditLib(B), ShownAs("ELSEWHERE", events2), "ELSEWHERE")
+    ns2["PickDelete"](lib2, E_PARAMETER, "Name=Value")
+    assert ns2["_handed"] == [None]
+
+
+def test_a_schlib_parameter_delete_by_path_while_another_is_focused_is_not_guessed():
+    events: list[str] = []
+    sel = Dead()
+    focused = _LoggingLib(B, comps=[ShownAs("ON_B", events, sel)],
+                          current=sel, events=events)
+    target = EditLib(A, events=events)
+    held = ShownAs("HELD", events)
+    ns = _pick_delete(focused)
+    _held(ns, target, held, "HELD")
+    ns["PickDelete"](target, E_PARAMETER, "Name=Value")
+    assert ns["_handed"] == [None]
+    assert "libwalk" not in events
+
+
+def test_a_delete_of_another_type_picks_no_symbol():
+    events: list[str] = []
+    sel = Dead()
+    lib = _LoggingLib(A, comps=[ShownAs("ON_SCREEN", events, sel)],
+                      current=sel, events=events)
+    ns = _pick_delete(lib)
+    ns["PickDelete"](lib, E_SCHCOMPONENT, "Name=Value")
+    assert ns["_handed"] == [] and "libwalk" not in events
+    assert events == ["pre"]
+
+
+# ---------------------------------------------------------------------------
 # 7. The static guard (the class, not the sites)
 # ---------------------------------------------------------------------------
 
 _UNITS = sorted(p for p in _ALTIUM.glob("*.pas") if p.name != "Altium_MCP.pas")
 
 
+#: A pointer compare of the getter against a BARE reference (``= Comp Then``,
+#: ``<> LibComp)``): nothing after the name, so no member, call, index or
+#: dereference is chained onto either side. ``Nil`` is one such reference.
+_POINTER_COMPARE = re.compile(r"\s*(<>|=)\s*[A-Za-z_]\w*\b(?!\s*[.(\[^])")
+
+
 def _getter_uses():
     """Every use of the CurrentSchComponent GETTER: anything but a setter
-    (``X.CurrentSchComponent := Y``) or a Nil compare. A getter value read,
-    copied into a variable or passed on is how a member read reaches the
-    un-narrowed reference, and copying does not narrow it (Library.pas
-    GetTargetLibComponent)."""
+    (``X.CurrentSchComponent := Y``), a Nil compare or a pointer compare
+    against a bare reference. A getter value read, copied into a variable or
+    passed on is how a member read reaches the un-narrowed reference, and
+    copying does not narrow it (Library.pas GetTargetLibComponent). A compare
+    reads no member and copies nothing: the 2026-10-25 merge keeps upstream's
+    "the symbol on screen" routing that way (Library.pas AddLibSymbolPrim,
+    ShownLibComponent), the recipe LibMakeCurrentVerified measured for
+    PcbLib.CurrentComponent."""
     bad = []
     for path in _UNITS:
         code = strip_comments(path.read_text(encoding="utf-8-sig",
                                              errors="replace"))
         for m in re.finditer(r"\bCurrentSchComponent\b", code):
             after = code[m.end():m.end() + 40]
-            if re.match(r"\s*:=", after) or re.match(r"\s*(<>|=)\s*Nil\b",
-                                                     after, re.I):
+            if re.match(r"\s*:=", after) or _POINTER_COMPARE.match(after):
                 continue
             line = code.count("\n", 0, m.start()) + 1
             bad.append(f"{path.name}:{line}: "
@@ -903,8 +1284,32 @@ def _getter_uses():
 
 def test_no_unit_reads_copies_or_passes_the_current_sch_component_getter():
     """3aca481: Library.pas GetTargetLibComponent / TargetLibComponentName
-    / MarkLibDirty and Generic.pas Gen_CreateObject / Gen_BatchCreate."""
+    / MarkLibDirty and Generic.pas Gen_CreateObject / Gen_BatchCreate. The
+    2026-10-25 merge: upstream's AddLibSymbolPrim, ProcessSchDocObjects
+    (#107) and Gen_TogglePinVisibility (#89) copies."""
     assert _getter_uses() == []
+
+
+@pytest.mark.parametrize("after,allowed", [
+    (" = Nil Then", True),
+    (" <> Nil)", True),
+    (" = Component Then Shown := Component;", True),
+    (" = LibComp Then Hit := True;", True),
+    (" := Comp;", True),
+    (";", False),                                   # X := ...Getter;
+    (".LibReference", False),
+    (")", False),                                   # F(...Getter)
+    (" = A.B Then", False),
+    (" = F(x) Then", False),
+    (" = P^ Then", False),
+    (" = Items[0] Then", False),
+])
+def test_the_getter_guard_admits_only_setters_and_bare_compares(after,
+                                                                allowed):
+    """The guard itself: a compare whose other side chains a member, a call,
+    an index or a dereference is still a getter use."""
+    ok = bool(re.match(r"\s*:=", after) or _POINTER_COMPARE.match(after))
+    assert ok is allowed
 
 
 def test_the_resolvers_never_name_current_sch_component():

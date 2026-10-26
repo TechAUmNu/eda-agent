@@ -318,7 +318,9 @@ def _place_net_label(w, sheet_path, docs):
     ns = _common(w)
     srv = _sch_server(w, docs)
     srv.SchObjectFactory = staticmethod(lambda kind, how: _NetLabel())
-    ns.update(SchServer=srv, MilsToCoord=lambda m: m,
+    ns.update(SchServer=srv, MilsToCoord=lambda m: m, MilsToCoordF=lambda m: m,
+              StrToFloatDef=lambda s, d: float(s) if str(s).strip() else d,
+              FloatToJsonStr=lambda v: json.dumps(float(v)),
               InferNetLabelStyle=lambda d, f, c: False)
     build(load(_ALTIUM / "Generic.pas", minimum=100), ["Gen_PlaceNetLabel"], ns)
     return ns["Gen_PlaceNetLabel"](

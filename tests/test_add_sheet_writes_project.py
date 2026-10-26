@@ -55,7 +55,7 @@ def _at(body: str, needle: str) -> int:
 def test_add_sheet_refuses_an_existing_file_before_creating_anything():
     body = _generic()["Gen_AddSheet"]
     refuse = _at(body, "If FileExists(NewDocPath) Then")
-    assert "'EXISTS'" in body
+    assert "'FILE_EXISTS'" in body
     assert refuse < _at(body, "Client.OpenNewDocument("), (
         "the existence check must come before the new document is opened at "
         "that path, or the save that follows replaces the file")

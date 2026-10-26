@@ -208,7 +208,7 @@ Begin
         If UpperCase(Doc.DM_DocumentKind) <> 'SCH' Then Continue;
 
         SchDoc := Nil;
-        Try SchDoc := SchServer.GetSchDocumentByPath(Doc.DM_FullPath); Except End;
+        SchDoc := ProjectSheet(Doc.DM_FullPath);
         If SchDoc = Nil Then Continue;
 
         SchIter := SchDoc.SchIterator_Create;
@@ -382,7 +382,7 @@ Begin
         SheetPath := '';
         Try SheetPath := Doc.DM_FullPath; Except End;
         SchDoc := Nil;
-        Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
+        SchDoc := ProjectSheet(SheetPath);
         If SchDoc = Nil Then Continue;
 
         SchIter := SchDoc.SchIterator_Create;
@@ -1642,7 +1642,7 @@ Begin
         Try SheetPath := Doc.DM_FileName; Except End;
 
         SchDoc := Nil;
-        Try SchDoc := SchServer.GetSchDocumentByPath(Doc.DM_FullPath); Except End;
+        SchDoc := ProjectSheet(Doc.DM_FullPath);
         If SchDoc = Nil Then Continue;
         SchIter := SchDoc.SchIterator_Create;
         If SchIter = Nil Then Continue;
@@ -1938,7 +1938,7 @@ Begin
         Try SheetName := Doc.DM_FileName; Except End;
 
         SchDoc := Nil;
-        Try SchDoc := SchServer.GetSchDocumentByPath(Doc.DM_FullPath); Except End;
+        SchDoc := ProjectSheet(Doc.DM_FullPath);
         If SchDoc = Nil Then Continue;
 
         SchIter := SchDoc.SchIterator_Create;
@@ -2387,7 +2387,7 @@ Begin
         If UpperCase(Doc.DM_DocumentKind) <> 'SCH' Then Continue;
 
         SchDoc := Nil;
-        Try SchDoc := SchServer.GetSchDocumentByPath(Doc.DM_FullPath); Except End;
+        SchDoc := ProjectSheet(Doc.DM_FullPath);
         If SchDoc = Nil Then Continue;
 
         SchIter := SchDoc.SchIterator_Create;
@@ -2529,7 +2529,7 @@ Begin
         If Doc = Nil Then Continue;
         If UpperCase(Doc.DM_DocumentKind) <> 'SCH' Then Continue;
         SchDoc := Nil;
-        Try SchDoc := SchServer.GetSchDocumentByPath(Doc.DM_FullPath); Except End;
+        SchDoc := ProjectSheet(Doc.DM_FullPath);
         If SchDoc = Nil Then Continue;
 
         SchIter := SchDoc.SchIterator_Create;
@@ -3020,7 +3020,7 @@ Begin
         Try DocKind := Document.DM_DocumentKind; Except End;
         If DocKind <> 'SCH' Then Continue;
         Sheet := Nil;
-        Try Sheet := SchServer.GetSchDocumentByPath(Document.DM_FullPath); Except End;
+        Sheet := ProjectSheet(Document.DM_FullPath);
         If Sheet = Nil Then Continue;
         SheetName := '';
         Try SheetName := Document.DM_FileName; Except End;
@@ -3281,7 +3281,7 @@ Begin
         Try DocKind := Document.DM_DocumentKind; Except End;
         If DocKind <> 'SCH' Then Continue;
         Sheet := Nil;
-        Try Sheet := SchServer.GetSchDocumentByPath(Document.DM_FullPath); Except End;
+        Sheet := ProjectSheet(Document.DM_FullPath);
         If Sheet = Nil Then Continue;
 
         Iter := Sheet.SchIterator_Create;
@@ -3362,7 +3362,7 @@ End;
 { This is a quiet, common bug class: ERC sometimes catches it (no driver,    }
 { no load) but not always (other-sheet end provides a load). Cheap check:    }
 { for each ISch_NetLabel, spatial-iterate a tiny area at the label location  }
-{ for any eWire / eBus; absence → orphan.                                    }
+{ for any eWire / eBus; absence -> orphan.                                    }
 Function Audit_FindOrphanNetLabels(Params, RequestId : String) : String;
 Var
     Workspace : IWorkspace;
@@ -3412,7 +3412,7 @@ Begin
         Try DocKind := Document.DM_DocumentKind; Except End;
         If DocKind <> 'SCH' Then Continue;
         Sheet := Nil;
-        Try Sheet := SchServer.GetSchDocumentByPath(Document.DM_FullPath); Except End;
+        Sheet := ProjectSheet(Document.DM_FullPath);
         If Sheet = Nil Then Continue;
         SheetName := '';
         Try SheetName := Document.DM_FileName; Except End;
@@ -3533,7 +3533,7 @@ Begin
         Try DocKind := Document.DM_DocumentKind; Except End;
         If DocKind <> 'SCH' Then Continue;
         Sheet := Nil;
-        Try Sheet := SchServer.GetSchDocumentByPath(Document.DM_FullPath); Except End;
+        Sheet := ProjectSheet(Document.DM_FullPath);
         If Sheet = Nil Then Continue;
         SheetName := '';
         Try SheetName := Document.DM_FileName; Except End;
@@ -3655,7 +3655,7 @@ Begin
         Try DocKind := Document.DM_DocumentKind; Except End;
         If DocKind <> 'SCH' Then Continue;
         Sheet := Nil;
-        Try Sheet := SchServer.GetSchDocumentByPath(Document.DM_FullPath); Except End;
+        Sheet := ProjectSheet(Document.DM_FullPath);
         If Sheet = Nil Then Continue;
 
         Iter := Sheet.SchIterator_Create;
@@ -3736,16 +3736,16 @@ End;
 { Audit_FindAcuteAngles                                                       }
 {                                                                              }
 { Find pairs of same-net tracks that meet at an acute interior angle         }
-{ (< 90°). At an acute corner, the etchant pools and over-etches the inside }
+{ (< 90 deg). At an acute corner, the etchant pools and over-etches the inside }
 { of the bend -- the trace narrows or breaks during fabrication. Standard   }
-{ fab DFM rejects sub-90° corners on critical-thickness traces.              }
+{ fab DFM rejects sub-90 deg corners on critical-thickness traces.              }
 {                                                                              }
 { Algorithm (pure geometry, no IPC_AcuteAngleRule dependency):                }
 {   - For each Track, get its two endpoints.                                  }
 {   - Spatial-iterate a 1-mil square at each endpoint for other Tracks on   }
 {     the same net.                                                          }
 {   - Build direction vectors AWAY from the shared point.                    }
-{   - Compute dot product: positive dot = interior angle < 90° = acute.     }
+{   - Compute dot product: positive dot = interior angle < 90 deg = acute.     }
 {   - Compute actual angle for the report payload via arccos.                }
 {                                                                              }
 { Capped at 100 violations to keep responses manageable on dense boards.    }
@@ -3855,8 +3855,8 @@ Begin
                                         Continue;
                                     End;
                                     Dot := V1X * V2X + V1Y * V2Y;
-                                    { Positive dot product → vectors within 90°    }
-                                    { of each other → interior angle < 90°.        }
+                                    { Positive dot product -> vectors within 90 deg    }
+                                    { of each other -> interior angle < 90 deg.        }
                                     If Dot > 0 Then
                                     Begin
                                         CosTheta := Dot / (L1 * L2);
@@ -4444,7 +4444,7 @@ Begin
         Try DocKind := Document.DM_DocumentKind; Except End;
         If DocKind <> 'SCH' Then Continue;
         Sheet := Nil;
-        Try Sheet := SchServer.GetSchDocumentByPath(Document.DM_FullPath); Except End;
+        Sheet := ProjectSheet(Document.DM_FullPath);
         If Sheet = Nil Then Continue;
         SheetName := '';
         Try SheetName := Document.DM_FileName; Except End;

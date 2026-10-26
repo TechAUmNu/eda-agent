@@ -44,7 +44,7 @@ def test_it_publishes_and_returns_at_once(bridge):
                                 "params": ""})
     assert time.monotonic() - started < 1.0
     request = json.loads((bridge.config.workspace_dir
-                          / f"request_{rid}.json").read_text("utf-8"))
+                          / f"request_{rid}.json").read_text("utf-8-sig"))
     assert request["command"] == "generic.run_process"
     assert request["params"]["process"] == "PCB:BatchPCBLibCreate"
 

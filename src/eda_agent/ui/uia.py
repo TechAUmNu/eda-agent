@@ -59,7 +59,11 @@ except Exception:                               # pragma: no cover - platform
 #: (controls.com_apartment). A global made inside a worker's apartment
 #: would outlive it and be handed to the next caller on another thread.
 #: Keyed by controls.apartment_token, and dropped when the apartment that
-#: made it ends, the object is only ever used where it is valid.
+#: made it ends, the object is only ever used where it is valid. A thread
+#: outside any com_apartment initialises COM itself first: upstream found
+#: app_press_dialog_button, run in an executor on a worker that never
+#: initialised COM, reporting "no element named 'Save'" on a dialog that
+#: was there.
 _LOCAL = threading.local()
 
 
@@ -80,6 +84,15 @@ def _uia():
     cached = getattr(_LOCAL, "automation", None)
     if cached is not None and getattr(_LOCAL, "token", None) == token:
         return cached
+    if not _controls.at_apartment_exit(_forget):
+        try:
+            # Not inside a com_apartment: COM may never have been
+            # initialised on this thread (an executor worker), and then
+            # every lookup finds nothing. Left initialised: the object
+            # made here lives as long as the thread.
+            _cc.comtypes.CoInitialize()
+        except Exception:                       # noqa: BLE001
+            pass
     try:
         made = _cc.CreateObject(
             _UIA.CUIAutomation, interface=_UIA.IUIAutomation)
@@ -87,7 +100,6 @@ def _uia():
         return None
     _LOCAL.automation = made
     _LOCAL.token = token
-    _controls.at_apartment_exit(_forget)
     return made
 
 

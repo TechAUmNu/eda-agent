@@ -62,6 +62,9 @@ def _batch_ns(results):
                                           ["ScopeType", "ScopePath"]),
         "NextBatchOp": _rewrite_var_params(_MAIN["NextBatchOp"], ["Remaining"]),
         "GetBatchField": _MAIN["GetBatchField"],
+        # Upstream (2026.10.25 merge): set is read with GetBatchTail, so a
+        # value may hold ';' (Python writes set last).
+        "GetBatchTail": _MAIN["GetBatchTail"],
         "MarkedOpJson": _UTILS["MarkedOpJson"],
     }
     calls = []

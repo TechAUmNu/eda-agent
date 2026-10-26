@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Fab via rules (v0, 2026-10-18, JLCPCB multilayer): a via in a pad sits at
 its centre, vias of one net keep a gap and reuse each other, wide nets get
 several vias at a layer change, and tracks leave pads along an axis.

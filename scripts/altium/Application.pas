@@ -79,6 +79,10 @@ Begin
         ',"cast_errors":' + IntToStr(CastErrorCount) +
         ',"caught_exceptions":' + IntToStr(CaughtExceptionCount) +
         ',' + Caught +
+        { The folder this loop takes requests from. Two script projects, or }
+        { two servers on one machine, are told apart by it: a request only  }
+        { reaches the loop whose folder it was written to (issue #94).      }
+        ',"workspace_dir":"' + EscapeJsonString(WorkspaceDir) + '"' +
         ',"script_projects":[' + ScriptProjects + ']}');
 End;
 
@@ -712,30 +716,118 @@ Begin
     End;
 End;
 
+{ The open project at ProjectPath, under either slash spelling, or Nil. }
+Function OpenProjectAt(Workspace : IWorkspace; ProjectPath : String) : IProject;
+Var
+    I : Integer;
+    Proj : IProject;
+    Want, Have : String;
+Begin
+    Result := Nil;
+    Want := UpperCase(CanonicalPathValue('path', ProjectPath));
+    For I := 0 To Workspace.DM_ProjectCount - 1 Do
+    Begin
+        Proj := Nil;
+        Try Proj := Workspace.DM_Projects(I); Except End;
+        If Proj = Nil Then Continue;
+        Have := '';
+        Try Have := Proj.DM_ProjectFullPath; Except End;
+        If UpperCase(CanonicalPathValue('path', Have)) = Want Then
+        Begin
+            Result := Proj;
+            Exit;
+        End;
+    End;
+End;
+
+{ The projects that list FilePath among their documents, as a JSON array    }
+{ of project paths. What membership IS, read back, rather than what the     }
+{ create call was asked to do.                                              }
+Function ProjectsHoldingJson(FilePath : String) : String;
+Var
+    Workspace : IWorkspace;
+    Proj : IProject;
+    Doc : IDocument;
+    I, J : Integer;
+    Want, Have, ProjPath : String;
+Begin
+    Result := '';
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Exit;
+    Want := UpperCase(CanonicalPathValue('path', FilePath));
+    For I := 0 To Workspace.DM_ProjectCount - 1 Do
+    Begin
+        Proj := Nil;
+        Try Proj := Workspace.DM_Projects(I); Except End;
+        If Proj = Nil Then Continue;
+        For J := 0 To Proj.DM_LogicalDocumentCount - 1 Do
+        Begin
+            Doc := Nil;
+            Try Doc := Proj.DM_LogicalDocuments(J); Except End;
+            If Doc = Nil Then Continue;
+            Have := '';
+            Try Have := Doc.DM_FullPath; Except End;
+            If UpperCase(CanonicalPathValue('path', Have)) = Want Then
+            Begin
+                ProjPath := '';
+                Try ProjPath := Proj.DM_ProjectFullPath; Except End;
+                If Result <> '' Then Result := Result + ',';
+                Result := Result + '"' + EscapeJsonString(ProjPath) + '"';
+                Break;
+            End;
+        End;
+    End;
+End;
+
 {..............................................................................}
 { Create a new blank document of a given kind (PCB, SCH, PCBLIB, SCHLIB,       }
-{ OUTPUTJOB, ...). Saves it to disk and optionally adds it to the focused      }
-{ project. Uses IClient.OpenNewDocument, the documented API for this.          }
+{ OUTPUTJOB, ...). Saves it to disk and optionally adds it to a project.       }
+{ Uses IClient.OpenNewDocument, the documented API for this.                   }
 {                                                                               }
 { Params: kind (required, e.g. 'PCB' or 'SCH'),                                }
 {         file_path (required, absolute path where the doc should live),       }
 {         name (optional display name, defaults to the filename),             }
-{         add_to_project (optional bool, defaults to true)                    }
+{         add_to_project (optional bool, defaults to true),                   }
+{         project_path (optional: the project to add it to, rather than       }
+{         whichever project has focus)                                         }
 {..............................................................................}
 
 Function App_CreateDocument(Params : String; RequestId : String) : String;
 Var
-    FilePath, DocKind, DocName, AddStr : String;
+    FilePath, DocKind, DocName, AddStr, ProjectPath : String;
     ServerDoc : IServerDocument;
     Workspace : IWorkspace;
     Project : IProject;
-    AddToProject, Saved, Added, DirOk, Focused : Boolean;
+    AddToProject, Saved, Added, DirOk, Focused, ProjSaved : Boolean;
 Begin
     DocKind := ExtractJsonValue(Params, 'kind');
     FilePath := ExtractJsonValue(Params, 'file_path');
     DocName := ExtractJsonValue(Params, 'name');
     AddStr := ExtractJsonValue(Params, 'add_to_project');
     AddToProject := (AddStr = '') Or (AddStr = 'true');
+    ProjectPath := ExtractJsonValue(Params, 'project_path');
+
+    { THE PROJECT IS NAMED OR IT IS THE FOCUSED ONE, decided before anything }
+    { is created. A temporary sheet went into whichever project had focus,   }
+    { a production project, while the caller meant another (issue #94).     }
+    Project := Nil;
+    If AddToProject Then
+    Begin
+        Workspace := GetWorkspace;
+        If Workspace <> Nil Then
+        Begin
+            If ProjectPath <> '' Then
+                Project := OpenProjectAt(Workspace, ProjectPath)
+            Else
+                Project := Workspace.DM_FocusedProject;
+        End;
+        If (Project = Nil) And (ProjectPath <> '') Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_PROJECT',
+                'No open project at ' + ProjectPath + '. Nothing was created.');
+            Exit;
+        End;
+    End;
 
     If DocKind = '' Then
     Begin
@@ -748,6 +840,20 @@ Begin
         Exit;
     End;
     If DocName = '' Then DocName := ExtractFileName(FilePath);
+
+    { A DOCUMENT ALREADY OPEN AT THIS PATH IS REFUSED. Creating a blank over }
+    { it raised "object accessed after being destroyed" in ADVPCB and halted }
+    { the script (a PcbLib, 2026-10-20). The caller wants the open one.      }
+    ServerDoc := Nil;
+    Try ServerDoc := Client.GetDocumentByPath(FilePath); Except ServerDoc := Nil; End;
+    If ServerDoc <> Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'ALREADY_OPEN',
+            'A document is already open at ' + FilePath +
+            '. Focus it with app_set_active_document instead of creating it again,' +
+            ' or close it first.');
+        Exit;
+    End;
 
     { Client.OpenNewDocument creates a blank in-memory IServerDocument of the
       given kind. Pass False for ReuseExisting so we don't accidentally grab
@@ -815,20 +921,15 @@ Begin
     { documented project-side API and the approach that works reliably        }
     { across workspace states.                                                }
     Added := False;
-    If AddToProject Then
+    ProjSaved := False;
+    If AddToProject And (Project <> Nil) Then
     Begin
-        Workspace := GetWorkspace;
-        If Workspace <> Nil Then
-        Begin
-            Project := Workspace.DM_FocusedProject;
-            If Project <> Nil Then
-            Begin
-                Try
-                    Project.DM_AddSourceDocument(FilePath);
-                    Added := True;
-                Except Added := False; End;
-            End;
-        End;
+        Try
+            Project.DM_AddSourceDocument(FilePath);
+            Added := True;
+        Except Added := False; End;
+        { Written now, or the add is gone after a reopen. }
+        If Added Then ProjSaved := SaveProjectFile(Project);
     End;
 
     { NOT SAVED IS NOT CREATED. It answered success with saved:false, which }
@@ -862,7 +963,9 @@ Begin
         ',"file_path":"' + EscapeJsonString(FilePath) + '"' +
         ',"saved":' + BoolToJsonStr(Saved) +
         ',"focused":' + BoolToJsonStr(Focused) +
-        ',"added_to_project":' + BoolToJsonStr(Added) + '}');
+        ',"added_to_project":' + BoolToJsonStr(Added) +
+        ',"project_saved":' + BoolToJsonStr(ProjSaved) +
+        ',"member_of":[' + ProjectsHoldingJson(FilePath) + ']}');
 End;
 
 {..............................................................................}
@@ -952,6 +1055,46 @@ End;
 {..............................................................................}
 { Command Handler - must be at end so all functions are declared               }
 {..............................................................................}
+
+{ Stop the polling loop. Documents the editor marks modified, or that the    }
+{ bridge recorded as edited (BridgeEditedPaths), are saved first; a clean    }
+{ document is not touched, so detaching never rewrites a file nobody        }
+{ changed (upstream 2026.10.25: the old full flush rewrote every clean      }
+{ schematic on each detach). It is the only_modified pass with libraries    }
+{ left alone too; app_save_all keeps its own policy.                         }
+{ The record entries the walk cannot reach (a free document whose bare       }
+{ DM_FullPath resolves to nothing, the 2026-10-10 field case) are written    }
+{ from their absolute keys afterwards, as app_save_all does: without the     }
+{ sweep a bridge edit to such a document was never written on detach, and   }
+{ the reply's edited_saved promises the edited documents. The sweep's own   }
+{ writes count in edited_saved (WriteDocAndNote counts SaveAttempts).        }
+Function App_StopServer(RequestId : String) : String;
+Var
+    SweepOutside : Integer;
+Begin
+    SaveAttempts := 0;
+    SaveSkipped := 0;
+    SaveSkippedPaths := '';
+    SaveBridgeRecordPaths := '';
+    SaveBridgeRecordUnwritten := '';
+    SaveBridgeRecordSameTick := '';
+    SaveBridgeRecordClosed := '';
+    SaveBridgeRecordUnresolved := '';
+    SaveAttemptedKeys := '';
+    SaveUnresolvedPaths := '';
+    SaveUnnamedCount := 0;
+    SaveSkipCleanLibs := True;
+    SaveSkipCleanSheets := True;
+    Try SaveAllDirty(0); Except End;
+    SaveSkipCleanLibs := False;
+    SaveSkipCleanSheets := False;
+    SweepOutside := 0;
+    Try SweepOutside := SaveBridgeRecordSweep(WorkspaceDocPaths(0)); Except SweepOutside := 0; End;
+    Running := False;
+    Result := BuildSuccessResponse(RequestId, '{"stopped":true,"edited_saved":'
+        + IntToStr(SaveAttempts) + ',"clean_left_alone":'
+        + IntToStr(SaveSkipped) + '}');
+End;
 
 { WHICH DOCUMENTS A SAVE-ALL WRITES, and why the default changed.             }
 {                                                                              }
@@ -1067,11 +1210,16 @@ Begin
         { got newer; bridge_record_not_written when it was written to    }
         { and its file did not move. bridge_record_pending counts what   }
         { the record still holds after the pass.                          }
+        { libraries_left_unedited is upstream's name for libraries_skipped }
+        { (2026-10-25 merge): upstream built its list from save globals   }
+        { the merge dropped in favour of this record, so both keys carry  }
+        { the one list.                                                   }
         Policy := ',"include_libraries":' + BoolToJsonStr(IncludeLibs)
             + ',"only_modified":' + BoolToJsonStr(OnlyModified)
             + ',"documents_skipped":' + IntToStr(SaveSkipped)
             + ',"skipped_unmodified":[' + SkippedJson + ']'
             + ',"libraries_skipped":[' + LibSkippedJson + ']'
+            + ',"libraries_left_unedited":[' + LibSkippedJson + ']'
             + ',"written_by_bridge_record":' + PipeListToJsonArray(SaveBridgeRecordPaths)
             + ',"bridge_record_not_written":' + PipeListToJsonArray(SaveBridgeRecordUnwritten)
             + ',"bridge_record_same_tick":' + PipeListToJsonArray(SaveBridgeRecordSameTick)
@@ -1337,7 +1485,7 @@ Begin
         'save_all':            Result := App_SaveAll(Params, RequestId);
         'save_document':       Result := App_SaveDocument(Params, RequestId);
         'diag_workspace':      Result := App_DiagWorkspace(Params, RequestId);
-        'stop_server':         Begin SaveAllDirty(0); Running := False; Result := BuildSuccessResponse(RequestId, '{"stopped":true}'); End;
+        'stop_server':         Result := App_StopServer(RequestId);
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_ACTION', 'Unknown application action: ' + Action);
     End;

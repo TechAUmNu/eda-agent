@@ -41,18 +41,32 @@ def _settled(text: str) -> set[str]:
     return set(re.findall(r"Action = '(\w+)'", _body(text, "LibActionAddsToFootprint")))
 
 
+#: Helpers that add one primitive to the library board for their caller.
+# AttachToCurrentFootprint went in the 2026.10.13 merge (RegisterLibPrimitive
+# replaced it, and _adds_to_board covers that); nothing defines it now.
+_BOARD_ADDERS = ("AddLibVia(", "AddExtrudedBody(")
+
+
 def _adds_to_board(text: str, handler: str) -> bool:
     body = _body(text, handler)
     # RegisterLibPrimitive is carrier-local's shared add (footprint AND
     # library board, Library.pas), kept by the 2026.10.13 merge in place of
     # upstream's inline Board.AddPCBObject / AttachToCurrentFootprint.
-    return ("Board.AddPCBObject(" in body or "AttachToCurrentFootprint(" in body
+    return ("Board.AddPCBObject(" in body or any(h in body for h in _BOARD_ADDERS)
             or "RegisterLibPrimitive(" in body)
 
 
 def test_the_shared_add_does_register_with_the_library_board():
     body = _body(_text(), "RegisterLibPrimitive")
     assert "PcbLib.Board.AddPCBObject(Prim)" in body
+
+
+def test_the_board_adders_do_add_to_the_board():
+    text = _text()
+    for helper in _BOARD_ADDERS:
+        name = helper.rstrip("(")
+        body = _body(text, name)
+        assert "Board.AddPCBObject(" in body or "RegisterLibPrimitive(" in body, name
 
 
 def test_every_writer_that_adds_to_the_board_is_settled():

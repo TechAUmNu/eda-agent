@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Router options for power routing (v0, 2026-10-18).
 
 neck_pads: a net routes at its rule's preferred width and necks down only

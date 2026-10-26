@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """pcb.batch_move_components must not read a decimal coordinate as 0.
 
 2026-10-17: x/y went through StrToIntDef(..., 0), so a move to 7260.6 mils

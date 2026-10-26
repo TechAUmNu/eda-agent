@@ -115,6 +115,7 @@ CALLS = [
     ("lib_add_footprint_tracks", {"tracks": [{"x1": 0, "y1": 0, "x2": 1.625, "y2": 0}]}),
     ("lib_add_footprint_arc", {"x_center": 0, "y_center": 0, "radius": 1.625}),
     ("lib_add_footprint_text", {"text": "1", "x": 1.625, "y": 0}),
+    ("lib_add_footprint_fills", {"fills": [{"layer": "TopPaste", "x1": 0, "y1": 0, "x2": 1.625, "y2": 1}]}),
 ]
 
 
@@ -249,7 +250,7 @@ def test_region_points_parse_exactly_under_fpc(tmp_path):
     ("Library.pas", "Lib_AddFootprintPad"), ("Library.pas", "Lib_AddFootprintPads"),
     ("Library.pas", "Lib_AddFootprintTrack"), ("Library.pas", "Lib_AddFootprintTracks"),
     ("Library.pas", "Lib_AddFootprintArc"), ("Library.pas", "Lib_AddFootprintText"),
-    ("Library.pas", "Lib_AddFootprintRegions"),
+    ("Library.pas", "Lib_AddFootprintRegions"), ("Library.pas", "Lib_AddFootprintFills"),
     ("PCB.pas", "PCB_PlacePad"),
 ])
 def test_every_authoring_handler_reads_lengths_in_the_callers_unit(unit, name):

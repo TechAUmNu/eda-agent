@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """2026.10.17.02: pcb.place_arcs (decimal mils, with nets) and the
 polygon_connect rule type.
 
@@ -70,3 +72,91 @@ def test_repour_documents_the_overlap_shrink():
     b = _body("Function PCB_RepourPolygons(", "{ PCB_PlaceVia - ")
     assert "IN-PLACE REBUILD SHRINKS OVERLAPPING POURS" in b
     assert "ePolyNoHatch" not in b and "Poured := False" not in b.replace("{ := False", "")
+
+
+def _split_top_level_args(call):
+    """Split the text between a call's outer parentheses at top-level
+    commas, skipping quoted Pascal strings ('' is an escaped quote)."""
+    open_at = call.index("(")
+    args, cur, depth, i, in_str = [], "", 0, open_at + 1, False
+    while i < len(call):
+        ch = call[i]
+        if in_str:
+            cur += ch
+            if ch == "'":
+                if i + 1 < len(call) and call[i + 1] == "'":
+                    cur += "'"
+                    i += 1
+                else:
+                    in_str = False
+        elif ch == "'":
+            in_str = True
+            cur += ch
+        elif ch == "(":
+            depth += 1
+            cur += ch
+        elif ch == ")":
+            if depth == 0:
+                args.append(cur)
+                return args
+            depth -= 1
+            cur += ch
+        elif ch == "," and depth == 0:
+            args.append(cur)
+            cur = ""
+        else:
+            cur += ch
+        i += 1
+    raise AssertionError("unbalanced call")
+
+
+def _render_pascal_concat(expr, values):
+    """Render a Pascal `'a' + F(x) + 'b'` expression, putting values[F] in
+    place of each helper call. Fails on anything else, such as a leading
+    unary plus or a second argument hiding in the expression."""
+    import re
+    out, rest = "", expr.strip()
+    first = True
+    while rest:
+        if not first:
+            assert rest.startswith("+"), "expected '+' at: " + rest[:40]
+            rest = rest[1:].lstrip()
+        first = False
+        if rest.startswith("'"):
+            m = re.match(r"'((?:[^']|'')*)'", rest)
+            out += m.group(1).replace("''", "'")
+            rest = rest[m.end():].lstrip()
+            continue
+        m = re.match(r"(\w+)\(", rest)
+        assert m, "unexpected token at: " + rest[:40]
+        depth, j = 0, m.end() - 1
+        while True:
+            if rest[j] == "(":
+                depth += 1
+            elif rest[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        out += values[m.group(1)]
+        rest = rest[j + 1:].lstrip()
+    return out
+
+
+def test_place_arc_reply_is_one_valid_json_argument():
+    # Upstream 0c478b1 left a stray comma after the width field, which made
+    # the keepout/layer tail a third (unary-plus) argument to the two-argument
+    # BuildSuccessResponse: the reply raised or ended in `"width":N,`.
+    import json
+    b = _body("Function PCB_PlaceArc(", "\nEnd;")
+    i = b.index("Result := BuildSuccessResponse(RequestId,")
+    call = b[i + len("Result := "):]
+    args = _split_top_level_args(call)
+    assert len(args) == 2, f"BuildSuccessResponse takes 2 arguments, got {len(args)}"
+    data = _render_pascal_concat(args[1], {
+        "FloatToJsonStr": "1.5", "BoolToJsonStr": "false",
+        "EscapeJsonString": "Top Layer", "GetLayerString": "Top Layer",
+    })
+    obj = json.loads(data)
+    assert obj["placed"] is True
+    assert "keepout" in obj and "layer" in obj and "width" in obj

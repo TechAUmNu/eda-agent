@@ -137,7 +137,8 @@ def _lib_ns(focus, free, server, client=None):
         "_caught": caught,
     }
     build(_bodies("Main.pas"), ["PcbEditorDocOpen", "PcbLibMayBeCurrent",
-                                "PcbLibMayBeCurrentAt"], ns)
+                                "PcbLibMayBeCurrentAt", "CanonicalPathValue"],
+          ns)
     return ns
 
 

@@ -25,6 +25,7 @@ noted 'unreadable' (tests/test_live_03_findings.py holds the sweep's pairs).
 """
 from __future__ import annotations
 
+import functools
 import re
 from pathlib import Path
 
@@ -42,11 +43,38 @@ _HELPERS = ["SchObjectIsPlainShape", "SchObjectLacksVertexArray",
             "SchObjectHasOrientation", "PinEndX", "PinEndY",
             # upstream's TextColor guard (2026.10.13 merge): MatchesFilter
             # and SetSchProperty preflight through these.
-            "SchObjectHasTextColor", "UnsupportedSchProperty"]
+            "SchObjectHasTextColor", "UnsupportedSchProperty",
+            # upstream's Name / FontId allowlists, pin text settings, No-ERC
+            # reads, component label fields and footprint pin map (2026.10.25
+            # merge): the getter and the setter call these.
+            "IsSchPinProp", "SchObjectHasName", "SchObjectHasFontId",
+            "SchObjectHasTextFontId", "ReadNoErcProp", "WriteNoErcProp",
+            "ReadSchPinProp", "WriteSchPinProp", "GetSchComponentLabelProp",
+            "SetSchComponentLabelProp", "ReadFootprintPinMap",
+            "WriteFootprintPinMap"]
+
+_UTILS = _ROOT / "scripts" / "altium" / "Utils.pas"
+
+#: Utils.pas routines the getter, the setter and the filter call (upstream's
+#: decimal-mil conversions and the != < > filter operators, 2026.10.25
+#: merge), translated from the real source rather than modelled.
+_UTILS_ROUTINES = ["IsFloatStr", "StrToFloatDef", "FilterOpPos",
+                   "FilterOpText", "FilterOpHolds"]
 
 
 def _generic():
     return load(_GENERIC, minimum=120)
+
+
+@functools.lru_cache(maxsize=1)
+def _utils():
+    return load(_UTILS, minimum=20)
+
+
+def _float_json(v):
+    """FloatToJsonStr on a value the fixtures keep in whole mils."""
+    f = float(v)
+    return str(int(f)) if f == int(f) else repr(f)
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +111,11 @@ class SchObj:
     def __init__(self, ctx, type_name, **members):
         d = {"ObjectId": ctx.ids[type_name], "Location": Loc(10, 20),
              "UniqueId": "UID", "Color": 0, "OwnerPartId": 0,
-             "OwnerPartDisplayMode": 0}
+             "OwnerPartDisplayMode": 0,
+             # A base ISch_GraphicalObject member, read by upstream's
+             # stuck-object guard in the delete loop (2026.10.25 merge):
+             # every object its own address, so a real removal never trips.
+             "I_ObjectAddress": id(self)}
         d.update(members)
         object.__setattr__(self, "_d", d)
         object.__setattr__(self, "_ctx", ctx)
@@ -184,7 +216,21 @@ def _ns(ctx, bodies):
         # Library.pas: keeps the held component's recorded name true on a
         # LibReference write (tests/test_popup_free_crossfile.py runs it).
         "NoteLibComponentRenamed": lambda o, v: None,
+        # Main.pas's modify bracket (a robot message), which upstream's
+        # WriteSchPinProp sends around a pin write (2026.10.25 merge).
+        "SchBeginModify": lambda o: None,
+        "SchEndModify": lambda o: None,
+        # Decimal mils (upstream, 2026.10.25 merge). The fixtures keep
+        # coordinates in mils already, as CoordToMils / MilsToCoord above.
+        "CoordToMilsF": lambda c: c,
+        "MilsToCoordF": lambda m: m,
+        "FloatToJsonStr": _float_json,
+        # IsIntStr indexes S[I] 1-based, which the translator does not model.
+        "IsIntStr": lambda s: re.fullmatch(r"-?[0-9]+", str(s).strip()) is not None,
+        "StrToFloat": float,
+        "DecimalSeparator": ".",
     })
+    build(_utils(), _UTILS_ROUTINES, ns)
     return ns
 
 
@@ -309,6 +355,26 @@ def test_getter_never_asks_a_type_outside_the_allowlist():
     assert ("unreadable", "VerticesCount") in ctx.diag
 
 
+def test_one_fontid_list_governs_the_preflight_the_getter_and_the_setter():
+    """2026.10.25 merge: this fork's SchPropAbsentOn and upstream's
+    SchObjectHasFontId both gated FontId, so only their INTERSECTION was
+    asked: a designator (read live upstream), a sheet name and a sheet file
+    name read 'unreadable'. The preflight now delegates, as Name does."""
+    ctx, ns = _prop_ns()
+    absent, has = ns["SchPropAbsentOn"], ns["SchObjectHasFontId"]
+    for t in sorted(ctx.ids):
+        o = SchObj(ctx, t)
+        assert absent(o, "FontId") is (not has(o)), t
+    get, put = ns["GetSchProperty"], ns["SetSchProperty"]
+    for t in ("eDesignator", "eSheetName", "eSheetFileName"):
+        o = SchObj(ctx, t, FontId=3)
+        assert get(o, "FontId") == "3", t
+        assert put(o, "FontId", "4") == 1 and o.FontId == 4, t
+    # Never a sheet entry (the AD 25.8 halt): its label font is TextFontId.
+    assert get(SchObj(ctx, "eSheetEntry", FontId=3), "FontId") == ""
+    assert ctx.modals == [] and ctx.caught == []
+
+
 def test_getter_counts_an_ordinary_raise_on_an_allowed_pair():
     """Name on a probe is ALLOWED (declared, P15). If the getter raises an
     ordinary exception there, the Try stays the backstop and the catch is
@@ -349,7 +415,7 @@ def test_a_bad_filter_name_no_longer_pops_once_per_object():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("type_name,prop", _ABSENT + [
-    (t, "Description") for t in _PLAIN + ["ePin"]])
+    (t, "Description") for t in _PLAIN])
 def test_setter_reports_failed_without_touching_a_missing_member(type_name,
                                                                   prop):
     ctx, ns = _prop_ns()
@@ -358,6 +424,23 @@ def test_setter_reports_failed_without_touching_a_missing_member(type_name,
     assert rc == -1                         # what the outer Except gave
     assert ctx.diag == [("failed", prop)]
     assert ctx.caught == []
+
+
+def test_a_pin_description_is_the_pins_own_field_and_is_reached():
+    """Upstream #75 (2026.10.25 merge): on a pin, Description is ISch_Pin's
+    own field, read and written only through the typed pin local
+    (ReadSchPinProp / WriteSchPinProp; written and read back live upstream
+    on AD 26.11). The preflight used to refuse Description on anything but
+    a component, so that route was unreachable. It never touches the
+    component field, which a pin lacks."""
+    ctx, ns = _prop_ns()
+    pin = _obj(ctx, "ePin", Description="old")
+    assert ns["GetSchProperty"](pin, "Description") == "old"
+    assert ns["SetSchProperty"](pin, "Description", "Enable, active high") == 1
+    assert pin.Description == "Enable, active high"
+    # ComponentDescription stays a component's alone.
+    assert ns["SetSchProperty"](pin, "ComponentDescription", "x") == -1
+    assert ctx.modals == [] and ctx.caught == []
 
 
 @pytest.mark.parametrize("prop", ["CurrentPartID", "PartCount"])

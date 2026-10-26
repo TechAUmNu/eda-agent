@@ -105,9 +105,13 @@ def _n1_ns(client, contents, workspace=None, loads=None):
           "GetWorkspace": workspace}
     ns.update(file_reader(contents, loads=loads))
     _caught(ns)
-    names = ["LooksAbsolutePath", "FileLooksLoadable", "UnopenedFileUnloadable",
-             "DocumentPresent", "OpenDocumentIfPresent", "BoardPathLibraryRefusal",
-             "BoardPathFileRefusal", "GetPCBBoardAnywhere", "ResolvePCBBoard"]
+    # DocPathKey: upstream's read-back in ResolvePCBBoard (the board in front
+    # must be the one named); FrontPCBBoardPath: PCB_FocusBoard's check that
+    # the focus took (both 2026.10.25 merge).
+    names = ["LooksAbsolutePath", "DocPathKey", "FileLooksLoadable",
+             "UnopenedFileUnloadable", "DocumentPresent", "OpenDocumentIfPresent",
+             "BoardPathLibraryRefusal", "BoardPathFileRefusal",
+             "GetPCBBoardAnywhere", "ResolvePCBBoard", "FrontPCBBoardPath"]
     build(_MAIN, [n for n in names if n in _MAIN], ns)
     return ns
 
@@ -611,7 +615,11 @@ def _proj_world():
         PipeListToJsonArray=lambda s: json.dumps([e for e in s.split("|") if e]),
         BuildSuccessResponse=lambda rid, data: json.loads(data),
         BuildErrorResponse=lambda rid, code, msg: {"error": code})
-    _with(w, ["AgesForPaths", "CountChangedAges", "BridgeRecordKeysIn"])
+    # SaveProjectFile: upstream's project-file write in Proj_Save (issue #94,
+    # 2026.10.25 merge). The World's project file is not on its disk, so it
+    # answers False and writes nothing; the member counters stay as pinned.
+    _with(w, ["AgesForPaths", "CountChangedAges", "BridgeRecordKeysIn",
+              "SaveProjectFile"])
     build(_PROJECT, [n for n in ("SaveProjectMembersReport",
                                  "ProjectRecordPendingJson", "Proj_Save")
                      if n in _PROJECT], w.ns)
@@ -653,6 +661,52 @@ def test_proj_save_counts_a_declined_save_as_attempted_not_written():
     w.sheet.save_moves = False                  # the editor declined
     reply = w.ns["Proj_Save"](json.dumps({}), "r")
     assert reply["documents_attempted"] == 1 and reply["documents_written"] == 0
+
+
+def _open_project_file(w, path=None):
+    """Put the World's project file on disk and open, clean, so upstream's
+    SaveProjectFile (issue #94) can reach it."""
+    if path is not None:
+        w.project.DM_ProjectFullPath = path
+    w.disk.add(w.project.DM_ProjectFullPath)
+    doc = ServerDoc(w.disk, w.project.DM_ProjectFullPath)
+    w.client.open.append(doc)
+    return doc
+
+
+def test_proj_save_default_writes_the_project_file():
+    """Upstream's issue #94: the document list changes without the modified
+    flag, so the default proj_save writes the .PrjPcb whatever it reads."""
+    w = _proj_world()
+    proj = _open_project_file(w)
+    reply = w.ns["Proj_Save"](json.dumps({}), "r")
+    assert proj.saves == 1 and reply["project_file_saved"] is True
+
+
+def test_proj_save_only_modified_leaves_a_clean_project_file_alone():
+    """only_modified rewrote a .PrjPcb nobody touched on every pass (merge
+    review 2026.10.25): the project file is now left alone like a clean
+    member, unless the bridge's record holds an edit to it."""
+    w = _proj_world()
+    proj = _open_project_file(w)
+    reply = w.ns["Proj_Save"](json.dumps({"only_modified": True}), "r")
+    assert proj.saves == 0 and reply["project_file_saved"] is False
+    w.ns["RecordBridgeEdit"](w.project.DM_ProjectFullPath)
+    reply = w.ns["Proj_Save"](json.dumps({"only_modified": True}), "r")
+    assert proj.saves == 1 and reply["project_file_saved"] is True
+
+
+def test_proj_save_never_writes_the_bridges_own_script_project_file():
+    """N2: the bridge's own script project is never saved, by any route.
+    Upstream's SaveProjectFile had no IsScriptProject guard, so a proj_save
+    with Altium_API.PrjScr focused marked it modified and wrote it."""
+    w = _proj_world()
+    proj = _open_project_file(w, r"C:\eda\scripts\altium\Altium_API.PrjScr")
+    w.sheet.Modified = True
+    reply = w.ns["Proj_Save"](json.dumps({}), "r")
+    assert proj.saves == 0 and proj.marks == 0
+    assert reply["project_file_saved"] is False
+    assert w.sheet.saves == 0                   # SaveProjectMembers' own guard
 
 
 # proj_close save=true's counters are EXECUTED through a closing project in

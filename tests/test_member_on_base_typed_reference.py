@@ -191,6 +191,69 @@ _rev("PCB.pas", "PCB_AddTestpointsForNetClass", "Prim",
      "IsAssyTestpoint_Bottom",
      "UNKNOWN on vias, normal use, inside PreProcess: FATAL-IF-WRONG "
      "probe P45")
+# Upstream code arriving with the 2026-10-25 merge. Rows quoted are the
+# docs/RELEASE_VERIFICATION.md section 1 risk table's, where the member ran
+# live; the probes are its section 39.4 rows.
+_rev("Generic.pas", "Gen_RunSpiceDeck", "ServerDoc",
+     "SupportsReload DoFileLoad UpdateModifiedDate",
+     "UNKNOWN, normal use: the same three members on the same server "
+     "document as Gen_SimCfgDocument, FATAL-IF-WRONG probe P53")
+_rev("Generic.pas", "Gen_RunSpiceDeck", "ServerDoc", "SetFileName",
+     _PROVEN + " (App_CreateDocument; row '46, results saved')")
+_rev("PCB.pas", "PCB_SaveCopyAs", "ServerDoc", "SetFileName",
+     _PROVEN + " (App_CreateDocument; row '46, results saved')")
+_rev("Generic.pas", "GetSchComponentLabelProp", "Lbl", "IsHidden",
+     _OBJID + " (eSchComponent; Lbl is its Designator or Comment "
+     "parameter, row '36, new parameter hidden')")
+_rev("Generic.pas", "SetSchComponentLabelProp", "Lbl", "IsHidden",
+     _OBJID + " (eSchComponent; Lbl is its Designator or Comment "
+     "parameter, row '36, new parameter hidden')")
+_rev("Generic.pas", "SetSchComponentLabelProp", "Lbl", "Autoposition",
+     _OBJID + " (eSchComponent); " + _PROVEN
+     + " (Comp.Designator / Comp.Comment .Autoposition, the batch label move)")
+_rev("Generic.pas", "Gen_SetGrid", "SchDoc", "SnapGridOn VisibleGridOn",
+     "upstream switched them off and on live and read them back (row '55, "
+     "grid switches'); a focused SchLib is probe P49")
+_rev("Generic.pas", "Gen_GetDocumentInfo", "SchDoc", "SnapGridOn VisibleGridOn",
+     "upstream switched them off and on live and read them back (row '55, "
+     "grid switches'); a focused SchLib is probe P49")
+_rev("Generic.pas", "Gen_SetSheetSize", "SchDoc",
+     "UseCustomSheet UpdateDocumentProperties GetState_CustomX "
+     "GetState_CustomY",
+     "UNKNOWN on this build (upstream ran them on AD 26.11): FATAL-IF-WRONG "
+     "probe P56")
+_rev("Generic.pas", "Gen_GetSheetFrame", "SchDoc",
+     "UseCustomSheet GetState_CustomX GetState_CustomY BorderOn "
+     "GetState_TemplateFileName",
+     "UNKNOWN on this build (upstream ran them on AD 26.11): FATAL-IF-WRONG "
+     "probe P56")
+_rev("PCBGeneric.pas", "PCBGetMask", "AsPrim",
+     "SolderMaskExpansionFromHoleEdge GetState_Cache",
+     _OBJID + " (eViaObject / ePadObject, through the pad cast; row '54, "
+     "via hole edge': the member and the cache route did not fault)")
+_rev("PCBGeneric.pas", "PCBSetMask", "AsPrim",
+     "SolderMaskExpansionFromHoleEdge GetState_Cache SetState_Cache",
+     _OBJID + " (eViaObject / ePadObject, through the pad cast; row '54, "
+     "via hole edge': the member and the cache route did not fault)")
+_rev("PCBGeneric.pas", "GetPCBProperty", "Obj",
+     "IsKeepoutForCopper IsKeepoutForTrack IsKeepoutForVia "
+     "IsKeepoutForSMDPad IsKeepoutForTHPad",
+     _OBJID + " (track / arc / fill / region; row '57, keepout "
+     "restrictions', written and read back live on keep-out tracks)")
+_rev("PCBGeneric.pas", "SetPCBProperty", "Obj",
+     "IsKeepoutForCopper IsKeepoutForTrack IsKeepoutForVia "
+     "IsKeepoutForSMDPad IsKeepoutForTHPad",
+     _OBJID + " (track / arc / fill / region; row '57, keepout "
+     "restrictions', written and read back live on keep-out tracks)")
+_rev("PCBGeneric.pas", "GetPCBProperty", "Obj", "TearDrop",
+     _OBJID + " (track / arc / region): FATAL-IF-WRONG probe P43")
+_rev("PCBGeneric.pas", "GetPCBProperty", "Obj", "UnionIndex",
+     "UNKNOWN on most types: FATAL-IF-WRONG probe P55")
+_rev("PCBGeneric.pas", "PCBSetUnion", "Obj", "SetState_UnionIndex",
+     "UNKNOWN on most types: FATAL-IF-WRONG probe P55")
+_rev("PCBGeneric.pas", "PCBSetComponentUnion", "Prim", "SetState_UnionIndex",
+     "UNKNOWN on a component's children (pads, tracks, bodies, texts): "
+     "FATAL-IF-WRONG probe P55")
 
 #: Accesses per reviewed key when more than one (every other key: 1).
 REVIEWED_COUNTS: dict[tuple[str, str, str, str], int] = {
@@ -205,6 +268,10 @@ REVIEWED_COUNTS: dict[tuple[str, str, str, str], int] = {
     ("Generic.pas", "GetSchVertexProperty", "Obj", "getstate_vertex"): 2,
     ("Generic.pas", "GetSchVertexProperty", "Obj",
      "getstate_verticescount"): 2,
+    ("Generic.pas", "Gen_SetGrid", "SchDoc", "snapgridon"): 2,
+    ("Generic.pas", "Gen_SetGrid", "SchDoc", "visiblegridon"): 2,
+    ("Generic.pas", "Gen_SetSheetSize", "SchDoc", "usecustomsheet"): 3,
+    ("PCB.pas", "PCB_SaveCopyAs", "ServerDoc", "setfilename"): 2,
 }
 
 _BASE_LOWER = {t.lower(): t for t in BASE_MEMBERS}

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """The deploy gate's lint must pass on the committed sources.
 
 build.py refuses to produce Altium_MCP.pas while scripts/altium/lint.py

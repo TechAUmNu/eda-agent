@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Router(exclude_layers=...) keeps a layer free of routing.
 
 v0 reserves its bottom copper as a solid GND heat-spreader under a machined

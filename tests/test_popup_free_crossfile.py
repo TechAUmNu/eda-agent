@@ -48,25 +48,31 @@ def _bodies(name):
 
 def _lib_branch_source():
     """DeleteParametersAnyOwner's library branch, as a procedure of its own
-    (the routine itself takes a Var parameter, outside the evaluator)."""
+    (the routine itself takes a Var parameter, outside the evaluator).
+    LibComp is the symbol its caller resolved before the PreProcess."""
     body = strip_comments(_bodies("Generic.pas")["DeleteParametersAnyOwner"])
     start = body.index("If IsLib Then")
     end = body.index("If (OwnerDesig <> '') Or (ReducedFilter <> '') Then")
     branch = body[start:end]
     return ("Procedure LibBranch(SchDoc : ISch_Document; "
-            "ReducedFilter : String);\n"
+            "ReducedFilter : String; LibComp : ISch_Component);\n"
             "Var\n    Comp : ISch_Component;\n    IsLib : Boolean;\n"
             "Begin\n    IsLib := True;\n" + branch + "End;\n")
 
 
 def _run_lib_branch(ns, lib):
+    """The delete with nothing on screen: the caller hands on its held
+    fallback, ResolveEditLibComponent with no name (GetTargetLibComponent's
+    liveness check plus the same-library check), and the branch deletes
+    from that alone."""
     got = []
     ns["RemoveMatchingParamsFromComponent"] = (
         lambda comp, flt, total: got.append(comp))
     ns["TotalMatched"] = 0
     ns.setdefault("NoteNextStep", lambda text: None)
+    build(_bodies("Library.pas"), ["ResolveEditLibComponent"], ns)
     build({"LibBranch": _lib_branch_source()}, ["LibBranch"], ns)
-    ns["LibBranch"](lib, "Name=Value")
+    ns["LibBranch"](lib, "Name=Value", ns["ResolveEditLibComponent"](lib, ""))
     return got
 
 
@@ -255,16 +261,28 @@ def _pcblib_ns(focus_kind, open_kinds):
         "RunProcess": lambda p: None,
         "Application": _App(),
         "Client": Client(),
+        # Upstream's footprint handlers (2026.10.25 merge): units checked
+        # first; PcbLibTarget reads the library, so past the lookup it is a
+        # member read like any other (a _Lib ends the run there).
+        "UnitsProblem": lambda u: "",
+        "PcbLibTarget": lambda lib, name, problem: lib.CurrentComponent,
     }
 
 
 _PCBLIB_LOOKUPS = [
-    ("Lib_CreateFootprint", {}, "No PCB library is active"),
+    # A name first: upstream's MISSING_PARAM check (2026.10.25 merge) comes
+    # before the gated lookup.
+    ("Lib_CreateFootprint", {"name": "F"}, "No PCB library is active"),
     ("Lib_ReloadLibrary", {"library_path": r"C:\L\a.PcbLib"},
      r"Library did not reopen: C:\L\a.PcbLib"),
     ("Lib_UpdateFootprintHeightsFrom3D", {}, "No PCB Library document focused"),
     ("Lib_SetFootprintHeight", {"height_mm": "1.5"},
      "No PCB Library document focused"),
+    # Upstream's handlers gated in the 2026.10.25 merge (the static count is
+    # tests/test_no_modal_raising_patterns.py pcblib_lookup_before_focus_check).
+    ("Lib_SelectFootprintPrimitives", {}, "No PCB library is active"),
+    ("Lib_AddFootprintVias", {"vias": "x"}, "No PCB library is active"),
+    ("Lib_AddFootprintBodies", {"bodies": "x"}, "No PCB library is active"),
 ]
 
 
@@ -277,7 +295,7 @@ def test_pcblib_lookup_is_not_named_when_it_answers_nil_anyway(
     ns = _pcblib_ns(focus, open_kinds)
     build(_bodies("Main.pas"), ["PcbEditorDocOpen", "PcbLibMayBeCurrent",
                                 "PcbLibMayBeCurrentAt"], ns)
-    build(_bodies("Library.pas"), [routine], ns)
+    build(_bodies("Library.pas"), ["PcbLibPathProblem", routine], ns)
     assert ns[routine](params, "r") == ("ERR", "NO_PCBLIB", msg)
 
 
@@ -317,7 +335,7 @@ def test_pcblib_lookup_still_asked_when_a_library_may_be_current(
     ns["PipePathsToJsonArray"] = lambda s: "[]" if not s else str(s.split("|"))
     build(_bodies("Main.pas"), ["PcbEditorDocOpen", "PcbLibMayBeCurrent",
                                 "PcbLibMayBeCurrentAt"], ns)
-    build(_bodies("Library.pas"), [routine], ns)
+    build(_bodies("Library.pas"), ["PcbLibPathProblem", routine], ns)
     try:
         ns[routine](params, "r")
     except _Reached:

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Gloss (v0 owner review, 2026-10-18): lines that turned back on themselves
 past a pin, or hugged a pad's long side to reach a via past its end, are
 re-laid as short 45/90 runs; entries stay straight and centred; other nets'

@@ -55,12 +55,24 @@ class _ModalClient:
 
 def _resolve_ns(on_disk):
     client = _ModalClient(on_disk)
+
+    class _Named(str):
+        """The board in front: the one the last OpenDocument brought up.
+        Upstream's read-back (2026.10.25 merge) compares its FileName with
+        the path named, and answers Nil for any other board."""
+
+        @property
+        def FileName(self):
+            return client.opened[-1][1] if client.opened else ""
+
     ns = {"Client": client, "FileExists": lambda p: p.upper() in client.on_disk,
           "GetPCBBoardAnywhere": lambda _d: "FALLBACK_BOARD",
-          "PCBServer": type("S", (), {"GetCurrentPCBBoard": "NAMED_BOARD"})()}
+          "PCBServer": type("S", (), {"GetCurrentPCBBoard": _Named("NAMED_BOARD")})(),
+          # Upstream's project walk for a board that is not open yet.
+          "GetWorkspace": None}
     ns.update(file_reader())               # every file on disk reads as a board
     _caught(ns)
-    build(_MAIN, [n for n in ("LooksAbsolutePath", "DocumentPresent",
+    build(_MAIN, [n for n in ("LooksAbsolutePath", "DocPathKey", "DocumentPresent",
                               "FileLooksLoadable", "UnopenedFileUnloadable",
                               "BoardPathLibraryRefusal", "ResolvePCBBoard")
                   if n in _MAIN], ns)
@@ -80,7 +92,11 @@ def test_a_board_path_still_opens_a_board():
     ns, client = _resolve_ns([r"C:\scratch\b.PcbDoc"])
     assert ns["ResolvePCBBoard"](r"C:\scratch\b.PcbDoc") == "NAMED_BOARD"
     assert client.opened == [("PCB", r"C:\scratch\b.PcbDoc")]
-    assert ns["ResolvePCBBoard"](r"C:\nope.PcbDoc") == "FALLBACK_BOARD"
+    # A board path that is neither open nor on disk answers Nil, never the
+    # board in front (upstream's no-fallback rule, 2026-10-25 merge), and
+    # is still not handed to OpenDocument.
+    assert ns["ResolvePCBBoard"](r"C:\nope.PcbDoc") is None
+    assert client.opened == [("PCB", r"C:\scratch\b.PcbDoc")]
 
 
 def test_the_refusal_names_the_library_and_the_lib_tools():
@@ -108,6 +124,13 @@ def test_every_board_path_handler_refuses_a_library_before_resolving(handler):
 
 def _outjob_ns():
     opened = []
+    processes = []
+
+    def open_if_present(kind, path):
+        opened.append((kind, path))
+        if not path.upper().endswith(".OUTJOB"):
+            raise AssertionError("Altium modal: wrong file type for OUTPUTJOB")
+        return None
 
     class C:
         def IsDocumentOpen(self, _p):
@@ -116,17 +139,22 @@ def _outjob_ns():
         def GetDocumentByPath(self, _p):
             return None
 
-    def open_if_present(kind, path):
-        opened.append((kind, path))
-        if not path.upper().endswith(".OUTJOB"):
-            raise AssertionError("Altium modal: wrong file type for OUTPUTJOB")
-        return None
+        # Upstream's activation route (2026.10.25 merge): the Projects
+        # panel's WorkspaceManager:OpenObject first, then OpenDocument.
+        def OpenDocument(self, kind, path):
+            return open_if_present(kind, path)
 
     ns = {"Client": C(), "OpenDocumentIfPresent": open_if_present,
           "ExtractJsonValue": lambda p, k: json.loads(p).get(k, ""),
           "BuildErrorResponse": lambda rid, code, msg: json.dumps(
               {"success": False, "code": code, "message": msg}),
-          "GetWorkspace": None}
+          "GetWorkspace": None,
+          "DocumentPresent": lambda p: True,
+          "UnopenedFileUnloadable": lambda p: False,
+          "ResetParameters": lambda: None,
+          "AddStringParameter": lambda k, v: processes.append(("param", k, v)),
+          "RunProcess": lambda p: processes.append(("run", p)),
+          "_processes": processes}
     body = load(_ALTIUM / "Project.pas", minimum=40)["Proj_RunOutJob"]
     # Only the part before the INI read runs here: everything from the
     # INI parse on needs Altium's TIniFile and is not what is under test.
@@ -140,6 +168,7 @@ def test_a_non_outjob_path_is_refused_before_it_is_opened():
     reply = json.loads(ns["Proj_RunOutJob"](json.dumps(
         {"outjob_path": r"C:\scratch\s2_p1b.PcbLib", "container_name": "Gerber"}), "r"))
     assert opened == []
+    assert ns["_processes"] == [], "the panel's open ran on a non-OutJob path"
     assert reply["code"] == "NO_OUTJOB"
 
 

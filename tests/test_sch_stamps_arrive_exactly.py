@@ -219,8 +219,10 @@ def test_the_pascal_decodes_after_splitting():
 
 
 def test_every_stamp_payload_builder_encodes(monkeypatch):
-    """Three modules build this payload. One of them substituting would
-    bring the ',' back on that path only.
+    """Two modules build this payload (tools/generic.py and
+    tools/sch_template.py; the executor and emitter that were the other
+    two went with the schematic layout engine in the 2026-10-25 merge).
+    One of them substituting would bring the ',' back on that path only.
 
     Any source file that sends the command must name STAMP_ENCODING and
     call encode_stamps, and none may keep the ``replace(';', ',')`` the
@@ -229,7 +231,7 @@ def test_every_stamp_payload_builder_encodes(monkeypatch):
     senders = [p for p in _SRC.rglob("*.py")
                if '"generic.set_sch_components_parameters"'
                in p.read_text(encoding="utf-8")]
-    assert len(senders) >= 3, senders
+    assert len(senders) >= 2, senders
     for path in senders:
         src = path.read_text(encoding="utf-8")
         assert "STAMP_ENCODING" in src and "encode_stamps(" in src, path
@@ -502,75 +504,16 @@ def test_every_stamp_sender_checks_the_reply():
     """Under deploy skew a handler without PctDecode writes the escapes
     literally: a datasheet URL's '?a=b' becomes '?a%3Db', '%20' becomes
     '%2520'. Only the bulk tool looked at the echo; the plan executor and
-    the sheet emitter discarded the reply, and pipeline.py stamps datasheet
-    URLs through the emitter. Every sender now keeps it and asks the one
-    shared check."""
+    the sheet emitter discarded the reply. They went with the layout
+    engine (2026-10-25 merge); the template drawer stamps now, and every
+    sender keeps the reply and asks the one shared check."""
     senders = [p for p in _SRC.rglob("*.py")
                if '"generic.set_sch_components_parameters"'
                in p.read_text(encoding="utf-8")]
-    assert len(senders) >= 3, senders
+    assert len(senders) >= 2, senders
     for path in senders:
         src = path.read_text(encoding="utf-8")
         assert "stamp_reply_problem(" in src, path
-
-
-def test_the_emitter_notes_a_stale_handler():
-    from eda_agent.design.emitter import EmitResult, _emit_parameter_stamps
-
-    class _Inst:
-        refdes = "U1"
-
-    class _Bridge:
-        def __init__(self, reply):
-            self.reply = reply
-
-        def send_command(self, command, params=None, **kw):
-            if command == "generic.set_sch_components_parameters":
-                return dict(self.reply)
-            return {"success": True}
-
-    stamps = {"U1": {"Datasheet": "https://x.example/ds?a=b%20c"}}
-    stale = EmitResult()
-    _emit_parameter_stamps([_Inst()], stamps, Path("s.SchDoc"),
-                           _Bridge({"updated": 1, "failed": 0, "total": 1}),
-                           stale)
-    assert wire.STAMP_SKEW_NOTE in stale.notes
-
-    fresh = EmitResult()
-    _emit_parameter_stamps([_Inst()], stamps, Path("s.SchDoc"),
-                           _Bridge({"updated": 1, "failed": 0, "total": 1,
-                                    "value_encoding": _PCT1}), fresh)
-    assert not any("pct1" in n for n in fresh.notes), fresh.notes
-
-
-def test_the_executor_notes_a_stale_handler(tmp_path):
-    from eda_agent.design.executor import execute_plan
-    from tests.design.test_executor import _FakeBridge, _two_part_plan
-
-    class _Stale(_FakeBridge):
-        def __init__(self, echo):
-            super().__init__()
-            self.echo = echo
-
-        def send_command(self, command, params=None, timeout=None):
-            out = super().send_command(command, params, timeout)
-            if command == "generic.set_sch_components_parameters":
-                out = {"updated": 1, "failed": 0, "total": 1}
-                if self.echo:
-                    out["value_encoding"] = _PCT1
-            return out
-
-    stale = _Stale(echo=False)
-    result = execute_plan(_two_part_plan(), str(tmp_path / "x.PrjPcb"),
-                          bridge=stale)
-    assert any(c == "generic.set_sch_components_parameters"
-               for c, _ in stale.calls), "the plan stamped nothing"
-    assert any(wire.STAMP_SKEW_NOTE in n for n in result.notes), result.notes
-
-    fresh = _Stale(echo=True)
-    result = execute_plan(_two_part_plan(), str(tmp_path / "y.PrjPcb"),
-                          bridge=fresh)
-    assert not any(wire.STAMP_SKEW_NOTE in n for n in result.notes)
 
 
 def test_an_empty_value_is_reported_not_silently_dropped(monkeypatch):

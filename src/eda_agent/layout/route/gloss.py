@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Gloss: re-lay the bends of finished tracks as short, clean 45/90 runs.
 
 Owner review of v0 (2026-10-18): after the pad-entry fixes some lines still

@@ -4479,45 +4479,33 @@ def register_easyeda_tools(mcp):
     # ---- turning a plan into EasyEDA calls ---------------------------
 
     @mcp.tool()
-    async def easyeda_emit_plan(
+    async def easyeda_emit_template(
+        template: dict[str, Any],
         plan_json: str | dict,
         resolved_parts: dict[str, dict[str, str]] | None = None,
-        engine: str = "auto",
     ) -> dict[str, Any]:
-        """Turn a validated DesignPlan into an ordered list of calls.
+        """Placement calls for a hand template: THE way to draw a sheet.
 
-        Returns the sequence as data rather than running it, so it can be
-        read and checked before anything touches a design. Run it by
-        making the calls it names, in order.
-
-        It never chooses a library part. Altium resolves a symbol by
-        name; EasyEDA needs the ``{library_uuid, uuid}`` pair a search
-        returns, and a search for one MPN can match several parts.
-        Picking one would be invisible afterwards, since the designator,
-        value and BOM line all read correctly while the footprint is
-        somebody else's. So an unresolved part becomes a search step and
-        an entry in ``unresolved_parts``, and ``runnable`` stays false.
-
-        Placement only. Wires and labels are drawn AT pins, and a pin's
-        position is not known until its symbol is placed, so connecting
-        the nets is a second pass against positions read back from the
-        editor. The result says so rather than leaving a caller to
-        assume a placed design is a wired one.
+        The template is the sheet planned by hand, as for Altium's
+        sch_preview_template: parts by designator at grid positions in
+        mils, wires through pin anchors (``"U1.3"``), power ports and
+        labels. This first pass places the parts where the template says,
+        resolving each through the plan: an unresolved part becomes a
+        search step and ``runnable`` stays false until resolved_parts
+        names its library part. Run the calls, read the pins back with
+        easyeda_get_schematic_pins (multiply its units by 10 for mils),
+        then call easyeda_emit_template_connections.
 
         Args:
+            template: the hand template; every plan part needs a position.
             plan_json: the DesignPlan, as JSON text or a dict.
-            resolved_parts: refdes to ``{"library_uuid": ..., "uuid": ...}``
-                for parts already looked up. Feed back what the searches
-                found and emit again.
-            engine: placement engine for the layout pass: "auto",
-                "sugiyama" or "force_directed".
+            resolved_parts: refdes to ``{"library_uuid", "uuid"}``.
         """
         import json
 
         from pydantic import ValidationError
 
         from ..design.easyeda_emitter import emit_easyeda_plan
-        from ..design.layout import compute_layout
         from ..design.plan import DesignPlan
 
         payload = plan_json
@@ -4531,81 +4519,75 @@ def register_easyeda_tools(mcp):
         except ValidationError as exc:
             return {"ok": False, "reason": "plan did not validate",
                     "errors": [str(e) for e in exc.errors()]}
-
         placements: dict[str, tuple[float, float, float]] = {}
-        try:
-            for placed in compute_layout(plan, engine=engine):
-                placements[placed.refdes] = (
-                    float(placed.x_mils), float(placed.y_mils),
-                    float(placed.rotation))
-        except Exception as exc:
-            # A layout failure must not become a pile of parts at the
-            # origin, which looks like one part rather than an error.
-            return {"ok": False, "reason": f"layout failed: {exc}"}
-
+        for part in (template or {}).get("parts") or []:
+            try:
+                placements[str(part["designator"])] = (
+                    float(part.get("x", 0)), float(part.get("y", 0)),
+                    float(part.get("rotation", 0) or 0))
+            except (KeyError, TypeError, ValueError):
+                return {"ok": False, "reason": f"template part {part!r} needs "
+                                               "designator, x and y"}
         emitted = emit_easyeda_plan(
             plan, placements=placements, resolved_parts=resolved_parts)
+        if emitted.nets_pending:
+            emitted.next_step = "easyeda_emit_template_connections"
         out = emitted.to_dict()
         out["ok"] = True
         return out
 
     @mcp.tool()
-    async def easyeda_emit_connections(
-        plan_json: str | dict,
+    async def easyeda_emit_template_connections(
+        template: dict[str, Any],
         pin_positions: dict[str, list[float]],
+        plan_json: str | dict = "",
+        grid: int = 100,
     ) -> dict[str, Any]:
-        """Emit the calls that connect a plan's nets, from real pins.
+        """The wiring calls for a hand template, checked against the pins
+        as placed. Second pass after easyeda_emit_template.
 
-        The second pass after ``easyeda_emit_plan``. Placement can be
-        worked out from the plan alone; connectivity cannot, because a
-        wire or label is drawn AT a pin and a pin's position only exists
-        once its symbol is on the sheet.
-
-        How each net is drawn (wire, label at every pin, or a rail
-        glyph) comes from the same rule the Altium path uses, so the two
-        backends cannot drift into drawing the same plan differently.
+        The template's wires, ports and labels are checked the same way
+        as on Altium (shorts, overlapping wires, crossings, dangling
+        ends, off-grid points, and with the plan its nets pin by pin)
+        and emitted only if there is no error.
 
         Args:
-            plan_json: the DesignPlan, as JSON text or a dict.
+            template: the same hand template.
             pin_positions: ``"REFDES.PIN"`` to ``[x, y]`` in MILS, read
-                back from the editor after placing. Note the unit: the
-                editor reports schematic units of ten mils, so passing
-                its numbers through unconverted puts every wire a tenth
-                of the way to where it belongs. Multiply by 10 first.
+                back from the editor (its units times 10). Anchors in the
+                template must use pin numbers here.
+            plan_json: the DesignPlan, to check its nets.
+            grid: grid in mils for the off-grid check.
         """
         import json
 
-        from pydantic import ValidationError
+        from ..design import sch_template as st
+        from ..design.easyeda_emitter import emit_template_connections
 
-        from ..design.easyeda_emitter import emit_easyeda_connections
-        from ..design.plan import DesignPlan
-
-        payload = plan_json
-        if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except json.JSONDecodeError as exc:
-                return {"ok": False, "reason": f"plan_json is not JSON: {exc}"}
         try:
-            plan = DesignPlan(**payload)
-        except ValidationError as exc:
-            return {"ok": False, "reason": "plan did not validate",
-                    "errors": [str(e) for e in exc.errors()]}
+            pins = st.pins_from_positions(pin_positions or {})
+        except st.TemplateError as exc:
+            return {"ok": False, "reason": str(exc)}
+        notes: list[dict] = []
+        if plan_json:
+            from pydantic import ValidationError
 
-        positions: dict[tuple[str, str], tuple[float, float]] = {}
-        for key, value in (pin_positions or {}).items():
-            if "." not in key:
-                return {"ok": False, "reason": (
-                    f"pin_positions key {key!r} is not REFDES.PIN")}
-            refdes, pin = key.split(".", 1)
-            if not isinstance(value, (list, tuple)) or len(value) != 2:
-                return {"ok": False, "reason": (
-                    f"pin_positions[{key!r}] must be [x, y]")}
-            positions[(refdes, pin)] = (float(value[0]), float(value[1]))
-
-        emitted = emit_easyeda_connections(plan, positions)
-        out = emitted.to_dict()
-        out["ok"] = True
+            from ..design.plan import DesignPlan
+            text = plan_json if isinstance(plan_json, str) else json.dumps(plan_json)
+            try:
+                plan = DesignPlan.model_validate_json(text)
+            except ValidationError as exc:
+                return {"ok": False, "reason": "plan did not validate",
+                        "errors": [str(e) for e in exc.errors()]}
+            template, _, notes = st.merge_plan(template, plan)
+        try:
+            drawing = st.build(template, pins, grid=grid)
+        except st.TemplateError as exc:
+            return {"ok": False, "reason": str(exc)}
+        for n in notes:
+            (drawing.errors if n["level"] == "error" else drawing.warnings).append(n)
+        out = {**emit_template_connections(drawing).to_dict(), **drawing.report()}
+        out["ok"] = drawing.ok
         return out
 
     @mcp.tool()
@@ -6329,8 +6311,8 @@ def register_easyeda_tools(mcp):
         DESTRUCTIVE: it places parts and draws on the open document.
         Refused unless ``confirm`` is true.
 
-        Takes the ``calls`` list from ``easyeda_emit_plan`` or
-        ``easyeda_emit_connections`` rather than a plan, so what runs is
+        Takes the ``calls`` list from ``easyeda_emit_template`` or
+        ``easyeda_emit_template_connections`` rather than a plan, so what runs is
         exactly what was reviewed. Passing a plan here instead would
         re-emit it, and a sequence that was read and a sequence that
         ran would be two different things.
@@ -8544,6 +8526,60 @@ def register_easyeda_tools(mcp):
             prepared.append(entry)
         return _call("sch.add_pins", {"pins": prepared}, timeout=300.0)
 
+    async def _easyeda_amplifier_symbol(library_uuid: str, name: str,
+                                        description: str,
+                                        part: dict) -> dict[str, Any]:
+        """Triangle amplifier symbol: create, open, pins, triangle, marks."""
+        import math
+
+        created = await easyeda_create_symbol(
+            library_uuid=library_uuid, name=name, description=description)
+        if not created.get("ok"):
+            return created
+        uuid = str(created.get("uuid") or created.get("value") or "").strip()
+        if not uuid:
+            return {"ok": False, "reason": (
+                "the editor created the symbol but returned no uuid, so "
+                "it cannot be opened to draw into"), "created": created}
+        opened = await easyeda_open_symbol(uuid=uuid,
+                                           library_uuid=library_uuid)
+        if not opened.get("ok"):
+            return {"ok": False, "reason": (
+                "the symbol was created but could not be opened, so "
+                "nothing was drawn into it"), "created": created,
+                "opened": opened}
+        batch = []
+        for pin in part["pins"]:
+            length = float(pin["length"])
+            # symbol_gen gives the BODY end; the editor wants the
+            # ELECTRICAL end, one pin length along the pin's direction,
+            # which here includes straight up and straight down.
+            a = math.radians(float(pin["rotation"]))
+            discipline = str(pin.get("electrical_type") or "passive").lower()
+            batch.append({
+                "pin_number": pin["designator"], "name": pin["name"],
+                "x": float(pin["x"]) + round(length * math.cos(a)),
+                "y": float(pin["y"]) + round(length * math.sin(a)),
+                "rotation": float(pin["rotation"]), "length": length,
+                "pin_type": _PIN_TYPE_FROM_DISCIPLINE.get(
+                    discipline, "UNDEFINED"),
+            })
+        placed = await easyeda_add_pins(pins=batch)
+        if not placed.get("ok"):
+            return {"ok": False, "reason": (
+                "the symbol was created but its pins were not placed, so "
+                "it exists and is unusable"), "pins": placed}
+        drawn = [await easyeda_add_schematic_polygon(
+            points=[[float(x), float(y)] for x, y in poly["points"]])
+            for poly in part["polygons"]]
+        for t in part["texts"]:
+            drawn.append(await easyeda_add_schematic_text(
+                text=t["text"], x=float(t["x"]), y=float(t["y"])))
+        return {"ok": True, "name": name, "uuid": uuid, "body": "amplifier",
+                "pin_count": len(batch),
+                "steps": {"created": created, "pins": placed,
+                          "body": drawn}}
+
     @mcp.tool()
     async def easyeda_create_ic_symbol(
         library_uuid: str = "",
@@ -8551,8 +8587,17 @@ def register_easyeda_tools(mcp):
         left_pins: list[dict[str, Any]] | None = None,
         right_pins: list[dict[str, Any]] | None = None,
         description: str = "",
+        body: str = "auto",
     ) -> dict[str, Any]:
         """Create a COMPLETE IC symbol in one call.
+
+        STANDARD SYMBOLS FIRST: a single op-amp, comparator, current-sense
+        or instrumentation amplifier is drawn as a TRIANGLE (inputs left
+        with + and -, output at the apex, supplies top and bottom) when
+        ``body="auto"`` and the pin names form IN+/IN-/OUT. A dual or quad
+        stays a rectangle here, and the reply says so; multi-part symbols
+        are drawn as triangles on the Altium side. ``body="rectangle"``
+        forces the box.
 
         You decide the functional grouping, inputs and power on the
         LEFT, outputs on the RIGHT. This lays the pins out on the grid,
@@ -8588,6 +8633,30 @@ def register_easyeda_tools(mcp):
         if not left and not right:
             return {"ok": False, "reason": (
                 "a symbol needs at least one pin on one side")}
+
+        from eda_agent.design.symbol_gen import (
+            generate_amplifier_symbol, looks_like_amplifier)
+
+        wanted_body = str(body or "auto").strip().lower()
+        amp = None
+        amp_note = ""
+        if wanted_body == "auto" and looks_like_amplifier(left + right,
+                                                          description):
+            try:
+                candidate = generate_amplifier_symbol(left + right)
+            except ValueError:
+                candidate = None
+            if candidate is not None and candidate.part_count == 1:
+                amp = candidate
+            elif candidate is not None:
+                amp_note = (
+                    f"{candidate.part_count - 1} amplifier units need one "
+                    "triangle per part, which is drawn on the Altium side; "
+                    "drew a rectangle here")
+        if amp is not None:
+            return await _easyeda_amplifier_symbol(
+                str(library_uuid).strip(), str(name).strip(),
+                str(description or ""), amp.parts[0])
 
         try:
             geometry = generate_ic_symbol(left, right)
@@ -8655,6 +8724,7 @@ def register_easyeda_tools(mcp):
             height=abs(float(body["y1"]) - float(body["y2"])))
 
         return {
+            **({"note": amp_note} if amp_note else {}),
             "ok": True,
             "name": str(name).strip(),
             "uuid": uuid,
@@ -8686,8 +8756,8 @@ def register_easyeda_tools(mcp):
         ONLY resistor and inductor for now, and the reason is a genuine
         limit rather than unfinished work. EasyEDA's schematic
         primitives are arc, circle, polygon, rectangle, text, wire, pin
-        and bus, with no LINE among them. A resistor and an inductor are
-        a rectangle. A capacitor is two plates, a diode a bar, a crystal
+        and bus, with no LINE among them. A resistor is a rectangle and
+        an inductor is a row of arcs. A capacitor is two plates, a diode a bar, a crystal
         two plates and a fuse a lead through a body, and every one of
         those is an open segment.
 
@@ -8785,6 +8855,19 @@ def register_easyeda_tools(mcp):
         for poly in geometry.polygons:
             drawn.append(await easyeda_add_schematic_polygon(
                 points=[[float(x), float(y)] for x, y in poly["points"]]))
+        # Arcs (an inductor's turns) go as three points on the curve, the
+        # form easyeda_add_schematic_arc takes: start, middle, end.
+        import math
+        for arc in geometry.arcs:
+            cx, cy, r = float(arc["x"]), float(arc["y"]), float(arc["radius"])
+            pts = [(cx + r * math.cos(math.radians(a)),
+                    cy + r * math.sin(math.radians(a)))
+                   for a in (arc["start"], (arc["start"] + arc["end"]) / 2,
+                             arc["end"])]
+            drawn.append(await easyeda_add_schematic_arc(
+                start_x=pts[0][0], start_y=pts[0][1],
+                reference_x=pts[1][0], reference_y=pts[1][1],
+                end_x=pts[2][0], end_y=pts[2][1]))
 
         return {
             "ok": True,
@@ -12769,7 +12852,13 @@ def register_easyeda_tools(mcp):
             spec_json: the land-pattern spec, as an object or its JSON
                 text. Same schema as the Altium tool: ``source``
                 (required), plus explicit ``pads`` or a ``dual_row`` /
-                ``quad`` generator.
+                ``quad`` generator. Spans are pad centre to pad centre
+                (C), never the outer extent Z or a package lead span.
+
+        Whatever the spec says, overlapping copper between pads of
+        different names is an error and a gap under 0.1 mm a warning
+        (``pad_clearance``), so a footprint matching a misread spec still
+        fails.
 
         Returns:
             ``{ok, rotation_applied_deg, findings: [...]}``; ok is true

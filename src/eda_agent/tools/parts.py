@@ -14,6 +14,47 @@ from typing import Any
 __all__ = ["register_parts_tools"]
 
 
+
+#: Above this many characters the provider's detail is written to the
+#: workspace and the reply carries its outline. An EasyEDA part's raw shapes
+#: came to 89 KB, which Claude Code set aside in a file under the user's
+#: profile and showed the path of.
+_DETAIL_INLINE_CHARS = 20_000
+
+
+def _outline(value: Any, depth: int = 0) -> Any:
+    """``value`` with its short scalars kept and everything bulky counted."""
+    if isinstance(value, dict):
+        if depth >= 2:
+            return f"<{len(value)} keys>"
+        return {k: _outline(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, list):
+        return f"<{len(value)} entries>"
+    if isinstance(value, str) and len(value) > 300:
+        return f"<text, {len(value)} characters>"
+    return value
+
+
+def _fit_detail(detail: Any, provider: str, part_id: str) -> dict[str, Any]:
+    """Nothing when ``detail`` fits one reply; else its outline in place of
+    it, and the whole of it written to the workspace (``detail_path``)."""
+    import json
+
+    from ..config import get_config
+
+    text = json.dumps(detail, default=str)
+    if len(text) <= _DETAIL_INLINE_CHARS:
+        return {}
+    folder = get_config().workspace_dir / "parts"
+    folder.mkdir(parents=True, exist_ok=True)
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in f"{provider}_{part_id}")
+    path = folder / f"{safe}.json"
+    path.write_text(text, encoding="utf-8")
+    return {"detail": _outline(detail), "detail_trimmed": len(text),
+            "detail_path": str(path),
+            "detail_note": ("the provider's full detail is in detail_path; "
+                            "summary holds what a part choice needs")}
+
 def register_parts_tools(mcp):
     """Register the provider-neutral part tools with the MCP server."""
 
@@ -24,65 +65,27 @@ def register_parts_tools(mcp):
     ) -> dict[str, Any]:
         """Search EVERY enabled part provider and merge the results.
 
-        No provider is a default and none is preferred: all are queried
-        equally, hits carry the provider that found them, and the merged
-        order is alphabetical by provider then part. That ordering is
-        NOT relevance, so do not read the first hit as the best one.
+        All providers count equally; hits are ordered by provider then
+        part, which is NOT relevance. A provider that cannot answer says
+        why ("unavailable" is not "no such part"). Each hit has a
+        ``kind``: "library" gives geometry (symbol or footprint),
+        "catalogue" gives identity (MPN, datasheet, stock) and no
+        geometry. Remote providers need the internet; local ones still
+        answer without it. An empty query lists the providers.
 
-        Each provider reports its own status. A provider that cannot
-        answer says why (endpoint withdrawn, software missing) instead
-        of returning nothing, because "unavailable" and "no such part"
-        are different answers and only one means stop looking.
-
-        Call with an empty query to list the providers and what they are,
-        including who operates them.
-
-        TWO KINDS OF SOURCE, merged but never conflated. A `library`
-        provider yields GEOMETRY: a symbol or footprint you can place. A
-        `catalogue` provider (the distributors and aggregators) yields
-        IDENTITY: the manufacturer part number, the datasheet, what is
-        in stock, and NO geometry at all. Every hit carries its `kind`,
-        because finding out that a distributor hit has no symbol after
-        choosing the part is the expensive way to learn it.
-
-        The two answer different questions rather than ranking against
-        each other: a catalogue tells you WHICH part to use and hands
-        you the datasheet every check here measures against, and a
-        library tells you whether you can draw it.
-
-        NOTE on maturity="offline": in this catalog that means "needs no
-        Altium", which is true here. It does NOT mean "needs nothing":
-        the remote providers want the internet. With no network the
-        search still succeeds on whatever local providers are enabled
-        (kicad_local reads libraries already on disk) and reports the
-        remote ones as unavailable, so a degraded answer is still a
-        useful one.
-
-        DATASHEET DISCIPLINE: a hit is a lead, not a verified part. The
-        `provenance` and `license` fields say what the provider claims
-        about where its geometry came from, and a blank means unknown,
-        not permissive. Audit any imported footprint against the
-        manufacturer land pattern with
-        ``lib_audit_footprint_vs_datasheet`` before trusting it.
+        DATASHEET DISCIPLINE: a hit is a lead. Blank ``provenance`` or
+        ``license`` means unknown; audit an imported footprint with
+        lib_audit_footprint_vs_datasheet before trusting it.
 
         Args:
-            query: substring matched against part name, manufacturer and
-                keywords. Empty lists the providers instead.
-            limit_per_provider: cap per source, so one large registry
-                cannot crowd out the others.
+            query: Substring of part name, manufacturer or keywords.
+            limit_per_provider: Cap per provider.
 
         Returns:
-            ``{"ok", "count", "providers": {name: status}, "hits": [...],
-            "by_mpn": [...]}`` or, for an empty query,
-            ``{"ok", "providers": [...]}``.
-
-            ``by_mpn`` correlates the same part across sources, so you
-            can see which providers carry it and what each states about
-            provenance and license. Cosmetic spelling differences fold
-            together; WILDCARD part numbers do not, because KiCad's
-            ``...C8Tx`` is a family placeholder rather than a spelling
-            of ``...C8T6``, and merging them would assert an equivalence
-            that is not safe to assume.
+            {"ok", "count", "providers": {name: status}, "hits",
+            "by_mpn"} (the same part across providers; wildcard part
+            numbers are not merged), or {"ok", "providers"} for an empty
+            query.
         """
         from eda_agent.libimport.providers import (
             available_providers,
@@ -143,27 +146,13 @@ def register_parts_tools(mcp):
     ) -> dict[str, Any]:
         """Fetch one part's detail, by the ``ref`` a search returned.
 
-        Pass the ``ref`` straight through: it is ``provider:part_id``,
-        so the source travels with the id and the merged results behave
-        like one catalogue. ``part_search`` puts a ``ref`` on every hit.
+        The ``ref`` is ``provider:part_id``; pass it through. A bare id
+        with no ``provider`` and no known prefix is refused, never
+        guessed; ``provider`` wins over a prefix.
 
-        The source is still explicit, never inferred. Nothing here picks
-        a provider for you: a bare id with no ``provider`` and no
-        recognised prefix is refused rather than guessed at, because
-        guessing is how one source quietly becomes the answer to
-        everything. ``provider`` may still be given separately, and wins
-        over a prefix if both are present.
-
-        Set ``download_dir`` to also write the provider's library files
-        there, when it offers any. Off by default because it writes to
-        disk, and a fetch should not do that unasked.
-
-        Downloaded files are checked against the KiCad installed on this
-        machine: a registry may publish a NEWER s-expression format than
-        the local KiCad can open (observed live, format 20260206 against
-        KiCad 10.0.1's 20251024, where the symbol parser refuses the file
-        outright). Any such file comes back with a ``*_warning`` entry
-        rather than looking like a clean download.
+        ``download_dir`` also writes the provider's library files there.
+        A downloaded KiCad file in a newer format than the local KiCad
+        reads comes back with a ``*_warning`` entry.
 
         Returns the provider's own detail plus a normalised summary
         (mpn, manufacturer, datasheet, provenance, license) where the
@@ -229,6 +218,7 @@ def register_parts_tools(mcp):
             "summary": summary,
             "detail": detail,
         }
+        result.update(_fit_detail(detail, source.name, part_id))
 
         if download_dir:
             download = getattr(source, "download", None)

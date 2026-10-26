@@ -27,8 +27,10 @@ _PAS = Path(__file__).resolve().parents[1] / "scripts" / "altium" / "PCB.pas"
 
 #: The pour regenerates a polygon's own primitives from its outline and
 #: net, and the pours on the reported board filled correctly, so this
-#: one is left as it is rather than changed on a guess.
-_EXEMPT = {"PCB_PlacePolygonRect", "PCB_PlacePolygon"}  # a polygon takes its net by assignment; its poured copper joins on Rebuild
+#: one is left as it is rather than changed on a guess. The board-shaped
+#: pour is the same polygon object, measured the same way: its GND pours
+#: on the round LED board filled, joined and stitched (2026-10-24).
+_EXEMPT = {"PCB_PlacePolygonRect", "PCB_PlacePolygon", "PCB_PlacePolygonBoard"}
 
 
 @pytest.fixture(scope="module")
@@ -97,9 +99,12 @@ def test_the_handlers_that_were_reported_are_bound(functions):
 
 
 def test_the_exemption_is_the_named_polygon_handlers(functions):
-    """A growing exemption list is how this defect comes back. Only the two
-    polygon placers are exempt: a polygon takes its net by assignment and the
-    pour regenerates its copper from it (PCB_PlacePolygon, 2026.10.17.03,
-    writes the net exactly as PCB_PlacePolygonRect does)."""
-    assert _EXEMPT == {"PCB_PlacePolygonRect", "PCB_PlacePolygon"}
+    """A growing exemption list is how this defect comes back. Only the
+    handlers that create a polygon, which pours its own copper, are on it
+    (PCB_PlacePolygon, 2026.10.17.03, writes the net exactly as
+    PCB_PlacePolygonRect does)."""
+    assert _EXEMPT == {"PCB_PlacePolygonRect", "PCB_PlacePolygon",
+                       "PCB_PlacePolygonBoard"}
     assert all(name in functions for name in _EXEMPT)
+    for name in _EXEMPT:
+        assert "ePolyObject" in functions[name], f"{name} is not a polygon placer"

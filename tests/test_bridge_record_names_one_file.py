@@ -857,7 +857,7 @@ def test_mirror_marks_the_absolute_doc_path_it_edited():
     assert "Marked := MarkDocDirty(SchDocMarkPath(DocPath, SchDoc));" in body
     assert "',\"mark\":' + MarkJson" in body
     refuse = body.index("If AmbiguousBareDocName(DocPath) Then")
-    assert refuse < body.index("SchDoc := SchServer.GetSchDocumentByPath(DocPath)")
+    assert refuse < body.index("SchDoc := SchDocByPathLoading(DocPath)")
 
 
 def test_sch_doc_mark_path_prefers_the_absolute_request():
@@ -899,7 +899,7 @@ def _process_doc_by_path(w, doc_path, mode="modify"):
     # upstream's filter refusal (2026.10.13 merge): ProcessDocByPath refuses
     # a filter that is not Name=Value pairs through Utils.FilterProblem.
     utils = load(_ALTIUM / "Utils.pas", minimum=20)
-    build(utils, [n for n in ["FilterProblem"] if n in utils], ns)
+    build(utils, [n for n in ["FilterProblem", "SchDocByPathLoading"] if n in utils], ns)
     build(load(_ALTIUM / "Generic.pas", minimum=100), ["ProcessDocByPath"], ns)
     return ns["ProcessDocByPath"](doc_path, 1, "", "", "", mode, "1", 0), edited
 

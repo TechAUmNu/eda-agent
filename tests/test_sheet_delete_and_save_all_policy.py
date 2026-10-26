@@ -396,12 +396,20 @@ def test_save_all_is_dispatched_with_its_params():
 
 
 def test_only_save_all_ever_arms_the_skip():
-    """Every other caller of the save pass (stop_server, the compile paths)
-    must keep writing everything. proj_save / proj_close save=true arm it
-    ONLY on their opt-in only_modified (2026.10.11.03, N4 of the .02 live
-    run): SaveProjectMembersReport arms both flags from its OnlyModified
+    """Every other caller of the save pass (the compile paths) must keep
+    writing everything. proj_save / proj_close save=true arm it ONLY on
+    their opt-in only_modified (2026.10.11.03, N4 of the .02 live run):
+    SaveProjectMembersReport arms both flags from its OnlyModified
     argument, and both handlers pass a value that is True only for an
-    explicit only_modified=true, so their default still writes everything."""
+    explicit only_modified=true, so their default still writes everything.
+
+    stop_server (App_StopServer) is the one other caller allowed to arm
+    them, with literal True: the 2026-10-25 merge ported upstream's
+    "detach rewrites nothing clean" onto this fork's record, so a detach
+    writes only documents that read modified or that the bridge recorded
+    as edited (BridgeEditRecorded overrides the skip in
+    SaveOneDocByDocRef). It must put both flags back to False after its
+    pass, or every later save inherits the skip."""
     armed = []
     for pas in sorted(_ALTIUM.glob("*.pas")):
         if pas.name == "Altium_MCP.pas":
@@ -413,7 +421,14 @@ def test_only_save_all_ever_arms_the_skip():
     assert armed and all(
         fn == "App_SaveAll"
         or (fn == "SaveProjectMembersReport" and value == "OnlyModified")
+        or (fn == "App_StopServer" and value == "True")
         for _, fn, value in armed), armed
+    stop = load(_ALTIUM / "Application.pas", minimum=10)["App_StopServer"]
+    run = _at(stop, "SaveAllDirty(0)")
+    for flag in ("SaveSkipCleanLibs", "SaveSkipCleanSheets"):
+        assert _at(stop, f"{flag} := True;") < run, flag
+        assert stop.find(f"{flag} := False;", run) != -1, (
+            f"stop_server leaves {flag} armed after its pass")
     project = load(_ALTIUM / "Project.pas", minimum=10)
     for handler in ("Proj_Save", "Proj_Close"):
         body = project[handler]
@@ -473,20 +488,141 @@ def test_exit_active_command_docstring_is_not_stale():
     assert "libraries_skipped" in flat
 
 
-def test_checkpoint_still_flushes_libraries(app_tool, monkeypatch):
+def test_checkpoint_still_flushes_libraries(app_tool, monkeypatch, tmp_path):
     """A checkpoint is a safety net: it must hold a library edit whose
-    modified flag never propagated, so it keeps the old pass."""
+    modified flag never propagated.
+
+    Since the 2026-10-25 merge it saves the checkpointed project with
+    project.save (upstream, issue #94: save_all rewrote other projects'
+    sheets to snapshot one) instead of application.save_all with
+    include_libraries=true. The safety net holds because proj_save without
+    only_modified runs SaveProjectMembersReport(Project, False), which
+    writes every open member, libraries included, whatever its flag reads.
+    So the request must not carry only_modified."""
+
+    proj = tmp_path / "P"
+    proj.mkdir()
+    (proj / "P.PrjPcb").write_text("stub", encoding="utf-8")
+    from eda_agent import config as config_module
+    monkeypatch.setattr(config_module, "config", config_module.config.model_copy(
+        update={"workspace_dir": tmp_path / "ws"}))
 
     class _Bridge(_RecordingBridge):
         async def send_command_async(self, command, *args, **kwargs):
             self.calls.append((command, args, kwargs))
             if command == "project.get_project_path":
-                return {}                  # no project: stop after the save
-            return {"saved": True}
+                return {"project_dir": str(proj), "project_name": "P.PrjPcb"}
+            return {"success": True}
 
     bridge = _Bridge()
     app_tool("app_checkpoint", bridge)
-    save = [c for c in bridge.calls if c[0] == "application.save_all"]
+    assert not [c for c in bridge.calls if c[0] == "application.save_all"]
+    save = [c for c in bridge.calls if c[0] == "project.save"]
     assert save, "app_checkpoint no longer saves first"
     (_, args, _), = save
-    assert args[0] == {"include_libraries": "true"}
+    assert "only_modified" not in args[0]
+
+
+# ---------------------------------------------------------------------------
+# proj_delete_sheet, the leftover [DocumentN] sections (merge review
+# 2026-10-25, F1). Upstream's wrapper ran finish_removal on a reply that
+# carried the members Altium holds; carrier-local's handler (kept) sent no
+# members, so the prune never ran and a sheet removed from the middle of
+# the list left a shifted copy of the last member in the file.
+# ---------------------------------------------------------------------------
+
+def test_delete_sheet_reply_carries_the_members():
+    body = _generic()["Gen_DeleteSheet"]
+    assert ",\"members\":[' + Members + ']'" in body
+    # Read after the membership is confirmed gone, never before.
+    assert _at(body, "StillMember := Gen_SheetIsMember(Project, MemberPath)") \
+        < _at(body, "Members := '';")
+
+
+def _sheet_project(tmp_path, docs):
+    for d in set(docs):
+        (tmp_path / d).write_bytes(b"x")
+    parts = ["[Design]\r\nVersion=1.0\r\n\r\n"]
+    for i, d in enumerate(docs, start=1):
+        parts.append(f"[Document{i}]\r\nDocumentPath={d}\r\n\r\n")
+    path = tmp_path / "P.PrjPcb"
+    path.write_bytes("".join(parts).encode("utf-8"))
+    return path
+
+
+def _sheet_reply(tmp_path, path, removed, **over):
+    reply = {"success": True, "removed": True, "still_member": False,
+             "file_path": str(tmp_path / removed), "was_loaded": True,
+             "closed": True, "previously_focused": "",
+             "previously_focused_still_open": True,
+             "project_path": str(path), "project_saved": True,
+             "project_save_route": "document_save",
+             "project_file_checked": True, "project_file_lists_sheet": False,
+             "file_deleted": False, "file_still_on_disk": True,
+             "members": [str(tmp_path / "Main.SchDoc"), str(tmp_path / "H.SchDoc")]}
+    reply.update(over)
+    return reply
+
+
+@pytest.fixture()
+def _backups(monkeypatch, tmp_path):
+    from eda_agent import config as config_mod
+
+    class _Cfg:
+        workspace_dir = tmp_path / "ws"
+
+    monkeypatch.setattr(config_mod, "get_config", lambda: _Cfg())
+
+
+def test_delete_sheet_prunes_a_shifted_copy_of_the_last_member(
+        generic_tool, tmp_path, _backups):
+    """G removed from Main, G, H: Altium wrote Main, H, H. The removed name
+    is gone, so the handler's read-back says success, and the trailing H
+    stayed in the file until this prune."""
+    path = _sheet_project(tmp_path, ["Main.SchDoc", "H.SchDoc", "H.SchDoc"])
+    out = generic_tool("proj_delete_sheet", _RecordingBridge(
+        _sheet_reply(tmp_path, path, "G.SchDoc")),
+        file_path=str(tmp_path / "G.SchDoc"))
+    assert out["stale_sections"]["removed_sections"] == ["Document3"]
+    assert "members" not in out
+    assert out["success"] is True
+    assert b"[Document3]" not in path.read_bytes()
+
+
+def test_delete_sheet_prune_does_not_override_a_failed_close(
+        generic_tool, tmp_path, _backups):
+    """finish_removal would force success once the file stops listing the
+    sheet; a sheet that did not close is still a failure."""
+    path = _sheet_project(tmp_path, ["Main.SchDoc", "H.SchDoc", "G.SchDoc"])
+    reply = _sheet_reply(tmp_path, path, "G.SchDoc", success=False,
+                         closed=False, project_file_lists_sheet=True,
+                         reason="the sheet is still loaded after Client.CloseDocument")
+    out = generic_tool("proj_delete_sheet", _RecordingBridge(reply),
+                       file_path=str(tmp_path / "G.SchDoc"))
+    assert out["stale_sections"]["removed_sections"] == ["Document3"]
+    assert out["project_file_lists_sheet"] is False
+    assert out["success"] is False
+    assert out["reason"] == "the sheet is still loaded after Client.CloseDocument"
+
+
+def test_delete_sheet_a_pruned_listing_completes_the_removal(
+        generic_tool, tmp_path, _backups):
+    path = _sheet_project(tmp_path, ["Main.SchDoc", "H.SchDoc", "G.SchDoc"])
+    reply = _sheet_reply(tmp_path, path, "G.SchDoc", success=False,
+                         project_save_route="not_focused",
+                         project_file_lists_sheet=True, reason="manual steps")
+    out = generic_tool("proj_delete_sheet", _RecordingBridge(reply),
+                       file_path=str(tmp_path / "G.SchDoc"))
+    assert out["success"] is True and out["project_file_lists_sheet"] is False
+    assert "leftover" in out["reason"]
+
+
+def test_delete_sheet_without_save_project_leaves_the_file(
+        generic_tool, tmp_path, _backups):
+    path = _sheet_project(tmp_path, ["Main.SchDoc", "H.SchDoc", "H.SchDoc"])
+    before = path.read_bytes()
+    reply = _sheet_reply(tmp_path, path, "G.SchDoc", project_save_route="none")
+    out = generic_tool("proj_delete_sheet", _RecordingBridge(reply),
+                       file_path=str(tmp_path / "G.SchDoc"), save_project=False)
+    assert path.read_bytes() == before
+    assert "stale_sections" not in out and "members" not in out
