@@ -60,6 +60,40 @@ async def _after_sync(bridge, pairs_before: set) -> dict:
     return out
 
 
+
+NO_NET = "?"
+
+
+def netlist_nodes(pins: list[dict]) -> tuple[list[tuple[str, str, str, str]], int]:
+    """(component, pin, pin_name, net) rows from project.get_nets pin records.
+
+    Rows missing a component, pin or net are skipped, and exact repeats are
+    kept once. A "?" row (a pin of a multi-part component seen from another
+    part's sheet) is dropped when the same pin is on a real net. Returns the
+    rows and how many "?" rows were dropped.
+    """
+    rows: list[tuple[str, str, str, str]] = []
+    for p in pins:
+        comp = str(p.get("component", "")).strip()
+        pin = str(p.get("pin", "")).strip()
+        pin_name = str(p.get("pin_name", "")).strip()
+        net = str(p.get("net", "")).strip()
+        if not comp or not pin or not net:
+            continue
+        rows.append((comp, pin, pin_name, net))
+    on_a_net = {(c, p) for c, p, _pn, n in rows if n != NO_NET}
+    nodes: list[tuple[str, str, str, str]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    dropped = 0
+    for row in rows:
+        if row[3] == NO_NET and (row[0], row[1]) in on_a_net:
+            dropped += 1
+            continue
+        if row not in seen:
+            seen.add(row)
+            nodes.append(row)
+    return nodes, dropped
+
 def register_project_tools(mcp):
     """Register project tools with the MCP server."""
 
@@ -641,6 +675,11 @@ def register_project_tools(mcp):
         Single-pin and unnamed nets are included so the file is a faithful
         dump, not a routed-only view.
 
+        A multi-part component is listed once per placed part, and the pins
+        of its other parts come back with the net name "?" (Altium's "no
+        net here"). Those rows are dropped when the same pin is on a real
+        net; a pin seen only as "?" is kept under "?" (it is unconnected).
+
         Args:
             output_path: Destination file. Defaults to
                 workspace/netlist.<ext> if omitted.
@@ -648,7 +687,8 @@ def register_project_tools(mcp):
             project_path: Optional project path; uses active if omitted.
 
         Returns:
-            Dictionary with output_path, net_format, net_count, node_count.
+            Dictionary with output_path, net_format, net_count, node_count,
+            no_net_rows_dropped.
         """
         from pathlib import Path
         from ..config import get_config
@@ -664,15 +704,7 @@ def register_project_tools(mcp):
         data = await bridge.send_command_async("project.get_nets", params)
         pins = data.get("pins", []) if isinstance(data, dict) else []
 
-        nodes: list[tuple[str, str, str, str]] = []
-        for p in pins:
-            comp = str(p.get("component", "")).strip()
-            pin = str(p.get("pin", "")).strip()
-            pin_name = str(p.get("pin_name", "")).strip()
-            net = str(p.get("net", "")).strip()
-            if not comp or not pin or not net:
-                continue
-            nodes.append((comp, pin, pin_name, net))
+        nodes, no_net_dropped = netlist_nodes(pins)
 
         by_net: dict[str, list[tuple[str, str, str, str]]] = {}
         for n in nodes:
@@ -699,7 +731,9 @@ def register_project_tools(mcp):
         else:
             out = get_config().workspace_dir / default_name
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(text, encoding="utf-8")
+        # newline="": the PADS text already carries CRLF; text mode on
+        # Windows would turn each one into CR CR LF.
+        out.write_text(text, encoding="utf-8", newline="")
 
         return {
             "success": True,
@@ -707,6 +741,7 @@ def register_project_tools(mcp):
             "net_format": fmt,
             "net_count": len(by_net),
             "node_count": len(nodes),
+            "no_net_rows_dropped": no_net_dropped,
         }
 
     @mcp.tool()
