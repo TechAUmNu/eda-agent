@@ -75,7 +75,9 @@ class Request:
         text = re.sub(r"[ \t]+\n", "\n", text)
         tools = self.tools_for(backend)
         if tools:
-            text += "\n\nTools for this: " + ", ".join(f"`{t}`" for t in tools) + "."
+            from .folds import call_form
+            shown = list(dict.fromkeys(call_form(t) for t in tools))
+            text += "\n\nTools for this: " + ", ".join(f"`{t}`" for t in shown) + "."
         return text
 
 

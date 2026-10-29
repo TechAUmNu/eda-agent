@@ -204,9 +204,8 @@ _ENGINE_PARAGRAPHS = {
 _UI_AUTOMATION_ALTIUM = (
     "API FIRST, THEN THE INTERFACE, WITHOUT ASKING. The app_ tools that\n"
     "press buttons, pick menus and type into Altium's dialogs\n"
-    "(app_click_menu, app_run_ui_command, app_press_dialog_button,\n"
-    "app_drive_dialogs, app_set_dialog_control, app_canvas and the rest)\n"
-    "come second to an API tool. When an API tool seems to fail or be\n"
+    "(app_menu, app_ui, app_press_dialog_button, app_drive_dialogs and\n"
+    "the rest) come second to an API tool. When an API tool seems to fail or be\n"
     "missing, the cause has usually been a wrong argument or a tool that\n"
     "was not found, and driving a dialog instead has ended with Altium\n"
     "crashed, so first {reach} with what you are trying to do. When there\n"

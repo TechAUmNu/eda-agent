@@ -378,7 +378,7 @@ one design. They apply in every session.
    priority for any review or check that concerns electrical connection (what
    sits on a net, what a pin connects to, missing or extra connections,
    single-pin or no-driver nets, schematic-to-PCB drift) is the actual net
-   data, read from the compiled design: `proj_get_nets`, `proj_get_connectivity` /
+   data, read from the compiled design: `proj_get_nets`,
    `proj_get_connectivity_many`, `obj_crossref_net`, `proj_compare_sch_pcb`,
    `proj_get_unconnected_pins`, `proj_get_erc_violations`. Read the connections; do not
    infer them from a picture.
@@ -417,8 +417,7 @@ one design. They apply in every session.
      NPN/PNP. Never a rectangle for a discrete.
    - If you must drop primitives by hand, ALWAYS use the BULK tools --
      `lib_add_footprint_pads`/`lib_add_footprint_tracks`/`lib_add_pins`/
-     `lib_add_symbol_lines` -- one call for the whole set, never a loop of
-     the singular `lib_add_footprint_pad`/`lib_add_footprint_track`
+     `lib_add_symbol_lines` -- one call for the whole set, never a loop
      (rule 4). Glyph
      lines/arcs/polygons accept a finer `grid` than the 100-mil pin grid.
 
@@ -679,7 +678,7 @@ which is why they are written down rather than left to the checker.
    `route_plan` does this by default; if you place tracks yourself with
    `pcb_place_tracks`, emit the chamfer segment rather than a single
    corner point. Acute (less than 90 degree) corners are worse than
-   either and are what `audit_find_acute_angles` looks for.
+   either and are what `audit` with kind `acute_angles` looks for.
 
 2. **No via in a pad unless the part forces it.** A via inside a
    surface-mount pad wicks solder off the joint and has to be filled
@@ -928,8 +927,7 @@ def get_discipline(include_schema: bool = True) -> str:
         # while the prose around them was adapted. Matching the opening
         # parenthesis as well reaches them. Both forms keep a delimiter
         # after the name, which is what stops a shorter key rewriting
-        # the front of a longer name: `lib_add_footprint_pad` and
-        # `lib_add_footprint_pads` are both real and both mapped.
+        # the front of a longer name.
         #
         # Naming the shorter-name hazard with an INVENTED example here
         # broke a guard that scans this file for tool-shaped names and

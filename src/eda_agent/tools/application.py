@@ -264,12 +264,20 @@ def register_meta_tools(mcp):
 
         _SCHEMA_CAP = 40
 
-        tools = await mcp.list_tools()
+        from .folds import reach_of
+
+        tools = list(await mcp.list_tools())
+        # Members of a family tool and single-item tools are not
+        # advertised; they are listed with how to reach them.
+        tools += list((getattr(mcp, "hidden", {}) or {}).values())
         q = query.lower().strip()
         out = []
         cat_counts: dict[str, int] = {}
         for t in tools:
             md = tool_metadata(t.name)
+            reach = reach_of(t.name)
+            if reach:
+                md = dict(md, reach=reach)
             if category and md["category"] != category:
                 continue
             if maturity and md["maturity"] != maturity:
@@ -334,7 +342,7 @@ def register_meta_tools(mcp):
         import json as _json
 
         tools = await mcp.list_tools()
-        known = {t.name for t in tools}
+        known = {t.name for t in tools} | set(getattr(mcp, "hidden", {}) or {})
         if name not in known:
             return {"error": f"unknown tool: {name}"}
         # Prevent self-recursion; tool_catalog is fine to invoke.

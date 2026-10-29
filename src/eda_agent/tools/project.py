@@ -194,9 +194,9 @@ def register_project_tools(mcp):
         first and refuses if it cannot; if any other project closes, it
         stops and reports it as ``closed_instead``. Without saving, it
         clears each member's modified flag so no save prompt appears; if
-        one appears anyway it answers "Save None" then "OK" (untested
-        live), but only when every listed document belongs to this
-        project, else it presses nothing. A document shared with another
+        one appears anyway it answers "Save None" then "OK", but only
+        when every listed document belongs to this project, else it
+        presses nothing. A document shared with another
         open project loses its edits too. A prompt left open blocks the
         bridge: answer it with app_press_dialog_button.
 
@@ -459,11 +459,9 @@ def register_project_tools(mcp):
 
         Note: This only removes the document from the project, it doesn't delete the file.
 
-        The project file is saved and read back: a removal held only in
-        memory comes back when the project is reopened. Altium's own save
-        leaves the old [DocumentN] sections past the new count in the file,
-        so those are taken out here (only past the count, only when the rest
-        match the project's documents, after a backup to the workspace).
+        The project file is saved and read back, and leftover [DocumentN]
+        sections past the new count are taken out (after a backup), since
+        a removal held only in memory comes back on reopen.
 
         Args:
             document_path: Full path to the document to remove
@@ -617,17 +615,8 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Write the compiled connectivity to a flat netlist file.
 
-        Pulls the full pin-net table once (the same data as get_nets) and
-        writes it as a standalone netlist that other tools can import. Two
-        formats:
-
-        - "pads": PADS-PCB ASCII, *NET* section with one *SIGNAL* block per
-          net listing its component.pin nodes. Widely importable.
-        - "tabular": one "component,pin,pin_name,net" CSV row per node, for
-          quick diffing or spreadsheet review.
-
-        Single-pin and unnamed nets are included so the file is a faithful
-        dump, not a routed-only view.
+        "pads" (PADS-PCB ASCII) or "tabular" (component,pin,pin_name,net
+        CSV). Single-pin and unnamed nets are included.
 
         Args:
             output_path: Destination file. Defaults to
@@ -701,8 +690,6 @@ def register_project_tools(mcp):
     async def proj_compile(project_path: Optional[str] = None) -> dict[str, Any]:
         """Compile a project to check for errors.
 
-        This runs the project compilation which validates connectivity
-        and checks for design errors.
 
         Args:
             project_path: Optional project path. If None, uses active project.
@@ -723,14 +710,9 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Load every schematic sheet of a project into the Altium editor.
 
-        Project-scope operations (query_objects, batch_modify, etc. with
-        scope="project") only iterate sheets already resident in SchServer.
-        A sheet listed as a project member via get_open_documents may still
-        show loaded=false, meaning Altium hasn't opened its editor state.
-        Call this tool first to force every sheet to load as a proper
-        project member (no free documents).
-
-        This is a no-op for sheets already loaded. Safe to call repeatedly.
+        Project-scope queries and edits see only loaded sheets
+        (``loaded`` in app_list_documents); call this first. Safe to
+        repeat.
 
         Args:
             project_path: Optional project path. If None, uses focused project.
@@ -859,15 +841,12 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Export a full BOM from the compiled project.
 
-        DATASHEET DISCIPLINE: The BOM is the canonical list of
-        manufacturer part numbers in this design. The response carries
-        `_datasheet_guidance` with per-part search queries. Before
-        drawing any conclusion about a listed part, fetch and read
-        its datasheet (WebSearch + WebFetch if not already at hand).
-        Library metadata here is NOT authoritative.
+        DATASHEET DISCIPLINE: library metadata is NOT authoritative; read
+        a part's datasheet before drawing conclusions about it
+        (``_datasheet_guidance`` has search queries).
 
-        Returns every component with designator, comment/value, footprint,
-        library reference, and all pin-net connections.
+        Every component with designator, comment, footprint, library
+        reference and pin nets.
 
         With ``variant``, the BOM is the one that variant builds: its
         not-fitted parts leave ``components`` (listed in ``not_fitted``),
@@ -926,7 +905,6 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Get full information about one placed component.
 
-        IMPORTANT: for more than one, use proj_get_component_info_many.
         Pin nets need a project compile (30-60 s on a large project);
         with_pin_nets=False answers in under a second.
 
@@ -996,9 +974,8 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Full per-component info for MANY designators in ONE round-trip.
 
-        PREFER THIS over looping `proj_get_component_info`: one compile
-        for the batch. ``with_pin_nets=False`` skips the compile for a
-        sub-second metadata read.
+        One compile for the whole list (a list of one for a single part).
+        ``with_pin_nets=False`` skips the compile for a sub-second read.
 
         Parameters and library metadata are not authoritative: read the
         manufacturer datasheet before reasoning about pin functions,
@@ -1147,16 +1124,9 @@ def register_project_tools(mcp):
     async def proj_get_board_info() -> dict[str, Any]:
         """Get PCB board information, outline vertices, layer stack, origin.
 
-        IT DOES NOT REQUIRE A PCB TO BE ACTIVE, which is what this used
-        to claim. The handler resolves ANY open board, so with a
-        schematic focused it answers about some other document.
-        MEASURED: with a schematic active and a two-document project
-        focused, it returned an outline belonging to neither, and gave
-        no way to tell.
-
-        ``board_path`` in the reply names the document that actually
-        answered. Check it before trusting the geometry, or activate
-        the board you mean first.
+        It answers about ANY open board when none is focused. Check
+        ``board_path`` (the board that answered), or focus the board you
+        mean first.
 
         Returns:
             Dictionary with origin_x, origin_y, board_path, outline
@@ -1250,17 +1220,11 @@ def register_project_tools(mcp):
                                options: Optional[dict] = None) -> dict[str, Any]:
         """Export a board to a STEP 3D model with Altium's own exporter.
 
-        First through Altium's exporter object
-        (``PCBServer.Board3DModelExporter``), which shows no dialog and
-        keeps the options last used in File > Export > STEP 3D
-        (``route: "exporter"``). If that writes nothing, it runs PCB:Export
-        with the STEP 3D format, the route File > Export > STEP 3D takes,
-        and answers its three dialogs: the file name (already filled in),
-        the export options (Altium's defaults) and the closing "Done!"
-        (``route: "dialogs"``, with ``exporter_reason``). Only those three
-        are pressed; any other dialog stops the export and is reported.
-        ``generated`` is true only when a new file is at output_path
-        afterwards.
+        First with no dialog, on the options last used in File > Export >
+        STEP 3D (``route: "exporter"``). If that writes nothing, through
+        File > Export > STEP 3D, answering its three dialogs (``route:
+        "dialogs"``, with ``exporter_reason``); any other dialog stops it.
+        ``generated`` is true only when a new file is at output_path.
 
         Args:
             output_path: Full path for the .step file.
@@ -1484,9 +1448,8 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Give a project an OutJob by copying one in the user's own style.
 
-        Every user exports differently, so this invents no outputs. It
-        copies an existing OutJob (the user's own from another project,
-        or one Altium ships), points each output at this project's
+        It invents no outputs: it copies an existing OutJob (the user's
+        own, or one Altium ships), points each output at this project's
         documents, writes every container to ``output_dir``, and adds the
         copy to the project. Run it afterwards with proj_run_outjob or
         proj_generate_fab_package.
@@ -1658,8 +1621,7 @@ def register_project_tools(mcp):
             format: Output format. Only ``"pdf"`` is silent today
                 (default). ``"png"``, ``"jpg"``, ``"bmp"`` return an
                 explicit ``IMAGE_FORMAT_UNSUPPORTED`` error.
-            width: Kept for API compatibility. Unused by the PDF path.
-            height: Kept for API compatibility. Unused by the PDF path.
+            width, height: Unused by the PDF path.
 
         Returns:
             Dictionary confirming the export with the resolved path,
@@ -1719,9 +1681,7 @@ def register_project_tools(mcp):
     async def proj_list_outjob_containers(outjob_path: str = "") -> dict[str, Any]:
         """List all output containers defined in an OutJob file.
 
-        OutJob files define output configurations (Gerber, PDF, BOM, etc.)
-        organized into named containers. Use this to discover what outputs
-        are available before running them with `proj_run_outjob`.
+        Run one with `proj_run_outjob`.
 
         Args:
             outjob_path: Path to the .OutJob file. If omitted, uses the
@@ -1748,9 +1708,8 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Execute a specific output container from an OutJob file.
 
-        First use `proj_list_outjob_containers` to list available
-        containers, then run the desired one by name. Supports both GeneratedFiles
-        (Gerber, drill, BOM, etc.) and Publish (PDF) container types.
+        Containers are listed by `proj_list_outjob_containers`; both
+        generated-file and publish (PDF) containers run.
 
         SUCCESS MEANS A FILE WAS WRITTEN under ``output_dir`` after the
         run started; a container bound to a managed release or with its
@@ -2291,12 +2250,8 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Write the variant fitted/not-fitted matrix to a CSV.
 
-        Builds the conventional component-by-variant table: one row per
-        flattened component, one column per variant, each cell
-        ``Fitted`` / ``Not Fitted`` / ``Alternate``. Unlike
-        ``proj_list_variants`` (which lists only per-variant deviations), every
-        component appears, so the file merges cleanly with a BOM in a
-        spreadsheet.
+        One row per component (every one), one column per variant, each
+        cell ``Fitted`` / ``Not Fitted`` / ``Alternate``.
 
         Args:
             output_path: Destination .csv. Defaults to
@@ -3115,10 +3070,8 @@ def register_project_tools(mcp):
         """The net classes, component classes, differential pairs and rooms
         the project's schematics declare, from the compiled project.
 
-        These are what an Update PCB would create on the board (from
-        directives, class parameters and sheet rooms), read before it
-        does. Compare them with pcb_get_net_classes /
-        pcb_get_differential_pairs to see what the board is missing.
+        What an Update PCB would create on the board; compare with
+        pcb_get_net_classes / pcb_get_differential_pairs.
 
         Returns:
             ``sheets_examined`` (an empty answer from 0 sheets means
@@ -3193,8 +3146,7 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Get all messages from the Messages panel (compile errors, ERC violations, etc.).
 
-        Compiles the project first so violation data is current, then returns
-        every violation with its text, severity, and source document.
+        Compiles the project first.
 
         Args:
             project_path: Optional project path. If None, uses active project.
@@ -3217,13 +3169,8 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Search for components across all project sheets.
 
-        DATASHEET DISCIPLINE: Results carry `_datasheet_guidance`. If
-        you're searching by a part number / comment to answer a
-        technical question (pinout, rating, behavior), the matched
-        parts' datasheets must be consulted before drawing any
-        conclusion. Symbol metadata is not ground truth.
-
-        Performs a case-insensitive partial match against the chosen property.
+        Case-insensitive partial match. For a technical question about a
+        match, read its datasheet; symbol metadata is not ground truth.
 
         Args:
             search_text: Text to search for (e.g., "U1", "100nF", "LM317")
@@ -3263,9 +3210,7 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Get pin-to-net connectivity for a specific component.
 
-        For more than one component prefer `proj_get_connectivity_many`.
-        Compiles the project and returns every pin with number, name, net
-        and electrical type.
+        Compiles the project; every pin with number, name, net and type.
 
         Args:
             designator: Component designator (e.g., "U1", "R8")
@@ -3316,13 +3261,9 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Pin-net connectivity for MANY components in ONE round-trip.
 
-        PREFER THIS over looping `proj_get_connectivity`.
-
-        DATASHEET DISCIPLINE: pin_name on every component in the
-        response comes from the symbol and can be wrong. Before
-        reasoning about pin functions, fetch each part's manufacturer
-        datasheet. The response carries `_datasheet_guidance` +
-        `_datasheet_parts`.
+        One compile for the whole list (a list of one for a single part).
+        Pin names come from the symbol and can be wrong: check pin
+        functions in the datasheet.
 
         Args:
             designators: List of component designators.
@@ -3408,13 +3349,9 @@ def register_project_tools(mcp):
         """Set ERC report levels (Project Options > Error Reporting).
 
         A project's policy, not a way to a clean ERC. Before turning a
-        check off because it reports something that is not there, look for
-        a stale compile: Altium keeps a document's state until it is
-        reopened, so a resized or redrawn sheet can report "Off sheet" or
-        duplicates that are gone (sch_set_sheet_size and sch_draw_template
-        reopen the sheet; proj_force_recompile recompiles). A demo take
-        switched "Off sheet" off for exactly that, hiding the check for
-        every later sheet.
+        check off because it reports something that is not there, rule out
+        a stale compile (proj_force_recompile): a resized or redrawn sheet
+        can report "Off sheet" or duplicates that are gone.
 
         Args:
             levels: {violation type: level}. A type is its exact description
@@ -3460,10 +3397,8 @@ def register_project_tools(mcp):
     async def proj_force_recompile() -> dict[str, Any]:
         """Flush all dirty docs, invalidate the compile cache, and recompile.
 
-        Use this when you need a guaranteed-fresh netlist, e.g.
-        immediately before re-running a connectivity check the user
-        has disputed. Returns prev / new compile tick so you can
-        verify the recompile actually happened.
+        For a netlist that is surely fresh. The compile ticks before and
+        after show the recompile happened.
 
         Returns:
             Dict with recompiled, prev_compile_tick, new_compile_tick,
@@ -3478,11 +3413,9 @@ def register_project_tools(mcp):
     async def proj_get_compile_freshness() -> dict[str, Any]:
         """Report the age of the cached netlist and which docs are dirty.
 
-        Use this when you're about to disagree with the user about
-        connectivity, first check how stale the netlist you're
-        reading actually is, and whether any open editor docs haven't
-        been saved yet. A dirty doc means the netlist does NOT
-        reflect what the user is looking at.
+        Check this before disagreeing with the user about connectivity:
+        a dirty document means the netlist does NOT reflect what the user
+        is looking at.
 
         ``needs_compile`` and ``violation_count`` are Altium's own
         answer: whether the project needs compiling now, and how many
@@ -3542,14 +3475,8 @@ def register_project_tools(mcp):
         If the parameter already exists it is updated; otherwise a new hidden
         parameter object is created on the sheet.
 
-        NOTE: the target sheet must already be loaded as a proper project
-        member. Call `proj_load_sheets` once at the start of a batch;
-        auto-opening from inside this tool risks detaching the sheet and
-        rendering it as a "free document". If the sheet isn't loaded this
-        tool returns NOT_LOADED.
-
-        The write is persisted to disk immediately via the IServerDocument
-        API, no subsequent `app_save_all` is required.
+        The sheet must be loaded (`proj_load_sheets`), else NOT_LOADED.
+        The write goes to disk at once; no `app_save_all` is needed.
 
         Args:
             file_path: Full path to the schematic document (.SchDoc).
@@ -3580,16 +3507,9 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Compare schematic and PCB component counts.
 
-        Compiles the project and compares physical component counts between the
-        schematic and the primary PCB document, via the component mappings
-        (matched + side-only) -- the same authoritative path as
-        ``proj_get_differences``. For the per-component breakdown of what is
-        extra on each side, use ``proj_get_differences``.
-
-        DATASHEET DISCIPLINE: If the diff reveals mismatched or missing
-        parts and you're proposing a fix, the datasheets of the parts
-        involved are authoritative on their pinout and behavior, fetch
-        them before suggesting a footprint change or pin reassignment.
+        Compiles the project. ``proj_get_differences`` gives the
+        per-component breakdown. Before proposing a footprint or pin fix,
+        read the parts' datasheets.
 
         Args:
             project_path: Optional project path. If None, uses active project.
@@ -3612,12 +3532,11 @@ def register_project_tools(mcp):
     async def proj_sync_pcb() -> dict[str, Any]:
         """Push schematic changes to the PCB (Design > Update PCB Document).
 
-        NOT SILENT: Altium's ECO dialog cannot be suppressed, so this
-        BLOCKS the bridge until Execute Changes is pressed. Prefer opening
-        the same dialog without blocking, and press it yourself rather
-        than asking the user: app_click_menu("Design|Import Changes From
-        <Project>.PrjPcb", expect_dialog="Engineering Change Order"), then
-        app_press_dialog_button("Execute Changes",
+        NOT SILENT: the ECO dialog BLOCKS the bridge until Execute Changes
+        is pressed. Prefer opening it without blocking and pressing it
+        yourself: app_menu(how="click", args={"menu_path": "Design|Import
+        Changes From <Project>.PrjPcb", "expect_dialog": "Engineering
+        Change Order"}), then app_press_dialog_button("Execute Changes",
         allow_irreversible=True) and "Close". It focuses the PCB first so the update runs
         schematic to board (refuses with WRONG_FOCUS if it cannot); check
         the ECO lists the PcbDoc before executing. ``app_list_open_dialogs``
@@ -3632,8 +3551,7 @@ def register_project_tools(mcp):
             board against the schematic: ``footprint_mismatch`` (the
             board's footprint is not the schematic's), ``missing_on_board``
             and ``diff_pairs_removed`` (pairs defined only on the board,
-            which a sync deletes). A footprint swap that "ran" twice and
-            never reached the board was found only by eye before.
+            which a sync deletes).
         """
         bridge = get_bridge()
         pairs_before = await _pair_names(bridge)
@@ -3649,13 +3567,9 @@ def register_project_tools(mcp):
     async def proj_sync_schematic() -> dict[str, Any]:
         """Push PCB changes back to schematic (back-annotate ECO). Attempts silent execution.
 
-        Equivalent to Design > Update Schematic in Altium Designer.
-        Mirror of update_pcb: compiles, records before-state mappings,
-        invokes PCB:UpdateSchematicFromPCB with silent-mode parameter flags
-        (DisableDialog, Silent, NoConfirm, AutoApply), recompiles, and
-        reports the after-state delta. Modern Altium versions execute
-        without a dialog; older versions may still require manual
-        confirmation (flagged via dialog_may_have_opened).
+        Design > Update Schematic, compiled before and after with the
+        change reported. Older Altium versions may still show a dialog
+        (``dialog_may_have_opened``).
 
         Returns:
             Dictionary with success, pcb_path, before/after mapping counts,

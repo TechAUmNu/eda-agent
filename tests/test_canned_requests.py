@@ -36,7 +36,10 @@ def test_every_named_tool_exists_on_its_backend(surfaces, backend):
         tools = req.tools_for(backend)
         if tools is None:
             continue
-        missing = [t for t in tools if t not in surfaces[backend]]
+        # A member of a family tool counts: the prompt names it by the
+        # family tool that runs it.
+        reachable = set(surfaces[backend].names) | set(surfaces[backend].hidden)
+        missing = [t for t in tools if t not in reachable]
         assert not missing, f"{req.name} on {backend} names {missing}"
 
 
@@ -65,7 +68,8 @@ def test_registered_on_the_real_server_with_arguments(tmp_path):
 
     text = _text(mcp, "check_part", {"designator": "U3"})
     assert text.startswith("Check U3 against its datasheet")
-    assert "`proj_get_component_info`" in text
+    # Named by the bulk tool that runs it.
+    assert "`proj_get_component_info_many`" in text
     assert text.count(REPORT_ONLY) == 1
     with pytest.raises(Exception):
         _text(mcp, "check_part")

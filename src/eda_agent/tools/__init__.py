@@ -255,7 +255,17 @@ def _register_minimal(mcp, backend: str) -> str:
     return name
 
 
-def _register_full(mcp, backend: str = DEFAULT_BACKEND) -> str:
+def _register_full(server, backend: str = DEFAULT_BACKEND) -> str:
+    # Families of tools that differ by a mode register as one tool each;
+    # see folds.py. The members stay reachable through tool_invoke.
+    from .folds import FoldingServer
+    mcp = FoldingServer(server)
+    backend = _register_surface(mcp, backend)
+    mcp.finish()
+    return backend
+
+
+def _register_surface(mcp, backend: str = DEFAULT_BACKEND) -> str:
     backend = (backend or DEFAULT_BACKEND).strip().lower()
     if backend not in BACKENDS:
         backend = DEFAULT_BACKEND

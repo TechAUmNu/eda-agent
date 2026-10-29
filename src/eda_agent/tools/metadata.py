@@ -329,6 +329,8 @@ _CATEGORY_BY_NAME = {
     # Updates eda-agent itself, on every backend: about the tool surface,
     # like tool_catalog, rather than about any one EDA tool.
     "server_update": "meta",
+    # The family tool for the audits; its members keep the audit_ prefix.
+    "audit": "audit",
 }
 
 
@@ -548,8 +550,33 @@ def interaction_of(name: str, category: str | None = None) -> str:
     return SILENT
 
 
+def _fold_metadata(name: str) -> "dict[str, str] | None":
+    """A family tool takes its members' category and their most demanding
+    maturity and interaction, since any kind may be the one called."""
+    from .folds import FOLDS, built_members
+
+    if name not in FOLDS:
+        return None
+    members = list(built_members(name).values()) or list(FOLDS[name].members.values())
+    if not members:
+        return None
+    records = [tool_metadata(m) for m in members]
+    maturity_rank = {OFFLINE: 0, SIMULATOR: 1, LIVE_ONLY: 2}
+    interaction_rank = {READONLY: 0, SILENT: 1, PARTIAL: 2, MODAL: 3}
+    return {
+        "name": name,
+        "category": records[0]["category"],
+        "maturity": max((r["maturity"] for r in records), key=maturity_rank.get),
+        "interaction": max((r["interaction"] for r in records),
+                           key=interaction_rank.get),
+    }
+
+
 def tool_metadata(name: str) -> dict[str, str]:
     """Full metadata record for one tool name."""
+    folded = _fold_metadata(name)
+    if folded:
+        return folded
     category = category_of(name)
     return {
         "name": name,

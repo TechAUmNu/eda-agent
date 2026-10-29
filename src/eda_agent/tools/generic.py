@@ -602,9 +602,8 @@ def register_generic_tools(mcp):
                 and AllowDatabaseSynchronize, and report NameIsReadOnly,
                 ValueIsReadOnly, IsRule, IsSystemParameter and
                 IsConfigurable; ports take AutoSize,
-                OverrideDisplayString and HarnessColor (the last two read
-                back but do not survive save and reopen on AD 26.11; the
-                reply notes it). Symbol pins
+                OverrideDisplayString and HarnessColor (the last two do
+                not survive save and reopen; the reply notes it). Symbol pins
                 take SwapIdPart (shared by every pin of the part),
                 SwapIdPin, SwapIdPair, SwapIdPartPin.
             scope: "active_doc" (default), "project" (all SCH sheets),
@@ -658,9 +657,7 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Create and place a schematic object.
 
-        If you are creating more than one object, use `obj_batch_create`
-        instead, one IPC round-trip for the whole set vs one LLM turn
-        per object.
+        For more than one object use `obj_batch_create`.
 
         Args:
             object_type: Altium object type constant (see `obj_query`)
@@ -752,9 +749,7 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Get font properties for a given font ID.
 
-        Reads the Altium font table to retrieve the full font specification
-        (size, name, bold, italic, etc.) for a font ID obtained from an object's
-        FontId property.
+        The font an object's FontId names.
 
         Args:
             font_id: Font ID from an object's FontId property
@@ -907,12 +902,9 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Mirror a placed schematic component horizontally.
 
-        USE THIS RATHER THAN WRITING `IsMirrored`. Setting that property
-        with `obj_modify` sets the flag (the Properties panel even shows
-        it ticked) and the part does not move: the canvas draws from the
-        primitives. Like Altium's own mirror, this sets the flag and
-        reflects the primitives, so the result matches a hand mirror on
-        disk and survives Update From Libraries.
+        USE THIS RATHER THAN WRITING `IsMirrored` with obj_modify, which
+        sets the flag and leaves the drawing unchanged. This reflects the
+        primitives as Altium's own mirror does.
 
         Args:
             designator: component to mirror, e.g. "U1"
@@ -1435,10 +1427,8 @@ def register_generic_tools(mcp):
     async def obj_crossref_net(net_name: str) -> dict[str, Any]:
         """Compare the schematic vs PCB membership of a named net.
 
-        Gives the schematic's pins and the board's pads on the net and
-        the difference both ways. Use it when `proj_get_nets` or
-        `proj_get_connectivity` surprises you, or the board and the
-        schematic disagree: ``pcb_only`` pins are connections an Update
+        The schematic's pins and the board's pads on the net, and the
+        difference both ways: ``pcb_only`` pins are connections an Update
         PCB from Schematic would remove.
 
         Args:
@@ -1551,8 +1541,6 @@ def register_generic_tools(mcp):
     async def obj_refresh_document() -> dict[str, Any]:
         """Force a redraw/refresh of the current document.
 
-        For schematics, calls GraphicallyInvalidate. For PCB, sends a
-        PCB:Zoom Redraw command.
 
         Returns:
             Dictionary confirming the refresh
@@ -1565,8 +1553,7 @@ def register_generic_tools(mcp):
     async def proj_get_unconnected_pins() -> dict[str, Any]:
         """Find unconnected/floating pins in the focused project.
 
-        Compiles the project first (required for connectivity data), then
-        iterates all components via the DM API to check pin connection status.
+        Compiles the project first.
 
         Returns:
             Dictionary with "count" and "unconnected_pins" array, each entry
@@ -1585,12 +1572,9 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Draw a short wire stub + net label on every unconnected schematic pin.
 
-        Finds floating pins (via the same connectivity check as
-        `proj_get_unconnected_pins`), then for each one places a wire extending from
-        the pin's electrical end outward along its orientation, terminated by a
-        net label named "<designator>_<pin_number>". This makes dangling pins
-        explicit so ERC reports them as named single-pin nets rather than silent
-        floats, and gives a labelled anchor to wire up later.
+        Each floating pin (as `proj_get_unconnected_pins` finds them) gets
+        a wire out from its end and a net label "<designator>_<pin_number>",
+        so ERC reports it as a named single-pin net.
 
         Args:
             stub_length_mils: Length of each stub wire in mils (default 100)
@@ -1706,9 +1690,6 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Place a text-box note on the active schematic.
 
-        Useful for design commentary, TODO markers, revision notes.
-        The box sizes itself to (x1,y1)-(x2,y2) and contains the
-        given text.
 
         Args:
             x1, y1, x2, y2: Note box corners in mils
@@ -1741,13 +1722,9 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Place a sheet symbol linking to a child schematic document.
 
-        Used for hierarchical designs, the parent sheet has one sheet
-        symbol per child .SchDoc in the project. The sheet_file_name
-        must exactly match a .SchDoc that's a project member. Without
-        that match the sheet symbol is dangling.
-
-        After placing, use `sch_place_sheet_entry` to add sheet entries
-        corresponding to the child sheet's ports.
+        sheet_file_name must match a .SchDoc in the project exactly, or
+        the symbol is dangling. Then add its entries with
+        `sch_place_sheet_entry`.
 
         Args:
             x1, y1, x2, y2: Sheet symbol box corners in mils
@@ -1896,12 +1873,10 @@ def register_generic_tools(mcp):
         """Read, or set, the active sheet's reference zones, margin, border
         style and template graphics. Call with nothing to read.
 
-        Measured on AD 26.11: on a standard sheet size the zones and
-        margin follow the size, so zones_x, zones_y and margin_width do
-        not take there; the custom_* ones (used by a custom-size sheet),
-        border, reference zones and template graphics do. Every value
-        written is read back, and one that did not take is listed in
-        ``not_applied``.
+        On a standard sheet size the zones and margin follow the size, so
+        zones_x, zones_y and margin_width do not take; the custom_* ones
+        apply to a custom-size sheet. Every value is read back; one that
+        did not take is in ``not_applied``.
 
         Args:
             zones_x, zones_y: Reference zones across and down (from 1).
@@ -2040,10 +2015,8 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Place a bus segment between two XY coordinates on the active schematic.
 
-        Buses carry multi-signal groups like DATA[0..7]. Place a bus line
-        and then attach net labels with the bus naming syntax to mark the
-        signal group. Typical workflow: bus line, bus entries at each pin,
-        then connect each bus entry to a wire.
+        Name it with a net label in bus syntax (DATA[0..7]), then add bus
+        entries and wires.
 
         Args:
             x1: Start X coordinate in mils
@@ -2142,14 +2115,9 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Move each port's cross-reference off its wire, to the free end.
 
-        Altium prints a port's "Sheet[zone]" reference (Port Cross
-        References on) past the end it takes as free, and keeps that end
-        when the port moves without its wire, so references of a moved
-        block can lie on their wires; compiling does not fix them. The
-        wired end comes from Altium's ConnectedEnd, or from the wires and
-        pin ends at each end when that reads none or both. Each reference
-        goes 20 mil past the free end, its text running away from the port.
-        Vertical ports are listed under ``skipped``. The sheet is not saved.
+        A port moved without its wire keeps its "Sheet[zone]" reference on
+        the wired end, over the wire. Each reference goes 20 mil past the
+        free end. Vertical ports are ``skipped``. The sheet is not saved.
 
         Args:
             sheet_path: The .SchDoc.
@@ -2344,9 +2312,8 @@ def register_generic_tools(mcp):
         """Place a No-ERC marker at coordinates to suppress the ERC violations
         there.
 
-        Use this after running ERC to suppress known-good violations at specific
-        pin or wire locations. Put it on the pin's wire end (its connection
-        point), not on the body side. The marker is placed active and
+        Put it on the pin's wire end (its connection point), not on the
+        body side. The marker is placed active and
         suppressing ALL violations, as Altium's own placed No ERC does; to
         narrow it, write ErrorKindSetToSuppress / SuppressAll=false on the
         eNoERC object with obj_modify. obj_query reads SuppressAll,
@@ -2374,16 +2341,9 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Place a MANUAL junction at coordinates on the active schematic.
 
-        A T NEEDS NONE. Altium draws an automatic junction wherever a wire
-        ends on another wire or three wire ends meet, blue, exactly as
-        interactive wiring leaves it, and it does so for wires this server
-        places too. The object this tool creates is a manual junction:
-        drawn dark red with a lock marker, and placed on a T it just sits
-        on top of the blue one.
-
-        Use it only where two wires CROSS and must connect. A plain
-        crossing is not a connection in Altium, and a manual junction is
-        what makes it one.
+        A T NEEDS NONE: Altium draws a junction itself where a wire ends
+        on another. Use this only where two wires CROSS and must connect;
+        a plain crossing is not a connection.
 
         Args:
             x: X coordinate in mils
@@ -2661,8 +2621,7 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Set the unit system for the active schematic.
 
-        Calls ISch_Document.SetState_Unit with a TUnit enum value. The
-        current unit is readable via `obj_get_document_info` (unit_system field).
+        `obj_get_document_info` reads the current one.
 
         Args:
             unit: one of
@@ -2694,17 +2653,8 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Place a parameter-set directive at (x, y) on the active schematic.
 
-        A parameter-set directive attaches a single ``name=value`` design
-        parameter to a wire or net. Drop the directive on top of the target
-        wire/net and the compile engine will propagate the parameter. Common
-        uses:
-
-        - ``param_name="DifferentialPair", param_value="USB"``
-         , marks the net as a member of the USB differential pair.
-        - ``param_name="NetClass", param_value="HighSpeed"``
-         , assigns the net to the HighSpeed class.
-        - ``param_name="Signal_Stimulus", param_value="..."``
-         , any custom per-net rule parameter.
+        Attaches one ``name=value`` parameter to the wire or net under it,
+        e.g. ``DifferentialPair=USB`` or ``NetClass=HighSpeed``.
 
         Args:
             x, y: Location in mils, place ON the target wire/net.
@@ -2730,10 +2680,7 @@ def register_generic_tools(mcp):
     async def sch_get_directives() -> dict[str, Any]:
         """Enumerate parameter-set directives on the active schematic sheet.
 
-        Returns every ISch_ParameterSet on the sheet along with its location
-        and the list of parameters it carries. Use this to audit which nets
-        have explicit NetClass / DifferentialPair / custom-rule assignments
-        before a compile, or to verify a bulk placement worked.
+        Each with its location and the parameters it carries.
 
         Returns:
             Dictionary with ``directives`` array, each entry has
@@ -2986,17 +2933,11 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Unpin placed schematic components from a stale source library.
 
-        Schematic mirror of ``pcb_clear_source_footprint_library``.
-        After a library is renamed or moved, placed parts still point at
-        it through two component properties: ``SourceLibraryName`` (the
-        file) and ``DesignItemId`` (the item; a re-link that changes only
-        LibReference leaves it on the old item, the panel's
-        ``<Not Found>``). This clears the first and sets the second to
-        LibReference, so Altium re-matches from the Available Libraries.
-
-        DesignItemId is a property, not a parameter: writing it as a
-        parameter only adds a stray one. For one part use ``obj_modify``
-        with property ``DesignItemId``.
+        After a library is renamed or moved, placed parts still point at it
+        (``SourceLibraryName``, ``DesignItemId``) and show ``<Not Found>``.
+        This clears the first and sets the second to LibReference, so
+        Altium re-matches from the Available Libraries. DesignItemId is a
+        property, not a parameter (for one part: ``obj_modify``).
 
         Args:
             sheet_path: absolute .SchDoc path; empty = the focused
@@ -3040,11 +2981,7 @@ def register_generic_tools(mcp):
     async def sch_get_constraint_groups() -> dict[str, Any]:
         """Enumerate IDocument.DM_ConstraintGroups on the active schematic.
 
-        Constraint groups are FPGA-style pin/timing constraints attached
-        to a document. Each group has a target kind and id, plus a list
-        of IConstraint entries with a kind/data payload. Useful for
-        auditing FPGA pin assignments and timing constraints that don't
-        show up in the regular PCB design-rule list.
+        FPGA-style pin and timing constraints attached to the document.
 
         Returns:
             Dict with groups (list of {target_kind, target_id,
@@ -3065,9 +3002,6 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Place a harness connector on the active schematic sheet.
 
-        Harness connectors group a set of wires/buses into a named
-        signal bundle, letting cross-sheet connections be drawn as a
-        single line instead of a bus.
 
         Args:
             x, y: Bottom-left corner in mils.
@@ -3097,9 +3031,7 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Place a cross-sheet connector (off-sheet port) on the active sheet.
 
-        Cross-sheet connectors are the hierarchical equivalent of a net
-        label, they connect a signal to the same net name on another
-        sheet.
+        Connects to the same net name on another sheet.
 
         Args:
             x, y: Connector location in mils.
@@ -3227,10 +3159,8 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Mark a placed schematic component as a net tie.
 
-        A net tie shorts the nets that land on its pins for routing while
-        keeping them as separate logical nets (so ERC/DRC treat the join as
-        intentional). Sets the component's ComponentKind. Use on a dedicated
-        net-tie footprint/symbol you have already placed and wired.
+        Joins the nets on its pins while keeping them separate nets, so
+        ERC and DRC accept the join. Sets the part's ComponentKind.
 
         Args:
             designator: Component to convert (e.g. "NT1").
@@ -3254,9 +3184,8 @@ def register_generic_tools(mcp):
         """Offset the trailing number of schematic designators by a delta.
 
         Adds ``delta`` to the numeric suffix of every component designator
-        on the active sheet (e.g. delta=100 turns R5 into R105),
-        optionally restricted to a designator prefix. Handy after copying
-        a block to avoid designator collisions before re-annotating.
+        on the active sheet (delta=100 turns R5 into R105), optionally
+        only those with a prefix.
 
         Args:
             delta: Non-zero integer added to each designator's number.
@@ -3353,20 +3282,9 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Set UniqueId on every placed symbol with this designator.
 
-        ECO treats sub-parts of a multi-gate symbol (quad comparator,
-        dual op-amp) as one physical footprint only when they share
-        UniqueId. Four copies of part 1 with four UniqueIds become four
-        packages.
-
-        EVERY MATCHING SYMBOL IS STAMPED, not the first. Sharing the id
-        is the whole point of the property, so writing one of three and
-        reporting success left the other two pointing at packages of
-        their own, which is the exact condition this repairs.
-
-        Altium mints UniqueIds itself and may keep its own. Each write
-        is read back and COMPARED; if any symbol kept its old id the
-        call fails and names which ones, because a partial stamp still
-        leaves the device split.
+        The gates of a multi-part device are one package only when they
+        share UniqueId. Every matching symbol is stamped and read back;
+        if any kept its old id the call fails and names it.
 
         Args:
             designator: Component reference as drawn (e.g. "U_COMP2B").
@@ -3393,15 +3311,10 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Copy a placed schematic part and share the master's UniqueId.
 
-        ECO groups multi-part packages (quad comparators, dual op-amps)
-        only when every unit has the same UniqueId. Writing UniqueId
-        after the copy is already on the sheet remints a new id if that
-        value is already present. This path stamps UniqueId on the
-        replica *before* AddSchObject, which is the share that sticks.
-
-        Finds the first instance whose designator matches, Replicates
-        it, optionally switches CurrentPartID, optionally moves it, and
-        keeps the master's UniqueId.
+        The gates of a multi-part device are one package only when they
+        share UniqueId; the copy keeps the source's (written before it is
+        placed, the only way it sticks). Optionally switches the part id
+        and moves it.
 
         Args:
             designator: Source instance to copy (e.g. "U8").
@@ -3473,8 +3386,7 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Attach a datafile link to a component's current implementation.
 
-        Datafile links are how parametric data (IBIS model files, sim
-        models, external CSVs) is bound to a schematic part.
+        E.g. an IBIS or simulation model file.
 
         Args:
             designator: Component reference (e.g., "U1").
@@ -3506,9 +3418,7 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Create many schematic objects in ONE IPC round-trip.
 
-        PREFER THIS over looping `obj_create`. Each create costs one
-        LLM turn when done one at a time; batched it's a single
-        PreProcess/PostProcess + one save for the whole set.
+        One Altium transaction for the whole list.
 
         Args:
             operations: List of create dicts, each with:
