@@ -6491,6 +6491,242 @@ def register_pcb_tools(mcp):
         return await bridge.send_command_async("pcb.get_impedance_profiles", {})
 
     @mcp.tool()
+    async def pcb_render_png(path: str, dpi: int = 300, side: str = "top",
+                             config_type: str = "", config: str = "") -> dict[str, Any]:
+        """Draw the board as Altium itself draws it, into a PNG file.
+
+        Altium's own renderer, so the picture is the board as the editor
+        shows it (layers, colours, the view configuration), not a redraw
+        from read-back data like ``pcb_render_svg``.
+
+        Args:
+            path: Full path of the .png to write.
+            dpi: 25 to 2400 (default 300).
+            side: ``top`` or ``bottom``.
+            config_type, config: A view configuration to draw with; empty
+                uses the board's current one.
+
+        Returns:
+            ``written`` (a new file is there), ``size_bytes``,
+            ``return_code`` (Altium's) and ``problem``.
+        """
+        import os
+        if not path or not os.path.isabs(path) or not path.lower().endswith(".png"):
+            return {"ok": False, "reason": "path must be a full path to a .png"}
+        if side not in ("top", "bottom"):
+            return {"ok": False, "reason": "side is top or bottom"}
+        if not 25 <= int(dpi) <= 2400:
+            return {"ok": False, "reason": "dpi must be 25 to 2400"}
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        out = await get_bridge().send_command_async("pcb.render_png", {
+            "path": path, "dpi": str(int(dpi)), "side": side,
+            "config_type": config_type, "config": config}, timeout=300.0)
+        if isinstance(out, dict):
+            out["size_bytes"] = os.path.getsize(path) if os.path.isfile(path) else 0
+        return out
+
+    @mcp.tool()
+    async def pcb_save_board_text(path: str, format: str = "json") -> dict[str, Any]:
+        """Write the whole board to a JSON or ASCII text file, for diffs.
+
+        Altium's own text form of the board, written to a separate file:
+        the board document is not saved, renamed or marked changed
+        (``board_name_kept`` confirms it). Two dumps of the same board
+        compare line by line, which a binary PcbDoc does not.
+
+        Args:
+            path: Full path of the file to write; never the board itself.
+            format: ``json`` or ``ascii``.
+        """
+        import os
+        format = (format or "").lower()
+        if format not in ("json", "ascii"):
+            return {"ok": False, "reason": "format is json or ascii"}
+        if not path or not os.path.isabs(path):
+            return {"ok": False, "reason": "path must be a full path"}
+        if path.lower().endswith((".pcbdoc", ".pcblib")):
+            return {"ok": False, "reason": "path must not be an Altium document"}
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        out = await get_bridge().send_command_async(
+            "pcb.save_board_text", {"path": path, "format": format}, timeout=300.0)
+        if isinstance(out, dict):
+            out["size_bytes"] = os.path.getsize(path) if os.path.isfile(path) else 0
+        return out
+
+    @mcp.tool()
+    async def pcb_net_figures(nets: Optional[list[str]] = None,
+                              limit: int = 500) -> dict[str, Any]:
+        """Altium's own figures for each net: lengths, delays, vias and pads.
+
+        ``routed_length_mils`` (the copper laid), ``signal_length_mils``
+        (pad to pad, as Altium measures it for length matching),
+        ``delay_total`` and ``signal_delay`` (Altium's propagation
+        figures), ``vias``, ``pads`` and ``in_differential_pair``.
+
+        Args:
+            nets: Only these nets. Empty lists every net.
+            limit: The most nets to list (default 500).
+        """
+        params = {"limit": str(int(limit))}
+        if nets:
+            params["nets"] = ",".join(n.strip() for n in nets if n.strip())
+        return await get_bridge().send_command_async("pcb.net_figures", params, timeout=180.0)
+
+    @mcp.tool()
+    async def pcb_clear_guides() -> dict[str, Any]:
+        """Remove every placement guide and snap point from the active board.
+
+        Altium's SDK lets scripts delete guides but not add them; add
+        them in the editor.
+        """
+        return await get_bridge().send_command_async("pcb.guides", {"action": "delete_all"})
+
+    @mcp.tool()
+    async def pcb_local_grid(action: str, x: float = 0, y: float = 0, name: str = "",
+                             step_x: Optional[float] = None, step_y: Optional[float] = None,
+                             rotation: Optional[float] = None,
+                             angular_step: Optional[float] = None,
+                             radial_step: Optional[float] = None,
+                             min_radius: Optional[float] = None,
+                             max_radius: Optional[float] = None,
+                             start_angle: Optional[float] = None,
+                             end_angle: Optional[float] = None) -> dict[str, Any]:
+        """Add a cartesian or polar grid for one area, or read the grid at a point.
+
+        A polar grid places parts on circles and spokes about a centre, as
+        on a round board; a cartesian grid can be rotated. A local grid
+        wins over the board grid in its area.
+
+        Args:
+            action: ``add_cartesian``, ``add_polar``, ``at`` (the grid that
+                applies at x, y) or ``delete_all`` (every user grid).
+            x, y: The grid origin (the centre of a polar grid), absolute mils.
+            name: The grid's name.
+            step_x, step_y, rotation: Cartesian steps in mils and its angle.
+            angular_step, radial_step, min_radius, max_radius,
+            start_angle, end_angle: Polar degrees and mils.
+        """
+        if action not in ("add_cartesian", "add_polar", "at", "delete_all"):
+            return {"ok": False, "reason": "action is add_cartesian, add_polar, at or delete_all"}
+        params = {"action": action, "x": str(x), "y": str(y), "name": name}
+        for key, value in (("step_x", step_x), ("step_y", step_y), ("rotation", rotation),
+                           ("angular_step", angular_step), ("radial_step", radial_step),
+                           ("min_radius", min_radius), ("max_radius", max_radius),
+                           ("start_angle", start_angle), ("end_angle", end_angle)):
+            if value is not None:
+                params[key] = str(value)
+        return await get_bridge().send_command_async("pcb.local_grid", params)
+
+    @mcp.tool()
+    async def pcb_plane_state() -> dict[str, Any]:
+        """For each internal plane layer, whether Altium holds it poured."""
+        return await get_bridge().send_command_async("pcb.plane_state", {})
+
+    @mcp.tool()
+    async def pcb_hole_symbols(show: bool, symbol_size: float = 50,
+                               symbol_type: int = 0, layer_pair: int = 0) -> dict[str, Any]:
+        """Show or hide the drill symbols Altium draws on every hole.
+
+        Args:
+            show: True draws them, False removes them.
+            symbol_size: Symbol size in mils (default 50).
+            symbol_type: Altium's symbol style code (default 0).
+            layer_pair: Which drill pair's holes (index, default 0).
+        """
+        return await get_bridge().send_command_async("pcb.hole_symbols", {
+            "show": "true" if show else "false", "symbol_size": str(symbol_size),
+            "symbol_type": str(int(symbol_type)), "layer_pair": str(int(layer_pair))})
+
+    @mcp.tool()
+    async def pcb_component_parameters(designator: str, action: str = "list",
+                                       name: str = "", value: str = "") -> dict[str, Any]:
+        """Read, set or remove the parameters a placed part carries on the board.
+
+        These are the board-side parameters of the part (as in its
+        Properties panel on the PCB), not the schematic's.
+
+        Args:
+            designator: The part.
+            action: ``list``, ``set`` (name and value) or ``remove`` (name).
+
+        Returns:
+            ``parameters`` as they now read, ``read_back`` (the value of
+            ``name`` after the change) and ``done``.
+        """
+        if action not in ("list", "set", "remove"):
+            return {"ok": False, "reason": "action is list, set or remove"}
+        if action != "list" and not name:
+            return {"ok": False, "reason": "name is required to set or remove"}
+        return await get_bridge().send_command_async("pcb.component_parameters", {
+            "designator": designator, "action": action, "name": name, "value": value})
+
+    @mcp.tool()
+    async def pcb_place_simple_body(shape: str, x: float, y: float, radius: float,
+                                    height: float = 0, standoff: float = 0,
+                                    layer: str = "Mechanical1", side: str = "top",
+                                    color: Optional[int] = None,
+                                    identifier: str = "") -> dict[str, Any]:
+        """Place a cylinder or sphere 3D body on the board, with no STEP file.
+
+        Altium's own model factory makes the shape: enough for an
+        electrolytic can, an LED dome, a standoff or a clearance check.
+
+        Args:
+            shape: ``cylinder`` or ``sphere``.
+            x, y: The centre, absolute mils.
+            radius: Mils.
+            height: Mils, for a cylinder.
+            standoff: Height above the board, mils.
+            layer: The mechanical layer the body sits on.
+            side: ``top`` or ``bottom``.
+            color: BGR colour as an integer; grey when omitted.
+            identifier: A name to find the body by later.
+        """
+        if shape not in ("cylinder", "sphere"):
+            return {"ok": False, "reason": "shape is cylinder or sphere"}
+        if radius <= 0 or (shape == "cylinder" and height <= 0):
+            return {"ok": False, "reason": "radius (and height for a cylinder) must be above 0"}
+        if side not in ("top", "bottom"):
+            return {"ok": False, "reason": "side is top or bottom"}
+        params = {"shape": shape, "x": str(x), "y": str(y), "radius": str(radius),
+                  "height": str(height), "standoff": str(standoff), "layer": layer,
+                  "side": side, "identifier": identifier}
+        if color is not None:
+            params["color"] = str(int(color))
+        return await get_bridge().send_command_async("pcb.place_simple_body", params)
+
+    @mcp.tool()
+    async def pcb_place_baseline_dimension(x: float, y: float, points: list,
+                                           layer: str = "TopOverlay",
+                                           rotation: float = 0) -> dict[str, Any]:
+        """Place one baseline dimension: several points measured from a base.
+
+        Args:
+            x, y: The base point, absolute mils.
+            points: The measured points, as [x, y] pairs in mils.
+            layer: The layer to draw on (default TopOverlay).
+            rotation: The measuring direction in degrees, 0 along X.
+
+        Returns:
+            ``placed``, ``points_sent`` and ``points_read_back``.
+        """
+        pairs = []
+        for p in points or []:
+            if not isinstance(p, (list, tuple)) or len(p) != 2:
+                return {"ok": False, "reason": "points are [x, y] pairs"}
+            pairs.append(f"{float(p[0])},{float(p[1])}")
+        if not pairs:
+            return {"ok": False, "reason": "points is required"}
+        return await get_bridge().send_command_async("pcb.place_baseline_dimension", {
+            "x": str(x), "y": str(y), "points": "/".join(pairs), "layer": layer,
+            "rotation": str(rotation)})
+
+    @mcp.tool()
+    async def pcb_file_info() -> dict[str, Any]:
+        """The file format version the board was last saved in, and its id."""
+        return await get_bridge().send_command_async("pcb.file_info", {})
+
+    @mcp.tool()
     async def pcb_export_stackup_csv(output_path: str = "") -> dict[str, Any]:
         """Write the layer stackup to a conventional fab CSV report.
 

@@ -268,3 +268,39 @@ def test_a_plain_relaunch_refuses_behind_a_dialog(tmp_path, monkeypatch, capsys)
     assert cli.cmd_relaunch(str(project), force=True) == 1
     assert not launched
     assert "Unsaved Changes" in capsys.readouterr().err
+
+
+def test_a_crashed_handler_is_stopped_first_and_its_progress_file_ignored(
+        tmp_path, monkeypatch, capsys):
+    """A handler that crashed leaves the script parked at a breakpoint and
+    its progress file on disk. Read as a command still running, that file
+    held the restart for the whole long wait before Run > Stop was sent."""
+    from eda_agent.config import configure
+    from eda_agent.ui import windows, dialog_report
+    import eda_agent.diag.doctor as doctor
+    import subprocess
+
+    configure(workspace_dir=tmp_path)
+    (tmp_path / "progress_dead.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(cli, "RESTART_IDLE_STOP_WAIT_S", 0.3)
+    monkeypatch.setattr(cli, "RESTART_STOP_WAIT_S", 30.0)
+    monkeypatch.setattr(windows, "available", lambda: True)
+    monkeypatch.setattr(dialog_report, "report", lambda pid: {"dialog_count": 0})
+    monkeypatch.setattr(windows, "visible_main_frames", lambda pid: [])
+    order = []
+
+    class _P:
+        def wait(self, timeout=None):
+            return 0
+
+    def popen(command, **kw):
+        order.append("stop" if "-REditScript:Stop" in command else "launch")
+        return _P()
+
+    pings = iter([None] + [{"pong": True, "script_version": "v"}] * 5)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(doctor, "_ping_altium", lambda: next(pings))
+    started = time.monotonic()
+    assert cli._restart(["X2.EXE", "-R..."], 4242) == 0
+    assert order == ["stop", "launch"]
+    assert time.monotonic() - started < 10, "waited out the dead handler's progress file"

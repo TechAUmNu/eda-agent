@@ -70,6 +70,47 @@ _HIERARCHY_MODES = ("automatic", "flat", "hierarchical", "global",
                     "strict_hierarchical")
 
 
+#: The STEP exporter settings a script can write, as the bridge names them.
+STEP_OPTIONS = {
+    "folded": bool, "fold_rate": int, "component_option": int,
+    "models_option": int, "holes_option": int, "copper_option": int,
+    "mechanical_pad_holes": bool, "electrical_pad_holes": bool,
+    "free_pad_holes": bool, "barrels_only": bool, "cover_layer": bool,
+    "component_suffix_type": int, "component_suffix": str,
+}
+
+
+def _dir_stamps(folder: str) -> dict[str, float]:
+    """Every file under ``folder`` with its modification time."""
+    import os
+    out: dict[str, float] = {}
+    for root, _dirs, files in os.walk(folder):
+        for f in files:
+            path = os.path.join(root, f)
+            try:
+                out[path] = os.path.getmtime(path)
+            except OSError:
+                pass
+    return out
+
+
+def _step_option_params(options: Optional[dict]) -> dict[str, str]:
+    """STEP exporter settings as bridge parameters; raises on an unknown one."""
+    out: dict[str, str] = {}
+    for name, value in (options or {}).items():
+        kind = STEP_OPTIONS.get(name)
+        if kind is None:
+            raise ValueError(f"unknown STEP option {name!r}; known: {sorted(STEP_OPTIONS)}")
+        if kind is bool:
+            out[name] = "true" if value else "false"
+        elif kind is int:
+            out[name] = str(int(value))
+        else:
+            out[name] = str(value)
+            out["set_component_suffix"] = "true"
+    return out
+
+
 def register_project_tools(mcp):
     """Register project tools with the MCP server."""
 
@@ -1205,7 +1246,8 @@ def register_project_tools(mcp):
     @mcp.tool()
     async def proj_export_step(output_path: str,
                                board_path: str = "",
-                               overwrite: bool = False) -> dict[str, Any]:
+                               overwrite: bool = False,
+                               options: Optional[dict] = None) -> dict[str, Any]:
         """Export a board to a STEP 3D model with Altium's own exporter.
 
         First through Altium's exporter object
@@ -1227,6 +1269,11 @@ def register_project_tools(mcp):
                 Omit it to export the board already in front.
             overwrite: Replace an existing file. Off by default, so an
                 earlier export is never lost by accident.
+            options: Exporter settings to apply first, by the names
+                ``proj_step_export_options`` reads (``folded``,
+                ``fold_rate``, ``copper_option``, ``holes_option`` ...).
+                Altium keeps them for later exports, as the dialog does.
+                Applied on the exporter route only.
 
         Returns:
             ``generated``, ``output_path``, ``size_bytes``, the board that
@@ -1291,7 +1338,8 @@ def register_project_tools(mcp):
         api: dict[str, Any] = {}
         try:
             api = await bridge.send_command_async(
-                "project.export_step_api", {"output_path": output_path},
+                "project.export_step_api",
+                {"output_path": output_path, **_step_option_params(options)},
                 timeout=600.0) or {}
         except AltiumError as e:
             api = {"generated": False, "reason": str(e)}
@@ -2673,6 +2721,7 @@ def register_project_tools(mcp):
         named_only: bool = False,
         limit: int = 500,
         project_path: Optional[str] = None,
+        structure: bool = False,
     ) -> dict[str, Any]:
         """Show what gives each compiled net its name, and where.
 
@@ -2693,6 +2742,13 @@ def register_project_tools(mcp):
             limit: The most nets to list (default 500); ``truncated``
                 says when more were left out.
             project_path: The .PrjPcb. Defaults to the focused project.
+            structure: Add how each net is built, from the compiled
+                model: ``sub_wires``, ``lines``, ``all_items``,
+                ``removed_items``, ``scope``, ``signal_type``,
+                ``calculated_name``, ``hidden_name``, ``bus_width`` and
+                the count of ``output_pins``, ``io_pins``, ``power_pins``
+                and ``open_collector_pins`` it joins (two outputs on one
+                net drive against each other).
 
         Returns:
             ``nets_examined``, ``nets_listed``, ``truncated`` and
@@ -2705,10 +2761,162 @@ def register_project_tools(mcp):
             params["net"] = net.strip()
         if named_only:
             params["named_only"] = "true"
+        if structure:
+            params["structure"] = "true"
         if project_path:
             params["project_path"] = project_path
         return await get_bridge().send_command_async(
             "project.get_net_items", params, timeout=120.0)
+
+    @mcp.tool()
+    async def proj_step_export_options(options: Optional[dict] = None) -> dict[str, Any]:
+        """Read, or change, the settings Altium's STEP exporter keeps.
+
+        These are the settings File > Export > STEP 3D last used, kept
+        between exports: export the folded rigid-flex board, copper,
+        holes, how 3D models and parts are written, and the part name
+        suffix. ``proj_export_step`` uses whatever is set here. Nothing
+        is exported by this call.
+
+        Args:
+            options: Settings to write, by name: ``folded`` (bool),
+                ``fold_rate`` (int), ``component_option``,
+                ``models_option``, ``holes_option``, ``copper_option``
+                (Altium's codes, read them first), ``mechanical_pad_holes``,
+                ``electrical_pad_holes``, ``free_pad_holes``,
+                ``barrels_only``, ``cover_layer`` (bool),
+                ``component_suffix_type`` (int), ``component_suffix``
+                (text). Omit to read only.
+
+        Returns:
+            Every setting as it now reads, ``not_taken`` (names that did
+            not take) and ``read_errors``.
+        """
+        try:
+            params = _step_option_params(options)
+        except (ValueError, TypeError) as e:
+            return {"ok": False, "reason": str(e)}
+        return await get_bridge().send_command_async("project.step_options", params)
+
+    @mcp.tool()
+    async def proj_get_channels(project_path: str = "") -> dict[str, Any]:
+        """List the sheet instances of a multi-channel design, as compiled.
+
+        Every compiled sheet instance with its ``instance`` name,
+        hierarchical ``path``, ``room``, ``channel_prefix``,
+        ``channel_index`` and ``instance_number``, and the project's
+        ``room_naming_style``. A design without repeated channels lists
+        each sheet once.
+
+        Args:
+            project_path: The .PrjPcb. Defaults to the focused project.
+        """
+        params = {"project_path": project_path} if project_path else {}
+        return await get_bridge().send_command_async(
+            "project.get_channels", params, timeout=120.0)
+
+    @mcp.tool()
+    async def proj_component_models(project_path: str = "", designator: str = "",
+                                    limit: int = 300) -> dict[str, Any]:
+        """Show where each part's models resolve, as Altium finds them.
+
+        For each compiled part, each model (footprint, simulation, 3D...)
+        with its name, type, whether it is the current one and whether it
+        comes from an integrated library, and per datafile the library it
+        names, the entity, the kind and ``found_at``: the full path Altium
+        resolves it to, empty when it finds none. ``datafiles_not_found``
+        counts the links that resolve nowhere.
+
+        Args:
+            project_path: The .PrjPcb. Defaults to the focused project.
+            designator: One part. Empty lists every part.
+            limit: The most parts to list (default 300).
+        """
+        if limit < 1:
+            return {"ok": False, "reason": "limit is 1 or more"}
+        params: dict[str, Any] = {"limit": str(limit)}
+        if project_path:
+            params["project_path"] = project_path
+        if designator:
+            params["designator"] = designator
+        return await get_bridge().send_command_async(
+            "project.component_models", params, timeout=180.0)
+
+    @mcp.tool()
+    async def lib_library_manager(action: str, library: str = "", component: str = "",
+                                  destination: str = "", limit: int = 500) -> dict[str, Any]:
+        """Ask Altium's own library manager about a library or a part.
+
+        Args:
+            action: ``locate`` (where Altium finds ``component``, in
+                ``library`` or across the installed ones when it is
+                empty), ``contents`` (the parts of the library at
+                ``library``, a full path, with model counts, whether each
+                has a footprint and its first datafile; Altium reads only
+                a library it has installed or an open project uses, and
+                ``known_to_manager`` says which), or ``extract``
+                (an IntLib at ``library`` back into its source libraries,
+                in ``destination``).
+            library: A library name for locate, a full path otherwise.
+            component: The part, for locate.
+            destination: The folder for extract.
+            limit: The most parts contents lists (default 500).
+        """
+        import os
+        action = (action or "").strip().lower()
+        if action not in ("locate", "contents", "extract"):
+            return {"ok": False, "reason": "action is locate, contents or extract"}
+        before: dict[str, float] = {}
+        if action == "extract":
+            if not destination or not os.path.isabs(destination):
+                return {"ok": False, "reason": "destination must be a full path"}
+            if not library.lower().endswith(".intlib"):
+                return {"ok": False, "reason": "extract takes an .IntLib"}
+            os.makedirs(destination, exist_ok=True)
+            before = _dir_stamps(destination)
+        params = {"action": action, "library": library, "component": component,
+                  "destination": destination, "limit": str(limit)}
+        out = await get_bridge().send_command_async(
+            "project.library_lookup", params, timeout=300.0)
+        if action == "extract" and isinstance(out, dict):
+            after = _dir_stamps(destination)
+            out["files"] = sorted(p for p, t in after.items() if before.get(p) != t)
+        return out
+
+    @mcp.tool()
+    async def proj_output_panel(last: int = 100, clear: bool = False) -> dict[str, Any]:
+        """Read the lines in Altium's Output panel, newest last.
+
+        Altium writes progress and results of many processes there
+        (compiles, generators, scripts). ``clear`` empties the panel after
+        reading, so the next read shows only what came since.
+        """
+        if last < 1:
+            return {"ok": False, "reason": "last is 1 or more"}
+        params = {"last": str(last)}
+        if clear:
+            params["clear"] = "true"
+        return await get_bridge().send_command_async("project.output_panel", params)
+
+    @mcp.tool()
+    async def proj_add_generated_document(file_path: str,
+                                          project_path: str = "") -> dict[str, Any]:
+        """List a file the project produced under its Generated documents.
+
+        For a report, PDF, STEP or drawing written outside an OutJob, so it
+        shows with the project. The file itself is not changed. ``listed``
+        is true once the project holds it.
+        """
+        import os
+        if not file_path or not os.path.isabs(file_path):
+            return {"ok": False, "reason": "file_path must be a full path"}
+        if not os.path.isfile(file_path):
+            return {"ok": False, "reason": f"no file at {file_path}"}
+        params = {"file_path": file_path}
+        if project_path:
+            params["project_path"] = project_path
+        return await get_bridge().send_command_async(
+            "project.add_generated_document", params)
 
     @mcp.tool()
     async def proj_project_setup(

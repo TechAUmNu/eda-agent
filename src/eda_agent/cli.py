@@ -205,13 +205,17 @@ RESTART_IDLE_STOP_WAIT_S = 15.0
 RESTART_PING_WAIT_S = 90.0
 
 
-def _wait_for_loop_to_stop(workspace: Path) -> str:
+def _wait_for_loop_to_stop(workspace: Path, trust_progress: bool = True) -> str:
     """Drop the stop file and wait for the loop to take it.
 
     The loop deletes it between commands, so a command in flight always
     finishes first. Returns "stopped", or "not running" when nothing took
     it and no handler was running (the file is then removed, so a later
     start does not stop at once).
+
+    ``trust_progress`` False ignores progress files: a handler that halted
+    in the debugger leaves its progress file behind, and read as a command
+    still running it held the restart for the whole long wait.
     """
     import time
 
@@ -220,7 +224,7 @@ def _wait_for_loop_to_stop(workspace: Path) -> str:
     start = time.monotonic()
     while stop.exists():
         waited = time.monotonic() - start
-        busy = any(workspace.glob("progress_*.json"))
+        busy = trust_progress and any(workspace.glob("progress_*.json"))
         if waited > RESTART_STOP_WAIT_S or (
                 not busy and waited > RESTART_IDLE_STOP_WAIT_S):
             try:
@@ -320,11 +324,15 @@ def _restart(command: list, frames_pid: int) -> int:
                                   "started": time.time(), "pid": os.getpid()}),
                       encoding="utf-8")
     try:
-        state = _wait_for_loop_to_stop(workspace)
+        # Nothing answers: the script may be parked at a breakpoint after a
+        # handler crashed. Run > Stop it first, so the stop file waits only
+        # the short idle limit, not out a progress file the crash left behind.
+        if ping is None:
+            _stop_halted_script(command)
+        state = _wait_for_loop_to_stop(workspace, trust_progress=ping is not None)
         print(f"The loop {'stopped' if state == 'stopped' else 'was not running'}; "
               f"other sessions' calls are waiting for the new one.")
         if state != "stopped" and ping is None:
-            _stop_halted_script(command)
             print(f"Nothing answered a ping through {workspace}, so any script "
                   f"left halted in Altium was stopped first. If Altium still "
                   f"says \"Another script executing now\", a loop is serving "

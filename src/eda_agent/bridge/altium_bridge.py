@@ -1129,9 +1129,12 @@ class AltiumBridge:
                          "dialogs": probe},
             )
         self._note_fault(workspace_dir, recovery_guidance(DEAD_LOOP))
+        from ..config import pointer_mismatch
+        elsewhere = pointer_mismatch(workspace_dir)
         raise AltiumTimeoutError(
             f"No response within {timeout}s and no progress heartbeat. "
-            + ("The Altium polling loop is probably not running. "
+            + (elsewhere + " " if elsewhere else
+               "The Altium polling loop is probably not running. "
                if not probe else "")
             + recovery_message(DEAD_LOOP)
             + self._dialog_suffix(probe),

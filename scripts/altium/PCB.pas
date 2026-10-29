@@ -6894,22 +6894,6 @@ End;
 { blue swapping is easy to miss on a busy board.                              }
 {..............................................................................}
 
-Function HexDigitValue(Ch : String) : Integer;
-Var
-    O : Integer;
-    U : String;
-Begin
-    Result := -1;
-    If Ch = '' Then Exit;
-    { Materialise before indexing. DelphiScript cannot subscript the       }
-    { RESULT of a function call, so UpperCase(Ch)[1] is a compile error    }
-    { rather than a runtime one.                                            }
-    U := UpperCase(Ch);
-    O := Ord(U[1]);
-    If (O >= Ord('0')) And (O <= Ord('9')) Then Result := O - Ord('0')
-    Else If (O >= Ord('A')) And (O <= Ord('F')) Then Result := 10 + O - Ord('A');
-End;
-
 Function ColorToHexRgb(C : Integer) : String;
 Var
     R, G, B : Integer;
@@ -25181,6 +25165,884 @@ Begin
     Result := Response;
 End;
 
+{ SDK REACH: BOARD PICTURES, TEXT DUMPS, NET FIGURES, GUIDES AND GRIDS,      }
+{ PLANES, DRILL SYMBOLS, PART PARAMETERS, SIMPLE BODIES, BASELINE           }
+{ DIMENSIONS. Each reads its members inside Try, so a member this build     }
+{ does not give scripts costs that field and is counted, not the call.      }
+{ Coordinates are absolute mils, as pcb_place_via takes them.               }
+
+{ A file's age stamp, -1 when it is not there: a write shows as a change. }
+Function SdkFileStamp(Path : String) : Integer;
+Begin
+    Result := -1;
+    Try
+        If FileExists(Path) Then Result := FileAge(Path);
+    Except
+        Result := -1;
+    End;
+End;
+
+{..............................................................................}
+{ PCB_RenderPng - Altium's own picture of the board, written to a PNG.        }
+{ Params: path (required), dpi (default 300), side top|bottom,               }
+{ config_type, config (a view configuration; empty = the current one).       }
+{..............................................................................}
+Function PCB_RenderPng(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    BoardEx : IPCB_BoardEx;
+    Path, Side, CfgType, Cfg, Problem : String;
+    Dpi, Rc, Before, After : Integer;
+Begin
+    Path := ExtractJsonValue(Params, 'path');
+    If Path = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'path is required');
+        Exit;
+    End;
+    Dpi := StrToIntDef(ExtractJsonValue(Params, 'dpi'), 300);
+    If (Dpi < 25) Or (Dpi > 2400) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'dpi must be 25 to 2400');
+        Exit;
+    End;
+    Side := LowerCase(ExtractJsonValue(Params, 'side'));
+    CfgType := ExtractJsonValue(Params, 'config_type');
+    Cfg := ExtractJsonValue(Params, 'config');
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    Before := SdkFileStamp(Path);
+    Rc := -999;
+    Problem := '';
+    Try
+        BoardEx := Board;
+        Rc := BoardEx.RenderToPNG(Path, Dpi, Side <> 'bottom', CfgType, Cfg);
+    Except
+        Problem := 'the renderer raised an error';
+    End;
+    After := SdkFileStamp(Path);
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonBool('written', (After <> -1) And (After <> Before)) + ','
+        + JsonStr('path', Path) + ','
+        + JsonInt('dpi', Dpi) + ','
+        + JsonStr('side', Side) + ','
+        + JsonInt('return_code', Rc) + ','
+        + JsonStr('problem', Problem) + ','
+        + JsonStr('board', Board.FileName)));
+End;
+
+{..............................................................................}
+{ PCB_SaveBoardText - the whole board written as JSON or ASCII text to a      }
+{ separate file. The board document itself is not saved or renamed.         }
+{ Params: path (required), format json|ascii (default json).                  }
+{..............................................................................}
+Function PCB_SaveBoardText(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    BoardEx : IPCB_BoardEx;
+    Path, Fmt, Problem, NameBefore, NameAfter : String;
+    Before, After : Integer;
+Begin
+    Path := ExtractJsonValue(Params, 'path');
+    Fmt := LowerCase(ExtractJsonValue(Params, 'format'));
+    If Fmt = '' Then Fmt := 'json';
+    If Path = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'path is required');
+        Exit;
+    End;
+    If (Fmt <> 'json') And (Fmt <> 'ascii') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'format is json or ascii');
+        Exit;
+    End;
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    If UpperCase(Path) = UpperCase(Board.FileName) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'path is the board itself');
+        Exit;
+    End;
+    NameBefore := Board.FileName;
+    Before := SdkFileStamp(Path);
+    Problem := '';
+    Try
+        BoardEx := Board;
+        If Fmt = 'json' Then BoardEx.SaveToJSONFile(Path)
+        Else BoardEx.SaveToASCIIFile(Path);
+    Except
+        Problem := 'the writer raised an error';
+    End;
+    After := SdkFileStamp(Path);
+    NameAfter := Board.FileName;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonBool('written', (After <> -1) And (After <> Before)) + ','
+        + JsonStr('path', Path) + ','
+        + JsonStr('format', Fmt) + ','
+        + JsonBool('board_name_kept', NameAfter = NameBefore) + ','
+        + JsonStr('problem', Problem)));
+End;
+
+{..............................................................................}
+{ PCB_NetFigures - Altium's own figures per net: routed and signal length,    }
+{ the delays it calculates, vias and pads.                                   }
+{ Params: nets (comma list, optional), limit (default 500).                  }
+{..............................................................................}
+Function PCB_NetFigures(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iter : IPCB_BoardIterator;
+    Net : IPCB_Net;
+    Want, Items, Name : String;
+    Limit, Listed, Misses : Integer;
+    InPair : Boolean;
+    Routed, SigLen : Double;
+    Delay, SigDelay : Double;
+    Vias, Pins : Integer;
+Begin
+    Want := ',' + UpperCase(StringReplace(ExtractJsonValue(Params, 'nets'), ' ', '', -1)) + ',';
+    Limit := StrToIntDef(ExtractJsonValue(Params, 'limit'), 500);
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    Items := '';
+    Listed := 0;
+    Misses := 0;
+    Iter := Board.BoardIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eNetObject));
+        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_Method(eProcessAll);
+        Net := Iter.FirstPCBObject;
+        While Net <> Nil Do
+        Begin
+            Name := Net.Name;
+            If (Want = ',,') Or (Pos(',' + UpperCase(Name) + ',', Want) > 0) Then
+            Begin
+                If Listed >= Limit Then Break;
+                Routed := 0; SigLen := 0; Delay := 0; SigDelay := 0;
+                Vias := 0; Pins := 0; InPair := False;
+                Try Routed := CoordToMilsF(Net.RoutedLength); Except Inc(Misses); End;
+                Try SigLen := Net.GetState_SignalLength / 10000; Except Inc(Misses); End;
+                Try Delay := Net.GetState_DelayTotal; Except Inc(Misses); End;
+                Try SigDelay := Net.GetState_SignalDelay; Except Inc(Misses); End;
+                Try Vias := Net.ViaCount; Except Inc(Misses); End;
+                Try Pins := Net.PinCount; Except Inc(Misses); End;
+                Try InPair := Net.InDifferentialPair; Except Inc(Misses); End;
+                If Items <> '' Then Items := Items + ',';
+                Items := Items + JsonObj(JsonStr('net', Name) + ','
+                    + JsonFloat('routed_length_mils', Routed) + ','
+                    + JsonFloat('signal_length_mils', SigLen) + ','
+                    + JsonFloat('delay_total', Delay) + ','
+                    + JsonFloat('signal_delay', SigDelay) + ','
+                    + JsonInt('vias', Vias) + ','
+                    + JsonInt('pads', Pins) + ','
+                    + JsonBool('in_differential_pair', InPair));
+                Inc(Listed);
+            End;
+            Net := Iter.NextPCBObject;
+        End;
+    Finally
+        Board.BoardIterator_Destroy(Iter);
+    End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonInt('nets_listed', Listed) + ','
+        + JsonInt('read_errors', Misses) + ','
+        + JsonRaw('nets', '[' + Items + ']')));
+End;
+
+{..............................................................................}
+{ PCB_Guides - removes every placement guide and snap point on the board.    }
+{ Scripts can delete guides through the grid manager but not add them.       }
+{ Params: action delete_all.                                                 }
+{..............................................................................}
+Function PCB_Guides(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Mgr : IPCB_GridManager;
+    Action, Problem : String;
+Begin
+    Action := LowerCase(ExtractJsonValue(Params, 'action'));
+    If Action <> 'delete_all' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'action is delete_all');
+        Exit;
+    End;
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    Mgr := Nil;
+    Try Mgr := Board.GetState_GridManager; Except Mgr := Nil; End;
+    If Mgr = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_SUPPORTED', 'The board gives scripts no grid manager');
+        Exit;
+    End;
+    Problem := '';
+    Try
+        Mgr.DeleteAllGuides;
+    Except
+        Problem := 'the grid manager raised an error';
+    End;
+    If Problem = '' Then MarkDocDirtyByPath(Board.FileName);
+    Try Board.GraphicallyInvalidate; Except End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonStr('action', Action) + ','
+        + JsonBool('done', Problem = '') + ','
+        + JsonStr('problem', Problem)));
+End;
+
+{..............................................................................}
+{ PCB_LocalGrid - a cartesian or polar grid for one area of the board.        }
+{ Params: action add_cartesian|add_polar|delete_all|at; x, y (origin, mils), }
+{ name, step_x, step_y, rotation (cartesian); angular_step, radial_step,     }
+{ min_radius, max_radius, start_angle, end_angle (polar).                   }
+{ 'at' reads the grid that applies at x, y.                                  }
+{..............................................................................}
+{ The members every placement grid has, as JSON members (no braces). }
+Function SdkGridCommonJson(G : IPCB_PlacementGrid) : String;
+Var
+    Name : String;
+    Pri, Misses : Integer;
+    IsDefault : Boolean;
+Begin
+    Name := ''; Pri := 0; Misses := 0; IsDefault := False;
+    Try Name := G.GetProperty_NameW; Except Inc(Misses); End;
+    Try Pri := G.GetProperty_Priority; Except Inc(Misses); End;
+    Try IsDefault := G.GetProperty_IsDefault; Except Inc(Misses); End;
+    Result := JsonStr('name', Name) + ','
+        + JsonInt('priority', Pri) + ','
+        + JsonBool('is_default', IsDefault) + ','
+        + JsonInt('read_errors', Misses);
+End;
+
+Function SdkCartesianJson(G : IPCB_CartesianGrid) : String;
+Var
+    StepX, StepY, Rot : Double;
+Begin
+    StepX := 0; StepY := 0; Rot := 0;
+    Try StepX := G.GetProperty_GridStepX; Except End;
+    Try StepY := G.GetProperty_GridStepY; Except End;
+    Try Rot := G.GetProperty_Rotation; Except End;
+    Result := JsonObj(SdkGridCommonJson(G) + ','
+        + JsonStr('kind', 'cartesian') + ','
+        + JsonFloat('step_x_mils', StepX / 10000) + ','
+        + JsonFloat('step_y_mils', StepY / 10000) + ','
+        + JsonFloat('rotation', Rot));
+End;
+
+Function SdkPolarJson(G : IPCB_PolarGrid) : String;
+Var
+    AStep, RStep, RMin, RMax, A1, A2 : Double;
+Begin
+    AStep := 0; RStep := 0; RMin := 0; RMax := 0; A1 := 0; A2 := 0;
+    Try AStep := G.GetProperty_AngularStep; Except End;
+    Try RStep := G.GetProperty_RadialStep; Except End;
+    Try RMin := G.GetProperty_MinRadius; Except End;
+    Try RMax := G.GetProperty_MaxRadius; Except End;
+    Try A1 := G.GetProperty_StartAngle; Except End;
+    Try A2 := G.GetProperty_EndAngle; Except End;
+    Result := JsonObj(SdkGridCommonJson(G) + ','
+        + JsonStr('kind', 'polar') + ','
+        + JsonFloat('angular_step', AStep) + ','
+        + JsonFloat('radial_step_mils', RStep / 10000) + ','
+        + JsonFloat('min_radius_mils', RMin / 10000) + ','
+        + JsonFloat('max_radius_mils', RMax / 10000) + ','
+        + JsonFloat('start_angle', A1) + ','
+        + JsonFloat('end_angle', A2));
+End;
+
+Function PCB_LocalGrid(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Mgr : IPCB_GridManager;
+    G : IPCB_PlacementGrid;
+    CG : IPCB_CartesianGrid;
+    PG : IPCB_PolarGrid;
+    Action, Name, Problem, Body, V : String;
+    X, Y : Integer;
+Begin
+    Action := LowerCase(ExtractJsonValue(Params, 'action'));
+    If Pos('|' + Action + '|', '|add_cartesian|add_polar|delete_all|at|') = 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM',
+            'action is add_cartesian, add_polar, delete_all or at');
+        Exit;
+    End;
+    X := MilsToCoordF(StrToFloatDef(ExtractJsonValue(Params, 'x'), 0));
+    Y := MilsToCoordF(StrToFloatDef(ExtractJsonValue(Params, 'y'), 0));
+    Name := ExtractJsonValue(Params, 'name');
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    Mgr := Nil;
+    Try Mgr := Board.GetState_GridManager; Except Mgr := Nil; End;
+    If Mgr = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_SUPPORTED', 'The board gives scripts no grid manager');
+        Exit;
+    End;
+    Problem := '';
+    If Action = 'delete_all' Then
+    Begin
+        Try Mgr.DeleteAllGrids; Except Problem := 'the grid manager raised an error'; End;
+        If Problem = '' Then MarkDocDirtyByPath(Board.FileName);
+        Result := BuildSuccessResponse(RequestId, JsonObj(JsonStr('action', Action) + ','
+            + JsonBool('done', Problem = '') + ',' + JsonStr('problem', Problem)));
+        Exit;
+    End;
+    If Action = 'at' Then
+    Begin
+        G := Nil;
+        Try G := Mgr.FindApplicableGridByXY(X, Y); Except G := Nil; End;
+        If G = Nil Then
+        Begin
+            Result := BuildSuccessResponse(RequestId, JsonObj(JsonBool('found', False)));
+            Exit;
+        End;
+        Result := BuildSuccessResponse(RequestId, JsonObj(JsonBool('found', True) + ','
+            + JsonRaw('grid', JsonObj(SdkGridCommonJson(G)))));
+        Exit;
+    End;
+    If Action = 'add_polar' Then
+    Begin
+        PG := Nil;
+        Try PG := Mgr.AddPolarGrid; Except PG := Nil; End;
+        If PG = Nil Then
+        Begin
+            Result := BuildSuccessResponse(RequestId, JsonObj(JsonBool('done', False) + ','
+                + JsonStr('problem', 'the grid manager made no polar grid')));
+            Exit;
+        End;
+        Try PG.SetProperty_Origin(Point(X, Y)); Except Problem := Problem + 'origin '; End;
+        If Name <> '' Then
+        Begin
+            Try PG.SetProperty_NameW(Name); Except Problem := Problem + 'name '; End;
+        End;
+        V := ExtractJsonValue(Params, 'angular_step');
+        If V <> '' Then
+        Begin
+            Try PG.SetProperty_AngularStep(StrToFloatDef(V, 15)); Except Problem := Problem + 'angular_step '; End;
+        End;
+        V := ExtractJsonValue(Params, 'radial_step');
+        If V <> '' Then
+        Begin
+            Try PG.SetProperty_RadialStep(MilsToCoordF(StrToFloatDef(V, 50))); Except Problem := Problem + 'radial_step '; End;
+        End;
+        V := ExtractJsonValue(Params, 'min_radius');
+        If V <> '' Then
+        Begin
+            Try PG.SetProperty_MinRadius(MilsToCoordF(StrToFloatDef(V, 0))); Except Problem := Problem + 'min_radius '; End;
+        End;
+        V := ExtractJsonValue(Params, 'max_radius');
+        If V <> '' Then
+        Begin
+            Try PG.SetProperty_MaxRadius(MilsToCoordF(StrToFloatDef(V, 1000))); Except Problem := Problem + 'max_radius '; End;
+        End;
+        V := ExtractJsonValue(Params, 'start_angle');
+        If V <> '' Then
+        Begin
+            Try PG.SetProperty_StartAngle(StrToFloatDef(V, 0)); Except Problem := Problem + 'start_angle '; End;
+        End;
+        V := ExtractJsonValue(Params, 'end_angle');
+        If V <> '' Then
+        Begin
+            Try PG.SetProperty_EndAngle(StrToFloatDef(V, 360)); Except Problem := Problem + 'end_angle '; End;
+        End;
+        Body := SdkPolarJson(PG);
+    End
+    Else
+    Begin
+        CG := Nil;
+        Try CG := Mgr.AddCartesianGrid; Except CG := Nil; End;
+        If CG = Nil Then
+        Begin
+            Result := BuildSuccessResponse(RequestId, JsonObj(JsonBool('done', False) + ','
+                + JsonStr('problem', 'the grid manager made no cartesian grid')));
+            Exit;
+        End;
+        Try CG.SetProperty_Origin(Point(X, Y)); Except Problem := Problem + 'origin '; End;
+        If Name <> '' Then
+        Begin
+            Try CG.SetProperty_NameW(Name); Except Problem := Problem + 'name '; End;
+        End;
+        V := ExtractJsonValue(Params, 'step_x');
+        If V <> '' Then
+        Begin
+            Try CG.SetProperty_GridStepX(MilsToCoordF(StrToFloatDef(V, 5))); Except Problem := Problem + 'step_x '; End;
+        End;
+        V := ExtractJsonValue(Params, 'step_y');
+        If V <> '' Then
+        Begin
+            Try CG.SetProperty_GridStepY(MilsToCoordF(StrToFloatDef(V, 5))); Except Problem := Problem + 'step_y '; End;
+        End;
+        V := ExtractJsonValue(Params, 'rotation');
+        If V <> '' Then
+        Begin
+            Try CG.SetProperty_Rotation(StrToFloatDef(V, 0)); Except Problem := Problem + 'rotation '; End;
+        End;
+        Body := SdkCartesianJson(CG);
+    End;
+    Try Mgr.ResolveGridPriorities; Except End;
+    MarkDocDirtyByPath(Board.FileName);
+    Try Board.GraphicallyInvalidate; Except End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(JsonStr('action', Action) + ','
+        + JsonBool('done', True) + ','
+        + JsonRaw('grid', Body) + ','
+        + JsonStr('not_taken', Trim(Problem))));
+End;
+
+{..............................................................................}
+{ PCB_PlaneState - per internal plane layer, whether Altium holds it        }
+{ poured.                                                                    }
+{..............................................................................}
+Function PCB_PlaneState(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    BoardEx : IPCB_BoardEx;
+    LayerObj : IPCB_LayerObject_V7;
+    Items : String;
+    Lyr : TLayer;
+    Poured : Boolean;
+    Misses, Planes : Integer;
+Begin
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    Items := '';
+    Misses := 0;
+    Planes := 0;
+    BoardEx := Board;
+    LayerObj := Board.LayerStack_V7.FirstLayer;
+    While LayerObj <> Nil Do
+    Begin
+        Lyr := LayerObj.LayerID;
+        If (Lyr >= eInternalPlane1) And (Lyr <= eInternalPlane16) Then
+        Begin
+            Inc(Planes);
+            Poured := False;
+            Try Poured := BoardEx.IsPlaneLayerIsPoured(Lyr); Except Inc(Misses); End;
+            If Items <> '' Then Items := Items + ',';
+            Items := Items + JsonObj(JsonStr('layer', LayerObj.Name) + ','
+                + JsonBool('poured', Poured));
+        End;
+        LayerObj := Board.LayerStack_V7.NextLayer(LayerObj);
+    End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonInt('plane_layers', Planes) + ','
+        + JsonInt('read_errors', Misses) + ','
+        + JsonRaw('planes', '[' + Items + ']')));
+End;
+
+{..............................................................................}
+{ PCB_HoleSymbols - show or hide the drill symbols Altium draws on holes.     }
+{ Params: show 'true'|'false', symbol_size (mils, default 50), symbol_type   }
+{ (Altium's code, default 0), layer_pair (index, default 0).                  }
+{..............................................................................}
+Function PCB_HoleSymbols(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Show, Problem : String;
+    SymSize, SymType, Pair : Integer;
+Begin
+    Show := LowerCase(ExtractJsonValue(Params, 'show'));
+    If (Show <> 'true') And (Show <> 'false') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'show is true or false');
+        Exit;
+    End;
+    SymSize := MilsToCoordF(StrToFloatDef(ExtractJsonValue(Params, 'symbol_size'), 50));
+    SymType := StrToIntDef(ExtractJsonValue(Params, 'symbol_type'), 0);
+    Pair := StrToIntDef(ExtractJsonValue(Params, 'layer_pair'), 0);
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    Problem := '';
+    Try
+        If Show = 'true' Then Board.ShowHoleSymbols(SymType, SymSize, Pair)
+        Else Board.HideHoleSymbols;
+    Except
+        Problem := 'the board raised an error';
+    End;
+    Try Board.GraphicallyInvalidate; Except End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonBool('shown', Show = 'true') + ','
+        + JsonBool('done', Problem = '') + ','
+        + JsonStr('problem', Problem)));
+End;
+
+{..............................................................................}
+{ PCB_ComponentParameters - the parameters a placed part carries on the      }
+{ board: read, set or remove. Params: designator (required), action          }
+{ list|set|remove, name, value.                                              }
+{..............................................................................}
+Function PCB_ComponentParameters(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Comp : IPCB_Component;
+    Factory : IPCB_ParametersFactory;
+    Prims : IPCB_PrimitiveParameters;
+    Prm : IPCB_Parameter;
+    Desig, Action, PName, PValue, Items, Problem, Got, ReadBack, Name : String;
+    I, Count : Integer;
+    Present : Boolean;
+Begin
+    Desig := ExtractJsonValue(Params, 'designator');
+    Action := LowerCase(ExtractJsonValue(Params, 'action'));
+    If Action = '' Then Action := 'list';
+    PName := ExtractJsonValue(Params, 'name');
+    PValue := ExtractJsonValue(Params, 'value');
+    If Desig = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'designator is required');
+        Exit;
+    End;
+    If (Action <> 'list') And (Action <> 'set') And (Action <> 'remove') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'action is list, set or remove');
+        Exit;
+    End;
+    If (Action <> 'list') And (PName = '') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'name is required to set or remove');
+        Exit;
+    End;
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    Comp := Nil;
+    Try Comp := Board.GetPcbComponentByRefDes(Desig); Except Comp := Nil; End;
+    If Comp = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND', 'No part ' + Desig + ' on the board');
+        Exit;
+    End;
+    Factory := Nil;
+    Prims := Nil;
+    Try Factory := PCBServer.GetParametersFactory; Except Factory := Nil; End;
+    If Factory <> Nil Then
+    Begin
+        Try Prims := Factory.CreatePrimitiveParametersWithoutVariant(Comp); Except Prims := Nil; End;
+    End;
+    If Prims = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_SUPPORTED',
+            'This Altium build gives scripts no parameters of a placed part');
+        Exit;
+    End;
+    Problem := '';
+    If Action = 'set' Then
+    Begin
+        PCBServer.PreProcess;
+        Try
+            Try Prims.SetOrNewValueByName(PName, PValue); Except Problem := 'the value was not taken'; End;
+        Finally
+            PCBServer.PostProcess;
+        End;
+        If Problem = '' Then MarkDocDirtyByPath(Board.FileName);
+    End;
+    If Action = 'remove' Then
+    Begin
+        PCBServer.PreProcess;
+        Try
+            Try
+                If Not Prims.TryRemoveByName(PName) Then Problem := 'no parameter of that name';
+            Except
+                Problem := 'the parameter was not removed';
+            End;
+        Finally
+            PCBServer.PostProcess;
+        End;
+        If Problem = '' Then MarkDocDirtyByPath(Board.FileName);
+    End;
+    { The read-back comes from the same walk as the list: the getter by    }
+    { name is not given to scripts and halts the loop.                     }
+    Items := '';
+    ReadBack := '';
+    Present := False;
+    Count := 0;
+    Try Count := Prims.Count; Except Count := 0; End;
+    For I := 0 To Count - 1 Do
+    Begin
+        Prm := Nil;
+        Try Prm := Prims.GetParameterByIndex(I); Except Prm := Nil; End;
+        If Prm = Nil Then Continue;
+        If Items <> '' Then Items := Items + ',';
+        Got := '';
+        Name := '';
+        Try Got := Prm.GetValue; Except End;
+        Try Name := Prm.GetName; Except End;
+        If (PName <> '') And SameText(Name, PName) Then
+        Begin
+            Present := True;
+            ReadBack := Got;
+        End;
+        Items := Items + JsonObj(JsonStr('name', Name) + ',' + JsonStr('value', Got));
+    End;
+    If (Action = 'set') And (Problem = '') And ((Not Present) Or (ReadBack <> PValue)) Then
+        Problem := 'the value does not read back';
+    If (Action = 'remove') And (Problem = '') And Present Then
+        Problem := 'the parameter is still there';
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonStr('designator', Desig) + ','
+        + JsonStr('action', Action) + ','
+        + JsonBool('done', Problem = '') + ','
+        + JsonStr('problem', Problem) + ','
+        + JsonStr('read_back', ReadBack) + ','
+        + JsonBool('present', Present) + ','
+        + JsonRaw('parameters', '[' + Items + ']')));
+End;
+
+{..............................................................................}
+{ PCB_PlaceSimpleBody - a cylinder or sphere 3D body on the board, made by   }
+{ Altium's own model factory: no STEP file. Params: shape cylinder|sphere,  }
+{ x, y (centre, mils), radius, height (cylinder), standoff (mils), layer     }
+{ (default Mechanical1), side top|bottom, color (BGR integer), identifier.   }
+{..............................................................................}
+Function PCB_PlaceSimpleBody(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Body : IPCB_ComponentBody;
+    Model : IPCB_Model;
+    Shape, LayerStr, Ident, Problem : String;
+    X, Y, Radius, Height, Standoff : Double;
+    Color : Integer;
+    TargetLayer : TLayer;
+Begin
+    Shape := LowerCase(ExtractJsonValue(Params, 'shape'));
+    If (Shape <> 'cylinder') And (Shape <> 'sphere') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'shape is cylinder or sphere');
+        Exit;
+    End;
+    X := StrToFloatDef(ExtractJsonValue(Params, 'x'), 0);
+    Y := StrToFloatDef(ExtractJsonValue(Params, 'y'), 0);
+    Radius := StrToFloatDef(ExtractJsonValue(Params, 'radius'), 0);
+    Height := StrToFloatDef(ExtractJsonValue(Params, 'height'), 0);
+    Standoff := StrToFloatDef(ExtractJsonValue(Params, 'standoff'), 0);
+    Color := StrToIntDef(ExtractJsonValue(Params, 'color'), $00808080);
+    Ident := ExtractJsonValue(Params, 'identifier');
+    LayerStr := ExtractJsonValue(Params, 'layer');
+    If LayerStr = '' Then LayerStr := 'Mechanical1';
+    If (Radius <= 0) Or ((Shape = 'cylinder') And (Height <= 0)) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM',
+            'radius (and height for a cylinder) must be above 0');
+        Exit;
+    End;
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    TargetLayer := ResolveLayerId(Board, LayerStr);
+    If TargetLayer = eNoLayer Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'UNKNOWN_LAYER',
+            'Unknown layer name: ' + LayerStr + '. ' + BoardLayerNamesHint(Board));
+        Exit;
+    End;
+    Problem := '';
+    Body := Nil;
+    PCBServer.PreProcess;
+    Try
+        Body := PCBServer.PCBObjectFactory(eComponentBodyObject, eNoDimension, eCreate_Default);
+        If Body <> Nil Then
+        Begin
+            Body.Layer := TargetLayer;
+            Body.StandoffHeight := MilsToCoordF(Standoff);
+            If LowerCase(ExtractJsonValue(Params, 'side')) = 'bottom' Then
+                Body.BodyProjection := eBoardSide_Bottom
+            Else
+                Body.BodyProjection := eBoardSide_Top;
+            Body.BodyColor3D := Color;
+            Body.BodyOpacity3D := 1.0;
+            If Ident <> '' Then Body.SetState_Identifier(Ident);
+            Model := Nil;
+            Try
+                If Shape = 'cylinder' Then
+                    Model := Body.ModelFactory_CreateCylinder(MilsToCoordF(Radius), MilsToCoordF(Height), Color)
+                Else
+                    Model := Body.ModelFactory_CreateSphere(MilsToCoordF(Radius), Color);
+            Except
+                Model := Nil;
+                Problem := 'the model factory raised an error';
+            End;
+            If Model <> Nil Then
+            Begin
+                Body.SetState_FromModel;
+                Body.Model := Model;
+                Body.MoveToXY(MilsToCoordF(X), MilsToCoordF(Y));
+                Board.AddPCBObject(Body);
+                PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                    PCBM_BoardRegisteration, Body.I_ObjectAddress);
+            End
+            Else
+            Begin
+                If Problem = '' Then Problem := 'the model factory made no model';
+            End;
+        End
+        Else
+            Problem := 'no body could be created';
+    Finally
+        PCBServer.PostProcess;
+    End;
+    If Problem = '' Then MarkDocDirtyByPath(Board.FileName);
+    Try Board.GraphicallyInvalidate; Except End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonBool('placed', Problem = '') + ','
+        + JsonStr('shape', Shape) + ','
+        + JsonFloat('x', X) + ',' + JsonFloat('y', Y) + ','
+        + JsonFloat('radius', Radius) + ','
+        + JsonFloat('height', Height) + ','
+        + JsonStr('layer', LayerStr) + ','
+        + JsonStr('identifier', Ident) + ','
+        + JsonStr('problem', Problem)));
+End;
+
+{..............................................................................}
+{ PCB_PlaceBaselineDimension - one dimension measuring several points from a }
+{ common base. Params: x, y (base, mils), points 'x,y/x,y/...' (mils),       }
+{ layer (default TopOverlay), rotation (degrees, 0 = along X).               }
+{..............................................................................}
+Function PCB_PlaceBaselineDimension(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Dim : IPCB_BaselineDimension;
+    PointsStr, Pair, LayerStr, Problem, Rest : String;
+    X, Y, PX, PY, Rot : Double;
+    TargetLayer : TLayer;
+    Added, Count, Cut, Comma : Integer;
+Begin
+    X := StrToFloatDef(ExtractJsonValue(Params, 'x'), 0);
+    Y := StrToFloatDef(ExtractJsonValue(Params, 'y'), 0);
+    Rot := StrToFloatDef(ExtractJsonValue(Params, 'rotation'), 0);
+    PointsStr := ExtractJsonValue(Params, 'points');
+    LayerStr := ExtractJsonValue(Params, 'layer');
+    If LayerStr = '' Then LayerStr := 'TopOverlay';
+    If PointsStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'points is required: x,y/x,y/...');
+        Exit;
+    End;
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    TargetLayer := ResolveLayerId(Board, LayerStr);
+    If TargetLayer = eNoLayer Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'UNKNOWN_LAYER',
+            'Unknown layer name: ' + LayerStr + '. ' + BoardLayerNamesHint(Board));
+        Exit;
+    End;
+    Problem := '';
+    Added := 0;
+    Count := -1;
+    PCBServer.PreProcess;
+    Try
+        Dim := PCBServer.PCBObjectFactory(eDimensionObject, eBaselineDimension, eCreate_Default);
+        If Dim = Nil Then
+            Problem := 'no baseline dimension could be created'
+        Else
+        Begin
+            Dim.Layer := TargetLayer;
+            Dim.X1Location := MilsToCoordF(X);
+            Dim.Y1Location := MilsToCoordF(Y);
+            Try Dim.SetState_Angle(Rot); Except Problem := 'rotation not taken'; End;
+            Rest := PointsStr + '/';
+            While Pos('/', Rest) > 0 Do
+            Begin
+                Cut := Pos('/', Rest);
+                Pair := Trim(Copy(Rest, 1, Cut - 1));
+                Rest := Copy(Rest, Cut + 1, Length(Rest));
+                If Pair = '' Then Continue;
+                Comma := Pos(',', Pair);
+                If Comma = 0 Then Continue;
+                PX := StrToFloatDef(Copy(Pair, 1, Comma - 1), 0);
+                PY := StrToFloatDef(Copy(Pair, Comma + 1, Length(Pair)), 0);
+                Try
+                    Dim.TextLocations_Add(Point(MilsToCoordF(PX), MilsToCoordF(PY)));
+                    Inc(Added);
+                Except
+                    Problem := 'a point was not taken';
+                End;
+            End;
+            Try Count := Dim.GetState_TextLocationsCount; Except Count := -1; End;
+            Board.AddPCBObject(Dim);
+            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                PCBM_BoardRegisteration, Dim.I_ObjectAddress);
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+    If Problem = '' Then MarkDocDirtyByPath(Board.FileName);
+    Try Board.GraphicallyInvalidate; Except End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonBool('placed', (Problem = '') And (Added > 0)) + ','
+        + JsonInt('points_sent', Added) + ','
+        + JsonInt('points_read_back', Count) + ','
+        + JsonStr('layer', LayerStr) + ','
+        + JsonStr('problem', Problem)));
+End;
+
+{..............................................................................}
+{ PCB_FileInfo - the file format version the board was last saved in, and   }
+{ the id Altium gives it while it is open.                                  }
+{..............................................................................}
+Function PCB_FileInfo(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Version : Double;
+    Id, Misses : Integer;
+Begin
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    Version := 0;
+    Id := -1;
+    Misses := 0;
+    Try Version := Board.BoardVersion; Except Inc(Misses); End;
+    Try Id := Board.BoardID; Except Inc(Misses); End;
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonStr('board', Board.FileName) + ','
+        + JsonFloat('file_version', Version) + ','
+        + JsonInt('board_id', Id) + ','
+        + JsonInt('read_errors', Misses)));
+End;
+
 {..............................................................................}
 { HandlePCBCommand - Route PCB actions to handlers                            }
 {..............................................................................}
@@ -25233,6 +26095,17 @@ Begin
         'get_trace_lengths':       Result := PCB_GetTraceLengths(Params, RequestId);
         'get_layer_stackup':       Result := PCB_GetLayerStackup(Params, RequestId);
         'get_impedance_profiles':  Result := PCB_GetImpedanceProfiles(Params, RequestId);
+        'render_png':              Result := PCB_RenderPng(Params, RequestId);
+        'save_board_text':         Result := PCB_SaveBoardText(Params, RequestId);
+        'net_figures':             Result := PCB_NetFigures(Params, RequestId);
+        'guides':                  Result := PCB_Guides(Params, RequestId);
+        'local_grid':              Result := PCB_LocalGrid(Params, RequestId);
+        'plane_state':             Result := PCB_PlaneState(Params, RequestId);
+        'hole_symbols':            Result := PCB_HoleSymbols(Params, RequestId);
+        'component_parameters':    Result := PCB_ComponentParameters(Params, RequestId);
+        'place_simple_body':       Result := PCB_PlaceSimpleBody(Params, RequestId);
+        'place_baseline_dimension': Result := PCB_PlaceBaselineDimension(Params, RequestId);
+        'file_info':               Result := PCB_FileInfo(Params, RequestId);
         'find_dominant_rule':      Result := PCB_FindDominantRule(Params, RequestId);
         'rule_scope_check':        Result := PCB_RuleScopeCheck(Params, RequestId);
         'clean_net':               Result := PCB_CleanNet(Params, RequestId);

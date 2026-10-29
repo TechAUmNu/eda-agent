@@ -1,4 +1,4 @@
-# Release verification: 2026.10.29.1
+# Release verification: 2026.10.29.7
 
 Unless a section records live verification explicitly, the Pascal below has
 been checked by FPC and the linter but **not executed by Altium's DelphiScript engine**. The two are not the
@@ -222,6 +222,12 @@ works elsewhere cannot be an undeclared identifier:
 | 57, layer display | `IsInLayerStack` on a layer | no, nowhere | none, read only; ran live |
 | 57, class members | `DM_Members` on a compiled object class | no, nowhere | none, read only |
 | 57, net directives | `DM_Directives` on a compiled net | no, nowhere | none, read only; ran live |
+| 60, part parameters on the board | `SetOrNewValueByName`, `TryRemoveByName` on a placed part's parameters | no, nowhere | low, one part; ran live on a scratch board, read back from the list, unsaved |
+| 60, local grids | `SetProperty_GridStepX`, `SetProperty_AngularStep` on a new grid | no, nowhere | low, the new grid only; ran live and deleted |
+| 60, baseline dimension | `SetState_Angle` on a new baseline dimension | no, nowhere | low, the new dimension only; ran live, four text locations read back |
+| 60, guides | `DeleteAllGuides` on the board's grid manager | no, nowhere | low, removes guides only; ran live |
+| 60, STEP settings | `SetState_ExportFoldedBoard` on the STEP exporter | no, nowhere | low, Altium's kept export settings; ran live, written back unchanged |
+| 60, generated documents | `DM_AddGeneratedDocument` on a project | no, nowhere | low, lists a file under Generated; ran live on a scratch project, unsaved |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -397,7 +403,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.10.29.1`, `version_match` =
+Expect `altium_script_version` = `2026.10.29.7`, `version_match` =
 `true`, and `mcp_server_version` = `0.7.1`.
 
 Those are two different versions and they fail differently.
@@ -3408,6 +3414,42 @@ Live1023 project: the button wrote `{"saving":"off"}` and turned amber;
 `Live1023.PrjPcb` as not saved; a detach after a net label wrote nothing;
 no file in the folder changed. After a bridge restart the button still
 read off. Switched back on, `app_save_document` wrote the scratch sheet.
+
+## 60. Further SDK reach: board pictures, net figures, grids, part parameters, library manager
+
+New board tools: `pcb_render_png`, `pcb_save_board_text`,
+`pcb_net_figures`, `pcb_clear_guides`, `pcb_local_grid`,
+`pcb_plane_state`, `pcb_hole_symbols`, `pcb_component_parameters`,
+`pcb_place_simple_body`, `pcb_place_baseline_dimension`,
+`pcb_file_info`. New project tools: `proj_step_export_options` (and an
+`options` argument on `proj_export_step`), `proj_get_channels`,
+`proj_component_models`, `lib_library_manager`, `proj_output_panel`,
+`proj_add_generated_document`, and a `structure` argument on
+`proj_get_net_items`. The lint now refuses a routine defined twice in the
+script, since the later one silently takes every call.
+
+Run live on AD 26.11.1.5 with the 29 October script on a scratch copy of
+RoundLED: the PNG matched the board; the JSON (9.8 MB) and ASCII dumps
+were written beside it; net figures gave routed and signal lengths and
+delays for VBUS and USB_DP; polar and cartesian grids were added, found at
+a point and deleted; drill symbols shown and hidden; a cylinder and a
+sphere body placed; a baseline dimension read back four text locations;
+the file version read 5.01; both plane layers read unpoured. On C1 a
+parameter was set (read back 43), removed (gone from the list), and a
+second remove answered "no parameter of that name". STEP settings read
+and wrote back unchanged. Channels, part models, net structure, the
+Output panel and adding a generated document answered. The library
+manager located a part, extracted an IntLib, listed 218 parts of an
+installed library, and said `known_to_manager: false` with a reason for a
+library it does not hold. `proj_run_output` still answers through its own
+handler.
+
+Not reachable from scripts, so not offered: adding guides or snap points
+(only deletion is given), net resistance and current, the DRC checker's
+options, variant groups, the file feature list, and running one output
+generator without an OutJob (`DM_Generate_OutputFilesTo` wrote nothing for
+Gerber or NC Drill, with or without the OutJob's own settings string; use
+`proj_run_outjob`).
 
 ## Still open, and not blocking
 
